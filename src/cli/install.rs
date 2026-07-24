@@ -784,6 +784,9 @@ async fn rollback_install(
                 Err(_) => failed = true,
             },
             Ok(Presence::Absent) => {}
+            Ok(Presence::NeedsUpdate) => {
+                // A concurrently replaced managed entry is not ours to remove.
+            }
             Err(error) if error.code == crate::ErrorCode::InvalidConfig => {
                 // A concurrently replaced entry is not ours to remove.
             }
