@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Make the packaged bridge find `remote-helpers/` when launched through the stable symlink in `~/.local/bin`.
+**Goal:** Make the packaged bridge find the sibling `remote-helpers/` directory when launched through the stable symlink in `~/.local/bin`.
 
-**Architecture:** Keep `CODEX_SSH_BRIDGE_HELPERS_DIR` as the explicit override. For the default path, canonicalize the executable before taking its parent directory, so versioned package assets remain discoverable through a symlink. Add a focused unit regression test for a symlinked executable path.
+**Architecture:** Keep `CODEX_SSH_BRIDGE_HELPERS_DIR` as the explicit override. For the default path, canonicalize the executable, walk from `bin/` to the bundle root, and append the sibling `remote-helpers/` directory so versioned package assets remain discoverable through a symlink. Add a focused unit regression test for a symlinked executable path and the packaged layout.
 
 **Tech Stack:** Rust 2024, standard library filesystem APIs, existing GitHub CI.
 
@@ -27,16 +27,16 @@ Create a temporary versioned executable path and a stable symlink, then assert t
 
 The local test run is intentionally omitted per the project constraint; CI must execute the test.
 
-### Task 2: Canonicalize the default executable path
+### Task 2: Resolve the sibling helper directory
 
 **Files:**
 - Modify: `src/ssh/helper.rs:327-339`
 
-- [ ] **Step 1: Extract `helper_directory_from_executable`**
+- [x] **Step 1: Extract `helper_directory_from_executable`**
 
-Canonicalize the executable path before taking its parent, preserving the explicit environment override unchanged.
+Canonicalize the executable path, walk through its `bin/` parent to the bundle root, and append `remote-helpers`, preserving the explicit environment override unchanged.
 
-- [ ] **Step 2: Route `helper_directory` through the extracted function**
+- [x] **Step 2: Route `helper_directory` through the extracted function**
 
 Return the same error class for missing or invalid executable paths.
 

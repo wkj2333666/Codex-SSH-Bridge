@@ -334,10 +334,13 @@ pub(crate) fn helper_directory() -> BridgeResult<PathBuf> {
 
 fn helper_directory_from_executable(executable: &Path) -> BridgeResult<PathBuf> {
     let executable = fs::canonicalize(executable).map_err(BridgeError::io)?;
-    executable
+    let bin_directory = executable
         .parent()
-        .map(|parent| parent.join(HELPER_DIRECTORY_NAME))
-        .ok_or_else(|| BridgeError::invalid_config("bridge executable has no parent directory"))
+        .ok_or_else(|| BridgeError::invalid_config("bridge executable has no parent directory"))?;
+    let bundle = bin_directory
+        .parent()
+        .ok_or_else(|| BridgeError::invalid_config("bridge bundle has no parent directory"))?;
+    Ok(bundle.join(HELPER_DIRECTORY_NAME))
 }
 
 fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
@@ -420,19 +423,18 @@ mod tests {
     #[test]
     fn helper_directory_resolves_the_real_executable_behind_a_stable_symlink() {
         let temporary = tempfile::tempdir().unwrap();
-        let versioned_bin = temporary.path().join("releases/0.2.7/bin/codex-ssh-bridge");
+        let bundle = temporary.path().join("releases/0.2.7");
+        let versioned_bin = bundle.join("bin/codex-ssh-bridge");
         std::fs::create_dir_all(versioned_bin.parent().unwrap()).unwrap();
         std::fs::write(&versioned_bin, b"bridge").unwrap();
+        std::fs::create_dir_all(bundle.join(HELPER_DIRECTORY_NAME)).unwrap();
         let stable_bin = temporary.path().join("bin/codex-ssh-bridge");
         std::fs::create_dir_all(stable_bin.parent().unwrap()).unwrap();
         symlink(&versioned_bin, &stable_bin).unwrap();
 
         let helper_directory = helper_directory_from_executable(&stable_bin).unwrap();
 
-        assert_eq!(
-            helper_directory,
-            versioned_bin.parent().unwrap().join(HELPER_DIRECTORY_NAME)
-        );
+        assert_eq!(helper_directory, bundle.join(HELPER_DIRECTORY_NAME));
     }
 
     #[test]
