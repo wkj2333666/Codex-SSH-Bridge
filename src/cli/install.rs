@@ -1006,8 +1006,12 @@ fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
     let destination = CString::new(destination.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
     // SAFETY: both C strings are NUL-terminated and remain alive for the syscall.
+    // Calling the raw Linux syscall keeps this portable across libc targets
+    // whose Rust bindings do not expose the `renameat2` wrapper.
+    #[cfg(target_os = "linux")]
     let result = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             source.as_ptr(),
             libc::AT_FDCWD,
@@ -1015,6 +1019,8 @@ fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
             libc::RENAME_NOREPLACE,
         )
     };
+    #[cfg(not(target_os = "linux"))]
+    let result = -1;
     if result == 0 {
         Ok(())
     } else {
