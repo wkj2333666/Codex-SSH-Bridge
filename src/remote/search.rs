@@ -71,17 +71,21 @@ producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
 head_status=$?
-cat <&3 >/dev/null
-drain_status=$?
+bytes=$(wc -c <"$data")
+capped=0
+if [ "$bytes" -eq "$limit" ]; then capped=1; fi
 exec 3<&-
+if [ "$capped" -eq 1 ]; then
+    kill "$producer" 2>/dev/null || true
+fi
 wait "$producer" 2>/dev/null
 wait_status=$?
-bytes=$(wc -c <"$data")
 producer_status=$(cat "$status" 2>/dev/null || printf 2)
-if [ "$head_status" -ne 0 ] || [ "$drain_status" -ne 0 ] ||
-   [ "$wait_status" -ne 0 ] || [ "$producer_status" -ne 0 ]; then exit 2; fi
+if [ "$head_status" -ne 0 ]; then exit 2; fi
+if [ "$capped" -eq 0 ] &&
+   { [ "$wait_status" -ne 0 ] || [ "$producer_status" -ne 0 ]; }; then exit 2; fi
 cat "$data"
-if [ "$bytes" -eq "$limit" ]; then printf 'CAPPED\000' >&2; fi
+if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
 "#,
 );
 
@@ -155,18 +159,21 @@ producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
 head_status=$?
-cat <&3 >/dev/null
-drain_status=$?
+bytes=$(wc -c <"$data")
+capped=0
+if [ "$bytes" -eq "$limit" ]; then capped=1; fi
 exec 3<&-
+if [ "$capped" -eq 1 ]; then
+    kill "$producer" 2>/dev/null || true
+fi
 wait "$producer" 2>/dev/null
 wait_status=$?
-bytes=$(wc -c <"$data")
 producer_status=$(cat "$status" 2>/dev/null || printf 2)
-if [ -s "$engine_error" ] || [ "$head_status" -ne 0 ] ||
-   [ "$drain_status" -ne 0 ] || [ "$wait_status" -ne 0 ] ||
-   [ "$producer_status" -ne 0 ]; then exit 2; fi
+if [ -s "$engine_error" ] || [ "$head_status" -ne 0 ]; then exit 2; fi
+if [ "$capped" -eq 0 ] &&
+   { [ "$wait_status" -ne 0 ] || [ "$producer_status" -ne 0 ]; }; then exit 2; fi
 cat "$data"
-if [ "$bytes" -eq "$limit" ]; then printf 'CAPPED\000' >&2; fi
+if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
 "#,
 );
 
@@ -227,18 +234,21 @@ producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
 head_status=$?
-cat <&3 >/dev/null
-drain_status=$?
+bytes=$(wc -c <"$data")
+capped=0
+if [ "$bytes" -eq "$limit" ]; then capped=1; fi
 exec 3<&-
+if [ "$capped" -eq 1 ]; then
+    kill "$producer" 2>/dev/null || true
+fi
 wait "$producer" 2>/dev/null
 wait_status=$?
-bytes=$(wc -c <"$data")
 producer_status=$(cat "$status" 2>/dev/null || printf 2)
-if [ -s "$engine_error" ] || [ "$head_status" -ne 0 ] ||
-   [ "$drain_status" -ne 0 ] || [ "$wait_status" -ne 0 ] ||
-   [ "$producer_status" -ne 0 ]; then exit 2; fi
+if [ -s "$engine_error" ] || [ "$head_status" -ne 0 ]; then exit 2; fi
+if [ "$capped" -eq 0 ] &&
+   { [ "$wait_status" -ne 0 ] || [ "$producer_status" -ne 0 ]; }; then exit 2; fi
 cat "$data"
-if [ "$bytes" -eq "$limit" ]; then printf 'CAPPED\000' >&2; fi
+if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
 "#,
 );
 
@@ -733,4 +743,77 @@ fn pinned_relative(pinned: &[u8]) -> BridgeResult<&[u8]> {
         ));
     }
     Ok(relative)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{CANDIDATE_SCRIPT, GREP_SCRIPT, RG_SCRIPT};
+
+    #[test]
+    fn bounded_search_scripts_stop_producers_at_the_output_cap() {
+        for script in [CANDIDATE_SCRIPT, RG_SCRIPT, GREP_SCRIPT] {
+            assert!(
+                script.matches("cat <&3 >/dev/null").count() <= 1,
+                "bounded search script still drains the producer"
+            );
+            assert!(
+                script.contains("kill \"$producer\""),
+                "bounded search script does not terminate its producer"
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_script_returns_without_draining_an_endless_find() {
+        let controls = tempfile::TempDir::new().unwrap();
+        let root = controls.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let shim = controls.path().join("find");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\ncase \"$2\" in *codex-sentinel-search-find) printf '%s/.hidden\\000' \"$2\" ;; *) exec yes \"$2/file\" ;; esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(CANDIDATE_SCRIPT)
+            .arg("codex-ssh-bridge-search")
+            .arg(&root)
+            .arg("64")
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", controls.path().display()),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let output = loop {
+            if child.try_wait().unwrap().is_some() {
+                break child.wait_with_output().unwrap();
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("candidate search did not stop at its byte cap");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 64);
+        assert!(
+            output
+                .stderr
+                .windows(b"CAPPED\0".len())
+                .any(|window| window == b"CAPPED\0")
+        );
+    }
 }
