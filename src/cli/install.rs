@@ -805,25 +805,23 @@ async fn rollback_install(
             Err(_) => failed = true,
         }
     }
-    if journal.stable_created {
-        if fs::remove_file(&resolved.layout.stable_binary).is_err() {
-            failed = true;
-        }
+    if journal.stable_created && fs::remove_file(&resolved.layout.stable_binary).is_err() {
+        failed = true;
     }
-    if let Some(quarantine) = journal.stable_quarantine.as_ref() {
-        if restore_quarantine(quarantine).is_err() {
-            failed = true;
-        }
+    if let Some(quarantine) = journal.stable_quarantine.as_ref()
+        && restore_quarantine(quarantine).is_err()
+    {
+        failed = true;
     }
-    if let Some(quarantine) = journal.skill_quarantine.as_ref() {
-        if restore_quarantine(quarantine).is_err() {
-            failed = true;
-        }
+    if let Some(quarantine) = journal.skill_quarantine.as_ref()
+        && restore_quarantine(quarantine).is_err()
+    {
+        failed = true;
     }
-    if let Some(quarantine) = journal.marker_quarantine.as_ref() {
-        if restore_quarantine(quarantine).is_err() {
-            failed = true;
-        }
+    if let Some(quarantine) = journal.marker_quarantine.as_ref()
+        && restore_quarantine(quarantine).is_err()
+    {
+        failed = true;
     }
     for directory in journal.created_directories.iter().rev() {
         if let Err(error) = fs::remove_dir(directory)
@@ -1238,11 +1236,9 @@ async fn codex_get(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
     if managed_mcp_needs_update(&value, resolved)? {
         return Ok(Presence::NeedsUpdate);
     }
-    {
-        return Err(BridgeError::invalid_config(
-            "an MCP server named ssh-bridge has a different configuration",
-        ));
-    }
+    Err(BridgeError::invalid_config(
+        "an MCP server named ssh-bridge has a different configuration",
+    ))
 }
 
 fn codex_missing(stderr: &[u8]) -> bool {
