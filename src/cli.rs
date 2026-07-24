@@ -28,6 +28,9 @@ use crate::ssh::{
     RuntimePaths, SshRunner, ValidatedMountpoint, build_ssh_g_argv, build_sshfs_argv,
 };
 
+mod install;
+pub use install::{InstallLayout, InstallReport, install_user, uninstall_user};
+
 #[derive(Debug, Parser)]
 #[command(
     name = "codex-ssh-bridge",
@@ -55,6 +58,10 @@ pub enum Command {
     Unmount(MountpointArgs),
     /// Report whether a local path is an SSHFS mountpoint.
     MountStatus(MountpointArgs),
+    /// Install the local MCP entry and Skill; dry-run unless --apply is supplied.
+    Install(InstallArgs),
+    /// Uninstall only an identity-matching local installation; dry-run unless --apply is supplied.
+    Uninstall(InstallArgs),
 }
 
 #[derive(Debug, Args)]
@@ -131,10 +138,29 @@ pub struct MountpointArgs {
     pub mountpoint: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub struct InstallArgs {
+    #[arg(long, required = true)]
+    pub user: bool,
+    #[arg(long)]
+    pub apply: bool,
+}
+
 pub fn known_human_mode(value: &std::ffi::OsStr) -> bool {
     matches!(
         value.to_str(),
-        Some("--help" | "-h" | "hosts" | "doctor" | "run" | "mount" | "unmount" | "mount-status")
+        Some(
+            "--help"
+                | "-h"
+                | "hosts"
+                | "doctor"
+                | "run"
+                | "mount"
+                | "unmount"
+                | "mount-status"
+                | "install"
+                | "uninstall"
+        )
     )
 }
 
@@ -153,6 +179,8 @@ pub async fn run(cli: Cli) -> BridgeResult<()> {
         Command::Mount(arguments) => run_mount(config_path()?, arguments).await,
         Command::Unmount(arguments) => run_unmount(arguments).await,
         Command::MountStatus(arguments) => run_mount_status(arguments),
+        Command::Install(arguments) => run_install(arguments).await,
+        Command::Uninstall(arguments) => run_uninstall_installation(arguments).await,
     }
 }
 
@@ -815,6 +843,22 @@ async fn run_unmount(arguments: MountpointArgs) -> BridgeResult<()> {
     let value =
         unmount_sshfs_with_executable(PathBuf::from("/usr/bin/fusermount3"), &arguments.mountpoint)
             .await?;
+    print_json(&value)
+}
+
+async fn run_install(arguments: InstallArgs) -> BridgeResult<()> {
+    debug_assert!(arguments.user, "Clap requires --user");
+    let report = install_user(InstallLayout::discover()?, arguments.apply).await?;
+    let value = serde_json::to_value(report)
+        .map_err(|error| BridgeError::io(format!("cannot render install plan: {error}")))?;
+    print_json(&value)
+}
+
+async fn run_uninstall_installation(arguments: InstallArgs) -> BridgeResult<()> {
+    debug_assert!(arguments.user, "Clap requires --user");
+    let report = uninstall_user(InstallLayout::discover()?, arguments.apply).await?;
+    let value = serde_json::to_value(report)
+        .map_err(|error| BridgeError::io(format!("cannot render uninstall plan: {error}")))?;
     print_json(&value)
 }
 

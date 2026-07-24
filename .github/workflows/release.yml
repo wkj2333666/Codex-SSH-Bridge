@@ -244,7 +244,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           name="codex-ssh-bridge-${version}-${TARGET}"
           root="dist/$name"
-          mkdir -p "$root/bin" "$root/remote-helpers"
+          mkdir -p "$root/bin" "$root/remote-helpers" "$root/docs"
           install -m 0755 "staging/main-$TARGET/codex-ssh-bridge" "$root/bin/codex-ssh-bridge"
           for helper in \
             x86_64-unknown-linux-musl \
@@ -258,13 +258,13 @@ jobs:
           for resource in \
             .codex-plugin \
             skills \
-            docs \
             README.md \
             LICENSE \
             config.example.toml \
             .mcp.json.example; do
             cp -a "$resource" "$root/"
           done
+          cp -a docs/security.md docs/performance.md "$root/docs/"
           test -x "$root/bin/codex-ssh-bridge"
           test -x "$root/remote-helpers/aarch64-unknown-linux-musl"
           test -f "$root/.codex-plugin/plugin.json"

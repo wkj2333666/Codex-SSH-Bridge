@@ -103,8 +103,8 @@ This deletes every bridge helper version for that account. Verify `ALIAS`
 before running it; do not paste an unverified host name into the command.
 
 Download the archive matching the local Codex host, extract it to a private
-path, and use its `bin/codex-ssh-bridge` executable in `.mcp.json.example`
-before registering the MCP server. Windows and macOS assets are not produced
+path, and run `bin/codex-ssh-bridge install --user --apply`; the installer
+registers the stable local MCP path and links the Skill. Windows and macOS assets are not produced
 because the bridge currently requires Linux OpenSSH and Linux SSHFS tooling.
 
 ## Configure hosts
@@ -137,31 +137,28 @@ requests and reports the selected shell, fallback flag, and helper mode.
 Writes and patches use expected hashes, no-follow checks, atomic replacement,
 and explicit conflict or unknown-outcome reporting.
 
-## Configure MCP for local Codex
+## Install for local Codex
 
-The public package contains the Skill and a configuration template, not a machine-specific MCP entry. Build the bridge locally, copy the template, and replace its command with the absolute path to your release binary:
-
-```bash
-cargo build --release
-cp .mcp.json.example .mcp.json
-$EDITOR .mcp.json
-```
-
-The template must contain a command like:
-
-```json
-"command": "/absolute/path/to/target/release/codex-ssh-bridge",
-"args": ["mcp"]
-```
-
-For the Codex CLI, register the same command explicitly:
+Release archives contain the native Rust bridge, its Skill, and only the public
+documentation needed by users. Run the packaged binary from its extracted
+directory; installation is a dry-run until `--apply` is supplied:
 
 ```bash
-codex mcp add ssh-bridge -- /absolute/path/to/target/release/codex-ssh-bridge mcp
+./bin/codex-ssh-bridge install --user
+./bin/codex-ssh-bridge install --user --apply
 codex mcp get ssh-bridge --json
 ```
 
-The user-owned `.mcp.json` is ignored by Git so local absolute paths are not published. Start a new Codex task after registering or updating the server so the Skill and MCP surface are reloaded.
+The installer verifies the bundle, atomically updates the stable executable at
+`~/.local/bin/codex-ssh-bridge`, registers Codex against that stable path, and
+links the Skill at `~/.codex/skills/remote-ssh-ops`. It can migrate an older
+bridge-managed MCP entry or Skill copy, but refuses unrelated files. Older
+bridge-managed release directories are pruned only after the new MCP entry and
+Skill have been verified.
+
+Start a new Codex task after installing or updating so the MCP and Skill
+surfaces are reloaded. `.mcp.json.example` is a template for integrations that
+do not use the installer; it is not a machine-specific configuration.
 
 For a direct MCP entry, Codex can prompt only for tools not marked read-only:
 
