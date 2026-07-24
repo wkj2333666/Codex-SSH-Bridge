@@ -327,15 +327,19 @@ pub(crate) fn persistent_helper_command(
 pub(crate) fn helper_directory() -> BridgeResult<PathBuf> {
     let directory = match std::env::var_os(HELPER_DIRECTORY_ENV) {
         Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => std::env::current_exe()
-            .map_err(BridgeError::io)?
-            .parent()
-            .map(|parent| parent.join(HELPER_DIRECTORY_NAME))
-            .ok_or_else(|| {
-                BridgeError::invalid_config("bridge executable has no parent directory")
-            })?,
+        _ => helper_directory_from_executable(
+            &std::env::current_exe().map_err(BridgeError::io)?,
+        )?,
     };
     Ok(directory)
+}
+
+fn helper_directory_from_executable(executable: &Path) -> BridgeResult<PathBuf> {
+    let executable = fs::canonicalize(executable).map_err(BridgeError::io)?;
+    executable
+        .parent()
+        .map(|parent| parent.join(HELPER_DIRECTORY_NAME))
+        .ok_or_else(|| BridgeError::invalid_config("bridge executable has no parent directory"))
 }
 
 fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
@@ -367,10 +371,12 @@ fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
 mod tests {
     use super::{
         BootstrapStatus, HelperArtifact, HelperIdentity, helper_artifact, helper_command,
-        helper_identity, helper_target_for_arch, parse_bootstrap_status, persistent_helper_command,
+        helper_directory_from_executable, helper_identity, helper_target_for_arch,
+        parse_bootstrap_status, persistent_helper_command,
     };
     use crate::capability::{Capability, ShellKind};
     use std::collections::BTreeMap;
+    use std::os::unix::fs::symlink;
 
     fn capability(kernel_name: Option<&str>, machine_arch: Option<&str>) -> Capability {
         Capability {
@@ -411,6 +417,26 @@ mod tests {
         }
         assert!(helper_artifact(&capability(Some("Darwin"), Some("x86_64"))).is_none());
         assert!(helper_artifact(&capability(Some("Linux"), Some("mips64"))).is_none());
+    }
+
+    #[test]
+    fn helper_directory_resolves_the_real_executable_behind_a_stable_symlink() {
+        let temporary = tempfile::tempdir().unwrap();
+        let versioned_bin = temporary
+            .path()
+            .join("releases/0.2.7/bin/codex-ssh-bridge");
+        std::fs::create_dir_all(versioned_bin.parent().unwrap()).unwrap();
+        std::fs::write(&versioned_bin, b"bridge").unwrap();
+        let stable_bin = temporary.path().join("bin/codex-ssh-bridge");
+        std::fs::create_dir_all(stable_bin.parent().unwrap()).unwrap();
+        symlink(&versioned_bin, &stable_bin).unwrap();
+
+        let helper_directory = helper_directory_from_executable(&stable_bin).unwrap();
+
+        assert_eq!(
+            helper_directory,
+            versioned_bin.parent().unwrap().join(HELPER_DIRECTORY_NAME)
+        );
     }
 
     #[test]
