@@ -327,9 +327,7 @@ pub(crate) fn persistent_helper_command(
 pub(crate) fn helper_directory() -> BridgeResult<PathBuf> {
     let directory = match std::env::var_os(HELPER_DIRECTORY_ENV) {
         Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => helper_directory_from_executable(
-            &std::env::current_exe().map_err(BridgeError::io)?,
-        )?,
+        _ => helper_directory_from_executable(&std::env::current_exe().map_err(BridgeError::io)?)?,
     };
     Ok(directory)
 }
@@ -422,9 +420,7 @@ mod tests {
     #[test]
     fn helper_directory_resolves_the_real_executable_behind_a_stable_symlink() {
         let temporary = tempfile::tempdir().unwrap();
-        let versioned_bin = temporary
-            .path()
-            .join("releases/0.2.7/bin/codex-ssh-bridge");
+        let versioned_bin = temporary.path().join("releases/0.2.7/bin/codex-ssh-bridge");
         std::fs::create_dir_all(versioned_bin.parent().unwrap()).unwrap();
         std::fs::write(&versioned_bin, b"bridge").unwrap();
         let stable_bin = temporary.path().join("bin/codex-ssh-bridge");
