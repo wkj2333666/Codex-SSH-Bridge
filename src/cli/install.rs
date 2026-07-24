@@ -1436,10 +1436,7 @@ fn skill_presence(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
     match fs::symlink_metadata(&resolved.layout.skill_target) {
         Ok(metadata) => {
             if !metadata.file_type().is_symlink() {
-                if metadata.is_dir()
-                    && hash_secure_skill_tree(&resolved.layout.skill_target)?
-                        == resolved.identity.skill_sha256
-                {
+                if metadata.is_dir() && managed_skill_shape(&resolved.layout.skill_target)? {
                     return Ok(Presence::NeedsUpdate);
                 }
                 return Err(BridgeError::invalid_config(
@@ -1484,6 +1481,23 @@ fn marker_presence(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Presence::Absent),
         Err(error) => Err(BridgeError::io(error)),
     }
+}
+
+fn managed_skill_shape(path: &Path) -> BridgeResult<bool> {
+    let document = read_bounded(&path.join("SKILL.md"), 256 * 1024)?;
+    let document = std::str::from_utf8(&document)
+        .map_err(|_| BridgeError::invalid_config("existing Skill is not UTF-8"))?;
+    if skill_frontmatter_name(document).as_deref() != Some("remote-ssh-ops") {
+        return Ok(false);
+    }
+    let metadata = read_bounded(&path.join("agents/openai.yaml"), 256 * 1024)?;
+    let agent: AgentMetadata = serde_yaml::from_slice(&metadata)
+        .map_err(|_| BridgeError::invalid_config("existing Skill metadata is not valid YAML"))?;
+    Ok(agent
+        .dependencies
+        .tools
+        .iter()
+        .any(|tool| tool.kind == "mcp" && tool.value == MCP_NAME && tool.transport == "stdio"))
 }
 
 fn managed_identity(identity: &InstallationIdentity, resolved: &ResolvedInstall) -> bool {
