@@ -346,3 +346,26 @@ fn skill_closes_search_stdin_and_patch_schema_ambiguities() {
         );
     }
 }
+
+#[test]
+fn local_installation_has_a_transactional_rust_entrypoint_for_mcp_and_skill() {
+    let cli = read_text("src/cli.rs");
+    assert!(cli.contains("mod install;"));
+    assert!(cli.contains("Install(InstallArgs)"));
+    assert!(cli.contains("Uninstall(InstallArgs)"));
+    assert!(read_text("src/cli/install.rs").contains("pub async fn install_user"));
+
+    let readme = read_text("README.md");
+    assert!(readme.contains("codex-ssh-bridge install --user"));
+    assert!(readme.contains(".codex/skills/remote-ssh-ops"));
+    assert!(readme.contains(".local/bin/codex-ssh-bridge"));
+}
+
+#[test]
+fn release_package_excludes_private_superpowers_documents() {
+    let workflow = read_text(".github/workflows/release.yml");
+    assert!(workflow.contains("docs/security.md"));
+    assert!(workflow.contains("docs/performance.md"));
+    assert!(!workflow.contains("            docs\n"));
+    assert!(!workflow.contains("docs/superpowers"));
+}
