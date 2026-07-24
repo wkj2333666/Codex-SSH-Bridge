@@ -368,8 +368,8 @@ fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapStatus, HelperArtifact, HelperIdentity, helper_artifact, helper_command,
-        helper_directory_from_executable, helper_identity, helper_target_for_arch,
+        BootstrapStatus, HELPER_DIRECTORY_NAME, HelperArtifact, HelperIdentity, helper_artifact,
+        helper_command, helper_directory_from_executable, helper_identity, helper_target_for_arch,
         parse_bootstrap_status, persistent_helper_command,
     };
     use crate::capability::{Capability, ShellKind};
