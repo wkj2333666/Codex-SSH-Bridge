@@ -29,7 +29,9 @@ use crate::ssh::{
 };
 
 mod install;
-pub use install::{InstallLayout, InstallReport, install_user, uninstall_user};
+pub use install::{
+    InstallLayout, InstallReport, install_packaged_user, install_user, uninstall_user,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -848,7 +850,7 @@ async fn run_unmount(arguments: MountpointArgs) -> BridgeResult<()> {
 
 async fn run_install(arguments: InstallArgs) -> BridgeResult<()> {
     debug_assert!(arguments.user, "Clap requires --user");
-    let report = install_user(InstallLayout::discover()?, arguments.apply).await?;
+    let report = install_packaged_user(InstallLayout::discover()?, arguments.apply).await?;
     let value = serde_json::to_value(report)
         .map_err(|error| BridgeError::io(format!("cannot render install plan: {error}")))?;
     print_json(&value)

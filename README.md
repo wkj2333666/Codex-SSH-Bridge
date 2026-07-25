@@ -149,12 +149,13 @@ directory; installation is a dry-run until `--apply` is supplied:
 codex mcp get ssh-bridge --json
 ```
 
-The installer verifies the bundle, atomically updates the stable executable at
-`~/.local/bin/codex-ssh-bridge`, registers Codex against that stable path, and
-links the Skill at `~/.codex/skills/remote-ssh-ops`. It can migrate an older
-bridge-managed MCP entry or Skill copy, but refuses unrelated files. Older
-bridge-managed release directories are pruned only after the new MCP entry and
-Skill have been verified.
+The installer verifies the extracted bundle, copies it atomically into
+`~/.local/share/codex-ssh-bridge/<version>+release`, updates the stable
+executable at `~/.local/bin/codex-ssh-bridge`, registers Codex against that
+stable path, and links the Skill at `~/.codex/skills/remote-ssh-ops`. It can
+migrate an older bridge-managed MCP entry, Skill symlink, or Skill copy, but
+refuses unrelated files. Older bridge-managed release directories are pruned
+only after the new MCP entry and Skill have been verified.
 
 Start a new Codex task after installing or updating so the MCP and Skill
 surfaces are reloaded. `.mcp.json.example` is a template for integrations that

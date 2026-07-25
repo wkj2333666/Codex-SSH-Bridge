@@ -71,6 +71,20 @@ impl InstallLayout {
             quarantine_delete_failure: None,
         })
     }
+
+    fn for_bundle(&self, bundle: &Path) -> Self {
+        Self {
+            binary: bundle.join("bin/codex-ssh-bridge"),
+            stable_binary: self.stable_binary.clone(),
+            plugin_manifest: bundle.join(".codex-plugin/plugin.json"),
+            mcp_manifest: bundle.join(".mcp.json.example"),
+            skill_source: bundle.join("skills/remote-ssh-ops"),
+            skill_target: self.skill_target.clone(),
+            identity_file: self.identity_file.clone(),
+            codex_executable: self.codex_executable.clone(),
+            quarantine_delete_failure: self.quarantine_delete_failure,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -422,6 +436,41 @@ pub async fn install_user(layout: InstallLayout, apply: bool) -> BridgeResult<In
     Ok(report(true, &resolved, actions))
 }
 
+pub async fn install_packaged_user(
+    layout: InstallLayout,
+    apply: bool,
+) -> BridgeResult<InstallReport> {
+    let destination = managed_bundle_destination(&layout)?;
+    let source = bundle_root(&layout.binary)?;
+    if !apply {
+        let mut report = install_user(layout, false).await?;
+        if source != destination {
+            report.actions.insert(
+                0,
+                format!("copy verified release bundle to {}", destination.display()),
+            );
+        }
+        return Ok(report);
+    }
+
+    let installed_layout = stage_packaged_bundle(&layout, &destination)?;
+    match install_user(installed_layout, true).await {
+        Ok(mut report) => {
+            if source != destination {
+                report.actions.insert(
+                    0,
+                    format!(
+                        "install verified release bundle at {}",
+                        destination.display()
+                    ),
+                );
+            }
+            Ok(report)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub async fn uninstall_user(layout: InstallLayout, apply: bool) -> BridgeResult<InstallReport> {
     if !apply {
         let preliminary = uninstall_preflight(layout, false).await?;
@@ -547,6 +596,135 @@ pub async fn uninstall_user(layout: InstallLayout, apply: bool) -> BridgeResult<
         return Err(error);
     }
     Ok(report(true, &resolved, actions))
+}
+
+fn managed_bundle_destination(layout: &InstallLayout) -> BridgeResult<PathBuf> {
+    let home = layout
+        .stable_binary
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| BridgeError::invalid_config("stable binary path has no user root"))?;
+    Ok(home
+        .join(".local/share/codex-ssh-bridge")
+        .join(format!("{}+release", env!("CARGO_PKG_VERSION"))))
+}
+
+fn bundle_root(binary: &Path) -> BridgeResult<PathBuf> {
+    binary
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| BridgeError::invalid_config("packaged binary has no bundle root"))
+}
+
+fn stage_packaged_bundle(
+    source_layout: &InstallLayout,
+    destination: &Path,
+) -> BridgeResult<InstallLayout> {
+    let source = bundle_root(&source_layout.binary)?;
+    resolve_layout(source_layout.clone())?;
+    if source == destination {
+        return Ok(source_layout.clone());
+    }
+
+    let mut created_directories = Vec::new();
+    let managed_root = destination
+        .parent()
+        .ok_or_else(|| BridgeError::invalid_config("managed bundle has no parent"))?;
+    ensure_destination_directory(managed_root, &mut created_directories)?;
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            ensure_matching_bundle(&source, destination)?;
+            return Ok(source_layout.for_bundle(destination));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(BridgeError::io(error)),
+    }
+
+    let staging = managed_root.join(format!(
+        ".{}.install.{}.{}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(&staging).map_err(BridgeError::io)?;
+    let copied = copy_bundle_tree(&source, &staging);
+    if let Err(error) = copied {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    match rename_noreplace(&staging, destination) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+            let _ = fs::remove_dir_all(&staging);
+            ensure_matching_bundle(&source, destination)?;
+            return Ok(source_layout.for_bundle(destination));
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(BridgeError::io(error));
+        }
+    }
+
+    let installed_layout = source_layout.for_bundle(destination);
+    if let Err(error) = resolve_layout(installed_layout.clone()) {
+        let _ = fs::remove_dir_all(destination);
+        return Err(error);
+    }
+    Ok(installed_layout)
+}
+
+fn ensure_matching_bundle(source: &Path, destination: &Path) -> BridgeResult<()> {
+    let metadata = fs::symlink_metadata(destination).map_err(BridgeError::io)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(BridgeError::invalid_config(
+            "managed release destination is not a real directory",
+        ));
+    }
+    if hash_secure_bundle_tree(source)? != hash_secure_bundle_tree(destination)? {
+        return Err(BridgeError::invalid_config(
+            "managed release destination already contains different files",
+        ));
+    }
+    Ok(())
+}
+
+fn copy_bundle_tree(source: &Path, destination: &Path) -> BridgeResult<()> {
+    validate_trusted_source_directory(&fs::symlink_metadata(source).map_err(BridgeError::io)?)?;
+    let mut entries = fs::read_dir(source)
+        .map_err(BridgeError::io)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(BridgeError::io)?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for entry in entries {
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path).map_err(BridgeError::io)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&destination_path).map_err(BridgeError::io)?;
+            copy_bundle_tree(&source_path, &destination_path)?;
+        } else if metadata.is_file() && !metadata.file_type().is_symlink() {
+            validate_trusted_source_file(&metadata, false)?;
+            fs::copy(&source_path, &destination_path).map_err(BridgeError::io)?;
+            let mode = if metadata.mode() & 0o111 != 0 {
+                0o700
+            } else {
+                0o600
+            };
+            fs::set_permissions(&destination_path, fs::Permissions::from_mode(mode))
+                .map_err(BridgeError::io)?;
+        } else {
+            return Err(BridgeError::invalid_config(
+                "release bundle may contain only real directories and regular files",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn remove_quarantine(
@@ -1284,11 +1462,10 @@ fn mcp_matches(
     let Some(command) = transport.get("command").and_then(serde_json::Value::as_str) else {
         return Ok(false);
     };
-    let command = match fs::canonicalize(command) {
-        Ok(command) => command,
-        Err(_) => return Ok(false),
-    };
-    if command != binary && command != stable_binary {
+    let command = Path::new(command);
+    let command_matches = command == stable_binary
+        || fs::canonicalize(command).is_ok_and(|resolved| resolved == binary);
+    if !command_matches {
         return Ok(false);
     }
     if transport.get("args") != Some(&serde_json::json!(["mcp"])) {
@@ -1447,6 +1624,12 @@ fn skill_presence(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
                 BridgeError::invalid_config("Skill destination symlink is dangling")
             })?;
             if target != resolved.layout.skill_source {
+                let managed_root = managed_release_root(resolved)?;
+                if is_managed_skill_source_path(&target, &managed_root)
+                    && managed_skill_shape(&target)?
+                {
+                    return Ok(Presence::NeedsUpdate);
+                }
                 return Err(BridgeError::invalid_config(
                     "Skill destination resolves to a different source",
                 ));
@@ -1456,6 +1639,27 @@ fn skill_presence(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Presence::Absent),
         Err(error) => Err(BridgeError::io(error)),
     }
+}
+
+fn managed_release_root(resolved: &ResolvedInstall) -> BridgeResult<PathBuf> {
+    let home = resolved
+        .layout
+        .stable_binary
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| BridgeError::invalid_config("stable binary path has no user root"))?;
+    Ok(home.join(".local/share/codex-ssh-bridge"))
+}
+
+fn is_managed_skill_source_path(path: &Path, managed_root: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(managed_root) else {
+        return false;
+    };
+    let components: Vec<_> = relative.components().collect();
+    components.len() == 3
+        && components[1].as_os_str() == OsStr::new("skills")
+        && components[2].as_os_str() == OsStr::new("remote-ssh-ops")
 }
 
 fn marker_presence(resolved: &ResolvedInstall) -> BridgeResult<Presence> {
@@ -1692,6 +1896,57 @@ fn validate_trusted_source_directory(metadata: &fs::Metadata) -> BridgeResult<()
     Ok(())
 }
 
+fn hash_secure_bundle_tree(root: &Path) -> BridgeResult<String> {
+    fn visit(root: &Path, directory: &Path, hasher: &mut Sha256) -> BridgeResult<()> {
+        validate_trusted_source_directory(
+            &fs::symlink_metadata(directory).map_err(BridgeError::io)?,
+        )?;
+        let mut entries = fs::read_dir(directory)
+            .map_err(BridgeError::io)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(BridgeError::io)?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(BridgeError::io)?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| BridgeError::invalid_config("release bundle escaped its root"))?;
+            let relative = relative.as_os_str().as_bytes();
+            hasher.update((relative.len() as u64).to_be_bytes());
+            hasher.update(relative);
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                hasher.update(b"D");
+                visit(root, &path, hasher)?;
+            } else if metadata.is_file() && !metadata.file_type().is_symlink() {
+                validate_trusted_source_file(&metadata, false)?;
+                hasher.update(b"F");
+                hasher.update([u8::from(metadata.mode() & 0o111 != 0)]);
+                hasher.update(metadata.len().to_be_bytes());
+                let mut file = fs::File::open(&path).map_err(BridgeError::io)?;
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let count = file.read(&mut buffer).map_err(BridgeError::io)?;
+                    if count == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..count]);
+                }
+            } else {
+                return Err(BridgeError::invalid_config(
+                    "release bundle may contain only real directories and regular files",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"codex-ssh-bridge-release-bundle-v1\0");
+    visit(root, root, &mut hasher)?;
+    Ok(hex_digest(&hasher.finalize()))
+}
+
 fn hash_secure_skill_tree(root: &Path) -> BridgeResult<String> {
     fn visit(root: &Path, directory: &Path, hasher: &mut Sha256) -> BridgeResult<()> {
         validate_trusted_source_directory(
@@ -1845,7 +2100,16 @@ fn nonempty_environment(name: &str) -> Option<OsString> {
 
 #[cfg(test)]
 mod tests {
-    use super::advance_private_source_boundary;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    use tempfile::TempDir;
+
+    use super::{
+        advance_private_source_boundary, copy_bundle_tree, hash_secure_bundle_tree,
+        is_managed_skill_source_path, mcp_matches,
+    };
 
     #[test]
     fn private_source_boundary_never_trusts_foreign_or_writable_root_owned_descendants() {
@@ -1871,6 +2135,81 @@ mod tests {
         assert_eq!(
             advance_private_source_boundary(0, 0o1777, 1000, 0, false, true),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn stable_mcp_path_matches_before_its_release_symlink_is_updated() {
+        let stable = Path::new("/home/alice/.local/bin/codex-ssh-bridge");
+        let binary = Path::new(
+            "/home/alice/.local/share/codex-ssh-bridge/0.3.2+release/bin/codex-ssh-bridge",
+        );
+        let value = serde_json::json!({
+            "transport": {
+                "type": "stdio",
+                "command": stable,
+                "args": ["mcp"],
+                "env": null,
+                "cwd": null
+            }
+        });
+
+        assert!(mcp_matches(&value, stable, binary).unwrap());
+    }
+
+    #[test]
+    fn only_versioned_managed_skill_sources_are_upgradeable() {
+        let root = Path::new("/home/alice/.local/share/codex-ssh-bridge");
+        assert!(is_managed_skill_source_path(
+            Path::new(
+                "/home/alice/.local/share/codex-ssh-bridge/0.2.9+release/skills/remote-ssh-ops"
+            ),
+            root
+        ));
+        assert!(!is_managed_skill_source_path(
+            Path::new("/home/alice/custom/skills/remote-ssh-ops"),
+            root
+        ));
+        assert!(!is_managed_skill_source_path(
+            Path::new(
+                "/home/alice/.local/share/codex-ssh-bridge/0.2.9+release/extra/skills/remote-ssh-ops"
+            ),
+            root
+        ));
+    }
+
+    #[test]
+    fn copied_release_bundle_keeps_content_and_executable_roles() {
+        let temporary = TempDir::new().unwrap();
+        let source = temporary.path().join("source");
+        let destination = temporary.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::create_dir(source.join("bin")).unwrap();
+        for directory in [&source, &destination, &source.join("bin")] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(source.join("README.md"), b"release").unwrap();
+        fs::write(source.join("bin/codex-ssh-bridge"), b"binary").unwrap();
+        fs::set_permissions(
+            source.join("bin/codex-ssh-bridge"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        copy_bundle_tree(&source, &destination).unwrap();
+
+        assert_eq!(
+            hash_secure_bundle_tree(&source).unwrap(),
+            hash_secure_bundle_tree(&destination).unwrap()
+        );
+        assert_ne!(
+            fs::metadata(destination.join("bin/codex-ssh-bridge"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
         );
     }
 }
