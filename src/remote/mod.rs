@@ -1028,7 +1028,7 @@ mod tests {
                 SearchRequest {
                     host: "dev".into(),
                     query: query.into(),
-                    path: None,
+                    path: Some("/".into()),
                     globs: vec![],
                     max_results: None,
                     binary: None,
@@ -1038,7 +1038,7 @@ mod tests {
             assert_eq!(error.code, ErrorCode::InvalidArgument);
         }
         let paths = (0..256)
-            .map(|index| format!("{}-{index}", "x".repeat(40_000)))
+            .map(|index| format!("/{}-{index}", "x".repeat(40_000)))
             .collect();
         let error = resolve_stat(
             &config,
@@ -1057,7 +1057,7 @@ mod tests {
             &config(),
             ListRequest {
                 host: "dev".into(),
-                path: None,
+                path: Some("/".into()),
                 depth: None,
                 include_hidden: None,
                 max_entries: None,
@@ -1072,7 +1072,7 @@ mod tests {
             &config(),
             ReadRequest {
                 host: "dev".into(),
-                paths: vec!["a".into()],
+                paths: vec!["/a".into()],
                 start_line: None,
                 max_lines: None,
                 max_bytes: None,
@@ -1084,7 +1084,7 @@ mod tests {
             &config(),
             ReadRequest {
                 host: "dev".into(),
-                paths: vec!["a".into()],
+                paths: vec!["/a".into()],
                 start_line: Some(u64::MAX),
                 max_lines: Some(2),
                 max_bytes: None,

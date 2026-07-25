@@ -1744,6 +1744,10 @@ mod tests {
         format!("{:x}", Sha256::digest(bytes))
     }
 
+    fn absolute(root: &std::path::Path, path: &str) -> String {
+        root.join(path).to_str().unwrap().to_owned()
+    }
+
     fn ssh_call_count(log: &std::path::Path, marker: &str) -> usize {
         std::fs::read_to_string(log)
             .unwrap_or_default()
@@ -1788,7 +1792,7 @@ mod tests {
             .guarded_delete(
                 GuardedDeleteRequest {
                     host: "dev".to_owned(),
-                    path: "victim".to_owned(),
+                    path: absolute(remote.path(), "victim"),
                     expected_sha256: sha256(b"victim"),
                 },
                 CancellationToken::new(),
@@ -2103,7 +2107,7 @@ mod tests {
                 .guarded_delete(
                     GuardedDeleteRequest {
                         host: "dev".to_owned(),
-                        path: path.to_owned(),
+                        path: absolute(remote.path(), path),
                         expected_sha256: hash,
                     },
                     CancellationToken::new(),
@@ -2141,7 +2145,7 @@ mod tests {
                 .guarded_delete(
                     GuardedDeleteRequest {
                         host: "dev".to_owned(),
-                        path: path.to_owned(),
+                        path: absolute(remote.path(), path),
                         expected_sha256: sha256(b"victim"),
                     },
                     CancellationToken::new(),
@@ -2166,7 +2170,7 @@ mod tests {
             .guarded_delete(
                 GuardedDeleteRequest {
                     host: "dev".to_owned(),
-                    path: "locked/parent/victim".to_owned(),
+                    path: absolute(remote.path(), "locked/parent/victim"),
                     expected_sha256: sha256(b"victim"),
                 },
                 CancellationToken::new(),
@@ -2186,35 +2190,27 @@ mod tests {
         let log = controls.path().join("ssh.log");
         let (_runtime, bridge) = delete_fixture_with_options(
             remote.path(),
-            true,
-            &[("FAKE_SSH_LOG", log.as_os_str().to_owned())],
-        );
-        let error = bridge
-            .guarded_delete(
-                GuardedDeleteRequest {
-                    host: "dev".to_owned(),
-                    path: "victim".to_owned(),
-                    expected_sha256: sha256(b"victim"),
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, ErrorCode::ReadOnlyHost);
-        assert!(!log.exists());
-
-        let (_runtime, bridge) = delete_fixture_with_options(
-            remote.path(),
             false,
             &[("FAKE_SSH_LOG", log.as_os_str().to_owned())],
         );
-        for (path, hash) in [(".", sha256(b"victim")), ("victim", "A".repeat(64))] {
+        for (path, hash, expected) in [
+            (
+                ".",
+                sha256(b"victim"),
+                ErrorCode::RemoteAbsolutePathRequired,
+            ),
+            ("victim", "A".repeat(64), ErrorCode::InvalidArgument),
+        ] {
             assert_eq!(
                 bridge
                     .guarded_delete(
                         GuardedDeleteRequest {
                             host: "dev".to_owned(),
-                            path: path.to_owned(),
+                            path: if path == "." {
+                                path.to_owned()
+                            } else {
+                                absolute(remote.path(), path)
+                            },
                             expected_sha256: hash,
                         },
                         CancellationToken::new(),
@@ -2222,7 +2218,7 @@ mod tests {
                     .await
                     .unwrap_err()
                     .code,
-                ErrorCode::InvalidArgument
+                expected
             );
         }
         assert!(!log.exists());
@@ -2274,7 +2270,7 @@ mod tests {
                 .guarded_delete(
                     GuardedDeleteRequest {
                         host: "dev".to_owned(),
-                        path: tool.to_owned(),
+                        path: absolute(remote.path(), tool),
                         expected_sha256: sha256(b"victim"),
                     },
                     CancellationToken::new(),
@@ -2353,7 +2349,7 @@ mod tests {
                 .guarded_delete(
                     GuardedDeleteRequest {
                         host: "dev".to_owned(),
-                        path: race.to_owned(),
+                        path: absolute(remote.path(), race),
                         expected_sha256: sha256(b"victim"),
                     },
                     CancellationToken::new(),
@@ -2391,7 +2387,7 @@ mod tests {
                 .guarded_delete(
                     GuardedDeleteRequest {
                         host: "dev".to_owned(),
-                        path: post.to_owned(),
+                        path: absolute(remote.path(), post),
                         expected_sha256: sha256(b"victim"),
                     },
                     CancellationToken::new(),
@@ -2435,7 +2431,7 @@ mod tests {
         );
         let request = || GuardedDeleteRequest {
             host: "dev".to_owned(),
-            path: "victim".to_owned(),
+            path: absolute(remote.path(), "victim"),
             expected_sha256: sha256(b"victim"),
         };
         let first = bridge
@@ -2494,7 +2490,7 @@ mod tests {
             .guarded_delete(
                 GuardedDeleteRequest {
                     host: "dev".to_owned(),
-                    path: "first".to_owned(),
+                    path: absolute(remote.path(), "first"),
                     expected_sha256: sha256(b"first payload"),
                 },
                 CancellationToken::new(),
@@ -2511,7 +2507,7 @@ mod tests {
             .guarded_delete(
                 GuardedDeleteRequest {
                     host: "dev".to_owned(),
-                    path: "second".to_owned(),
+                    path: absolute(remote.path(), "second"),
                     expected_sha256: sha256(b"second payload"),
                 },
                 CancellationToken::new(),
@@ -2633,7 +2629,7 @@ esac"#,
                 .guarded_delete(
                     GuardedDeleteRequest {
                         host: "dev".to_owned(),
-                        path: "first".to_owned(),
+                        path: absolute(remote.path(), "first"),
                         expected_sha256: sha256(b"first payload"),
                     },
                     CancellationToken::new(),
@@ -2661,7 +2657,7 @@ esac"#,
                 .guarded_delete(
                     GuardedDeleteRequest {
                         host: "dev".to_owned(),
-                        path: "second".to_owned(),
+                        path: absolute(remote.path(), "second"),
                         expected_sha256: sha256(b"second payload"),
                     },
                     CancellationToken::new(),

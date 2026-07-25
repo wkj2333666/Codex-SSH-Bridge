@@ -2299,6 +2299,7 @@ mod tests {
         let environment = environment
             .iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .chain([(OsString::from("FAKE_SSH_ROOT"), OsString::from("/"))])
             .collect();
         let executable =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-ssh.sh");
