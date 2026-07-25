@@ -682,11 +682,7 @@ async fn task8_shell_surface_missing_bash_rejects_before_command_child() {
 #[tokio::test]
 async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
     let remote = tempfile::TempDir::new().unwrap();
-    let (_runtime, _log, tools) = fake_remote_tools_with_options(
-        remote.path(),
-        false,
-        &[("FAKE_SSH_MODE", OsString::from("echo-command"))],
-    );
+    let (_runtime, _log, tools) = fake_remote_tools_with_options(remote.path(), false, &[]);
     let mut session = ProtocolSession::start(tools).await;
     let run = session
         .call(
@@ -697,19 +693,12 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
     assert_eq!(run["structuredContent"], json!({"exit_code":0}));
     session.close().await;
 
-    let (_runtime, _log, tools) = fake_remote_tools_with_options(
-        remote.path(),
-        false,
-        &[
-            ("FAKE_SSH_MODE", OsString::from("sleep")),
-            ("FAKE_SSH_SLEEP_SECONDS", OsString::from("5")),
-        ],
-    );
+    let (_runtime, _log, tools) = fake_remote_tools_with_options(remote.path(), false, &[]);
     let mut session = ProtocolSession::start(tools).await;
     let timed_out = session
         .call(
             "remote_run",
-            json!({"host":"dev","cwd":"/","command":"printf never","shell":"login","timeout_ms":50}),
+            json!({"host":"dev","cwd":"/","command":"sleep 5","shell":"login","timeout_ms":50}),
         )
         .await;
     assert_eq!(timed_out["isError"], true);
