@@ -2107,8 +2107,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        advance_private_source_boundary, copy_bundle_tree, hash_secure_bundle_tree,
-        is_managed_skill_source_path, mcp_matches,
+        InstallJournal, advance_private_source_boundary, apply_config_migration, copy_bundle_tree,
+        hash_secure_bundle_tree, inspect_config_migration, is_managed_skill_source_path,
+        mcp_matches, rollback_config_migration,
     };
 
     #[test]
@@ -2211,5 +2212,53 @@ mod tests {
                 & 0o111,
             0
         );
+    }
+
+    #[test]
+    fn v1_config_migration_is_alias_checked_atomic_and_exactly_rollbackable() {
+        let temporary = TempDir::new().unwrap();
+        let config = temporary.path().join("config.toml");
+        let ssh_config = temporary.path().join("ssh_config");
+        let original = br#"
+version = 1
+[limits]
+command_timeout_ms = 123456
+[hosts.nkai]
+root = "/home/wkj"
+"#;
+        fs::write(&config, original).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&ssh_config, "Host nkai\n").unwrap();
+
+        let plan = inspect_config_migration(&config, &ssh_config)
+            .unwrap()
+            .unwrap();
+        let mut journal = InstallJournal::default();
+        apply_config_migration(&config, &plan, &mut journal).unwrap();
+
+        let migrated = crate::config::Config::load(&config).unwrap();
+        assert_eq!(migrated.version, 2);
+        assert_eq!(migrated.limits.command_timeout_ms, 123_456);
+        assert_eq!(
+            fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        rollback_config_migration(&config, &journal).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), original);
+    }
+
+    #[test]
+    fn v1_config_alias_missing_from_openssh_is_rejected_without_writes() {
+        let temporary = TempDir::new().unwrap();
+        let config = temporary.path().join("config.toml");
+        let ssh_config = temporary.path().join("ssh_config");
+        let original = b"version = 1\n[hosts.missing]\nroot = \"/\"\n";
+        fs::write(&config, original).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&ssh_config, "Host nkai\n").unwrap();
+
+        assert!(inspect_config_migration(&config, &ssh_config).is_err());
+        assert_eq!(fs::read(&config).unwrap(), original);
     }
 }

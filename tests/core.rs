@@ -8,7 +8,7 @@ use std::process::Command;
 use codex_ssh_bridge::config::{
     Config, DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES, DEFAULT_RETENTION_SERIALIZATION_JOBS, Limits,
     MAX_GLOBAL_SPOOL_QUOTA_BYTES, MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES,
-    migrate_v1_text,
+    migrate_v1_file, migrate_v1_text,
 };
 use codex_ssh_bridge::error::{BridgeError, ErrorCode};
 use codex_ssh_bridge::path::RemotePath;
@@ -101,6 +101,23 @@ root = "/"
     assert_eq!(migrated.explicit_aliases, ["nkai", "weibo"]);
     assert_eq!(migrated.config.limits.command_timeout_ms, 300_000);
     assert_eq!(migrated.config.limits.retention_serialization_jobs, 2);
+}
+
+#[test]
+fn v1_file_migration_uses_the_same_secure_file_validation_as_config_load() {
+    let file = write_config(
+        r#"
+version = 1
+[limits]
+command_timeout_ms = 123456
+[hosts.nkai]
+root = "/home/wkj"
+"#,
+    );
+    let migrated = migrate_v1_file(file.path()).unwrap();
+    assert_eq!(migrated.config.version, 2);
+    assert_eq!(migrated.config.limits.command_timeout_ms, 123_456);
+    assert_eq!(migrated.explicit_aliases, ["nkai"]);
 }
 
 fn valid_config() -> &'static str {
