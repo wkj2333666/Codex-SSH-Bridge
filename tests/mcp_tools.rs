@@ -550,7 +550,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let run = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf RUN_SURFACE; dd if=/dev/zero bs=1024 count=300 2>/dev/null","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":"printf RUN_SURFACE; dd if=/dev/zero bs=1024 count=300 2>/dev/null","shell":"sh"}),
         )
         .await;
     assert_no_diagnostic_success_fields(&run);
@@ -619,7 +619,10 @@ async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
     let (_runtime, _log, tools) = fake_remote_tools_with_options(remote.path(), false, &extra);
     let mut session = ProtocolSession::start(tools).await;
     let default_bash = session
-        .call("remote_run", json!({"host":"dev","command":"printf safe"}))
+        .call(
+            "remote_run",
+            json!({"host":"dev","cwd":"/","command":"printf safe"}),
+        )
         .await;
     assert_eq!(default_bash["isError"], Value::Null, "{default_bash}");
     assert_eq!(default_bash["structuredContent"], json!({"exit_code":0}));
@@ -631,7 +634,7 @@ async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
     let explicit_sh = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf safe","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":"printf safe","shell":"sh"}),
         )
         .await;
     assert_eq!(explicit_sh["isError"], Value::Null, "{explicit_sh}");
@@ -655,7 +658,7 @@ async fn task8_shell_surface_missing_bash_rejects_before_command_child() {
     let run = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf must-not-run","shell":"bash"}),
+            json!({"host":"dev","cwd":"/","command":"printf must-not-run","shell":"bash"}),
         )
         .await;
     assert_eq!(run["isError"], true);
@@ -682,7 +685,7 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
     let run = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf safe","shell":"login"}),
+            json!({"host":"dev","cwd":"/","command":"printf safe","shell":"login"}),
         )
         .await;
     assert_eq!(run["structuredContent"], json!({"exit_code":0}));
@@ -700,7 +703,7 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
     let timed_out = session
         .call(
             "remote_run",
-            json!({"host":"dev","command":"printf never","shell":"login","timeout_ms":50}),
+            json!({"host":"dev","cwd":"/","command":"printf never","shell":"login","timeout_ms":50}),
         )
         .await;
     assert_eq!(timed_out["isError"], true);
@@ -761,7 +764,7 @@ async fn task8_shell_surface_read_only_is_enforced_server_side_for_every_mutatio
         ),
         (
             "remote_run",
-            json!({"host":"dev","command":"printf must-not-run","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":"printf must-not-run","shell":"sh"}),
         ),
     ] {
         let result = session.call(name, arguments).await;
@@ -1316,7 +1319,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let run = call_json(
         &tools,
         "remote_run",
-        json!({"host":"dev", "command":"printf RUN_SENTINEL", "shell":"sh"}),
+        json!({"host":"dev", "cwd":"/", "command":"printf RUN_SENTINEL", "shell":"sh"}),
     )
     .await;
     let run_text = text_content(&run);
@@ -1870,7 +1873,7 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
         let warm = call_json(
             &tools,
             "remote_run",
-            json!({"host":host,"command":":","shell":"sh"}),
+            json!({"host":host,"cwd":"/","command":":","shell":"sh"}),
         )
         .await;
         assert_eq!(warm["isError"], Value::Null, "warm host={host}: {warm}");
@@ -2411,7 +2414,7 @@ async fn task8_output_rss_child() {
         let output = call_json(
             &output_tools,
             "remote_run",
-            json!({"host":"dev","command":":","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":":","shell":"sh"}),
         )
         .await;
         assert_eq!(output["isError"], Value::Null, "{output}");

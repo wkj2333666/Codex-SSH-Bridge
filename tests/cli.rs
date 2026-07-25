@@ -379,10 +379,7 @@ async fn task9_bash_run_fails_when_bash_is_unavailable() {
                     OsString::from("echo-command"),
                 ),
                 (OsString::from("FAKE_SSH_SHELL"), OsString::from("sh")),
-                (
-                    OsString::from("FAKE_SSH_ROOT"),
-                    remote.path().as_os_str().to_owned(),
-                ),
+                (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
             ]
             .into_iter()
             .collect(),

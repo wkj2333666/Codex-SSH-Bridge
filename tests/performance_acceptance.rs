@@ -220,7 +220,7 @@ async fn task11_release_cold_and_warm_ssh_profile() {
         let result = call_json(
             &fixture.tools,
             "remote_run",
-            json!({"host":"dev","command":":","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":":","shell":"sh"}),
         )
         .await;
         cold_samples.push(started.elapsed());
@@ -236,7 +236,7 @@ async fn task11_release_cold_and_warm_ssh_profile() {
             ("FAKE_SSH_STDERR", OsString::new()),
         ],
     );
-    let arguments = json!({"host":"dev","command":":","shell":"sh"});
+    let arguments = json!({"host":"dev","cwd":"/","command":":","shell":"sh"});
     for _ in 0..SSH_WARM_CALLS {
         let result = call_json(&warm.tools, "remote_run", arguments.clone()).await;
         assert_eq!(result["isError"], Value::Null, "{result}");
@@ -359,7 +359,7 @@ async fn task12_release_persistent_helper_cold_reuse_warm_profile() {
         let result = call_json(
             &fixture.tools,
             "remote_run",
-            json!({"host":"dev","command":"printf install","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":"printf install","shell":"sh"}),
         )
         .await;
         assert_eq!(result["isError"], Value::Null, "{result}");
@@ -377,7 +377,7 @@ async fn task12_release_persistent_helper_cold_reuse_warm_profile() {
     let result = call_json(
         &first.tools,
         "remote_run",
-        json!({"host":"dev","command":"printf first","shell":"sh"}),
+        json!({"host":"dev","cwd":"/","command":"printf first","shell":"sh"}),
     )
     .await;
     assert_eq!(result["isError"], Value::Null, "{result}");
@@ -389,7 +389,7 @@ async fn task12_release_persistent_helper_cold_reuse_warm_profile() {
     let result = call_json(
         &reuse.tools,
         "remote_run",
-        json!({"host":"dev","command":"printf reuse","shell":"sh"}),
+        json!({"host":"dev","cwd":"/","command":"printf reuse","shell":"sh"}),
     )
     .await;
     assert_eq!(result["isError"], Value::Null, "{result}");
@@ -406,7 +406,7 @@ async fn task12_release_persistent_helper_cold_reuse_warm_profile() {
         let result = call_json(
             &reuse.tools,
             "remote_run",
-            json!({"host":"dev","command":"printf warm","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":"printf warm","shell":"sh"}),
         )
         .await;
         assert_eq!(result["isError"], Value::Null, "{result}");
@@ -428,7 +428,7 @@ async fn task12_release_persistent_helper_cold_reuse_warm_profile() {
         let result = call_json(
             &shell.tools,
             "remote_run",
-            json!({"host":"dev","command":":","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":":","shell":"sh"}),
         )
         .await;
         assert_eq!(result["isError"], Value::Null, "{result}");
@@ -611,7 +611,7 @@ async fn task11_release_latency_concurrency_cancellation_and_wire_acceptance() {
             ("FAKE_SSH_STDERR", OsString::new()),
         ],
     );
-    let run_arguments = json!({"host":"dev","command":":","shell":"sh"});
+    let run_arguments = json!({"host":"dev","cwd":"/","command":":","shell":"sh"});
     for _ in 0..SSH_WARM_CALLS {
         let result = call_json(&complete.tools, "remote_run", run_arguments.clone()).await;
         assert_eq!(result["isError"], Value::Null, "{result}");
@@ -669,7 +669,7 @@ async fn five_hosts_finish_in_parallel() {
             call_json(
                 &tools,
                 "remote_run",
-                json!({"host":host,"command":":","shell":"sh"}),
+                json!({"host":host,"cwd":"/","command":":","shell":"sh"}),
             )
             .await
         });
@@ -716,7 +716,7 @@ async fn cancellation_kills_the_entire_process_group() {
         tools
             .call(
                 "remote_run".to_owned(),
-                json!({"host":"dev","command":":","shell":"sh"}),
+                json!({"host":"dev","cwd":"/","command":":","shell":"sh"}),
                 ToolCallContext {
                     cancel: call_cancel,
                     wire_budget: roomy_context().wire_budget,
@@ -850,7 +850,7 @@ async fn output_rss_child() {
         call_json(
             &tools,
             "remote_run",
-            json!({"host":"dev","command":":","shell":"sh"}),
+            json!({"host":"dev","cwd":"/","command":":","shell":"sh"}),
         )
         .await
     });
