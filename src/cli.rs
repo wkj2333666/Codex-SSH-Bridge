@@ -18,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, HostLimitOverrides, HostProfile, ResolvedHost};
+use crate::config::{Config, ResolvedHost};
 use crate::error::{BridgeError, BridgeResult};
 use crate::output::OutputStore;
 use crate::path::RemotePath;
@@ -36,7 +36,7 @@ pub use install::{
 #[derive(Debug, Parser)]
 #[command(
     name = "codex-ssh-bridge",
-    about = "Operate allowlisted SSH servers from the local machine",
+    about = "Operate OpenSSH aliases from the local machine",
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -48,7 +48,7 @@ pub struct Cli {
 pub enum Command {
     /// Run the local stdio MCP server.
     Mcp,
-    /// Manage exact allowlisted OpenSSH aliases.
+    /// Discover concrete OpenSSH aliases.
     Hosts(HostsArgs),
     /// Diagnose configuration, SSH resolution, and remote capabilities.
     Doctor(DoctorArgs),
@@ -75,27 +75,6 @@ pub struct HostsArgs {
 #[derive(Debug, Subcommand)]
 pub enum HostsCommand {
     List,
-    Show(HostName),
-    Add(AddHostArgs),
-    Remove(HostName),
-}
-
-#[derive(Debug, Args)]
-pub struct HostName {
-    #[arg(allow_hyphen_values = true)]
-    pub alias: String,
-}
-
-#[derive(Debug, Args)]
-pub struct AddHostArgs {
-    #[arg(allow_hyphen_values = true)]
-    pub alias: String,
-    #[arg(long)]
-    pub root: String,
-    #[arg(long)]
-    pub description: Option<String>,
-    #[arg(long)]
-    pub read_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -894,153 +873,16 @@ fn config_path() -> BridgeResult<PathBuf> {
 
 fn run_hosts(path: PathBuf, arguments: HostsArgs) -> BridgeResult<()> {
     match arguments.command {
-        HostsCommand::Add(arguments) => add_host(&path, arguments),
-        HostsCommand::Remove(arguments) => remove_host(&path, &arguments.alias),
         HostsCommand::List => {
             let config = Config::load_with_discovery(&path)?;
             let hosts: Vec<_> = config
-                .hosts
-                .iter()
-                .map(|(alias, profile)| host_json(alias, profile))
+                .discover_hosts()
+                .into_iter()
+                .map(|host| host.alias)
                 .collect();
             print_json(&json!({ "hosts": hosts }))
         }
-        HostsCommand::Show(arguments) => {
-            let config = Config::load_with_discovery(&path)?;
-            let host = config.host(&arguments.alias)?;
-            print_json(&host_json(host.alias, host.profile))
-        }
     }
-}
-
-fn add_host(path: &Path, arguments: AddHostArgs) -> BridgeResult<()> {
-    let mut config = load_for_add(path)?;
-    if config.hosts.contains_key(&arguments.alias) {
-        return Err(BridgeError::invalid_argument("host alias already exists"));
-    }
-    config.hosts.insert(
-        arguments.alias.clone(),
-        HostProfile {
-            root: arguments.root,
-            description: arguments.description,
-            read_only: arguments.read_only,
-            limits: HostLimitOverrides::default(),
-        },
-    );
-    ensure_config_parent(path)?;
-    config.save_atomic(path)?;
-    let profile = config
-        .hosts
-        .get(&arguments.alias)
-        .expect("inserted host profile");
-    print_json(&host_json(&arguments.alias, profile))
-}
-
-fn remove_host(path: &Path, alias: &str) -> BridgeResult<()> {
-    let mut config = Config::load(path)?;
-    let profile = config
-        .hosts
-        .remove(alias)
-        .ok_or_else(|| BridgeError::invalid_argument("host alias is not configured"))?;
-    config.save_atomic(path)?;
-    print_json(&json!({ "removed": host_json(alias, &profile) }))
-}
-
-fn load_for_add(path: &Path) -> BridgeResult<Config> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Config::load(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(error) => Err(BridgeError::io(error)),
-    }
-}
-
-fn ensure_config_parent(path: &Path) -> BridgeResult<()> {
-    let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    else {
-        return Ok(());
-    };
-    if !parent.is_absolute() {
-        return Err(BridgeError::invalid_config(
-            "configuration parent must be an absolute local path",
-        ));
-    }
-    #[cfg(unix)]
-    ensure_secure_absolute_directory(parent)?;
-    #[cfg(not(unix))]
-    fs::create_dir_all(parent).map_err(BridgeError::io)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-pub(super) fn ensure_secure_absolute_directory(path: &Path) -> BridgeResult<Vec<PathBuf>> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    use std::path::Component;
-
-    // SAFETY: credential getters have no preconditions and retain no pointers.
-    let current_uid = unsafe { libc::geteuid() };
-    let root_uid = fs::symlink_metadata("/").map_err(BridgeError::io)?.uid();
-    let mut resolved = PathBuf::from("/");
-    let mut created = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir => continue,
-            Component::CurDir => continue,
-            Component::Normal(name) => resolved.push(name),
-            Component::ParentDir | Component::Prefix(_) => {
-                return Err(BridgeError::invalid_config(
-                    "configuration parent must be a normalized absolute path",
-                ));
-            }
-        }
-        let metadata = match fs::symlink_metadata(&resolved) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mut builder = fs::DirBuilder::new();
-                builder.mode(0o700);
-                match builder.create(&resolved) {
-                    Ok(()) => created.push(resolved.clone()),
-                    Err(create_error)
-                        if create_error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(create_error) => return Err(BridgeError::io(create_error)),
-                }
-                fs::symlink_metadata(&resolved).map_err(BridgeError::io)?
-            }
-            Err(error) => return Err(BridgeError::io(error)),
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(BridgeError::invalid_config(
-                "configuration path ancestors must be real directories",
-            ));
-        }
-        if metadata.uid() != root_uid && metadata.uid() != current_uid {
-            return Err(BridgeError::invalid_config(
-                "configuration path ancestors must be owned by root or the current user",
-            ));
-        }
-        let writable = metadata.mode() & 0o022 != 0;
-        let trusted_tmp = resolved == Path::new("/tmp")
-            && metadata.uid() == root_uid
-            && metadata.mode() & 0o1000 != 0;
-        if writable && !trusted_tmp {
-            return Err(BridgeError::invalid_config(
-                "configuration path ancestors must not be writable by group or other users",
-            ));
-        }
-    }
-    Ok(created)
-}
-
-fn host_json(alias: &str, profile: &HostProfile) -> serde_json::Value {
-    json!({
-        "remote": true,
-        "host": alias,
-        "configured_root": profile.root,
-        "description": profile.description,
-        "read_only": profile.read_only,
-        "limits": profile.limits,
-    })
 }
 
 fn print_json(value: &serde_json::Value) -> BridgeResult<()> {
