@@ -76,13 +76,14 @@ impl FixtureBridge {
             &mut error.details.changed_paths,
             &mut error.details.not_changed_paths,
             &mut error.details.outcome_unknown_paths,
-        ] {
-            if let Some(paths) = paths {
-                *paths = std::mem::take(paths)
-                    .into_iter()
-                    .map(|path| self.relative(path))
-                    .collect();
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *paths = std::mem::take(paths)
+                .into_iter()
+                .map(|path| self.relative(path))
+                .collect();
         }
         error
     }
