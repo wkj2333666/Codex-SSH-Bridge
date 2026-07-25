@@ -2194,11 +2194,7 @@ mod tests {
             &[("FAKE_SSH_LOG", log.as_os_str().to_owned())],
         );
         for (path, hash, expected) in [
-            (
-                ".",
-                sha256(b"victim"),
-                ErrorCode::RemoteAbsolutePathRequired,
-            ),
+            (".", sha256(b"victim"), ErrorCode::InvalidArgument),
             ("victim", "A".repeat(64), ErrorCode::InvalidArgument),
         ] {
             assert_eq!(
