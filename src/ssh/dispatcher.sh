@@ -471,10 +471,6 @@ exit 0"
         done
     fi
     if wait "$run_job_pid"; then run_status=$?; else run_status=$?; fi
-    if [ -n "$run_watchdog_pid" ]; then
-        kill -TERM -"$run_watchdog_pid" 2>/dev/null || true
-        wait "$run_watchdog_launcher" 2>/dev/null || true
-    fi
     # A shell can exit while a long-lived child (for example an HTTP server)
     # still owns the request FIFOs.  Waiting indefinitely for those collectors
     # would withhold EXIT and consume a host request slot forever.  Give normal
@@ -496,6 +492,10 @@ exit 0"
         # when the streams are still flushing a large finite payload.
         wait "$run_stdout_collector" 2>/dev/null || true
         wait "$run_stderr_collector" 2>/dev/null || true
+    fi
+    if [ -n "$run_watchdog_pid" ]; then
+        kill -TERM -"$run_watchdog_pid" 2>/dev/null || true
+        wait "$run_watchdog_launcher" 2>/dev/null || true
     fi
     run_process_may_continue=0
     if [ ! -f "$run_stdout.done" ] || [ ! -f "$run_stderr.done" ]; then
