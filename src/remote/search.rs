@@ -141,12 +141,10 @@ if [ "$codex_rg_status" -ne 0 ] || [ "$codex_rg_empty" -ne 1 ] || [ "$codex_rg_o
 fi
 fifo=$scratch/fifo
 data=$scratch/data
-status=$scratch/status
 engine_error=$scratch/engine-error
 input=$scratch/input
 cat >"$input" || exit 2
 mkfifo "$fifo" || exit 2
-(
 xargs -0 -r sh -c '
 query=$1
 binary=$2
@@ -157,9 +155,7 @@ status=$?
 if [ "$status" -eq 1 ]; then exit 0; fi
 if [ "$status" -gt 1 ]; then printf "%s" "$status" >"$engine_error"; exit 255; fi
 exit "$status"
-' codex-ssh-bridge-rg "$query" "$binary" "$engine_error" <"$input" >"$fifo" 2>/dev/null
-printf '%s' "$?" >"$status"
-) &
+' codex-ssh-bridge-rg "$query" "$binary" "$engine_error" <"$input" >"$fifo" 2>/dev/null &
 producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
@@ -172,7 +168,7 @@ if [ "$capped" -eq 1 ]; then
     dd <&3 >/dev/null 2>&1 &
     drain=$!
     cap_wait=0
-    while [ ! -e "$status" ] && [ "$cap_wait" -lt 100 ]; do
+    while [ ! -e "$engine_error" ] && [ "$cap_wait" -lt 100 ]; do
         sleep 0
         cap_wait=$((cap_wait + 1))
     done
@@ -183,12 +179,10 @@ fi
 exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
-producer_status=$(cat "$status" 2>/dev/null || :)
 engine_status=$(cat "$engine_error" 2>/dev/null || :)
 if [ "$head_status" -ne 0 ]; then exit 2; fi
 if [ "$capped" -eq 0 ]; then
-    if [ -n "$engine_status" ] || [ "$wait_status" -ne 0 ] ||
-       [ "$producer_status" != 0 ]; then exit 2; fi
+    if [ -n "$engine_status" ] || [ "$wait_status" -ne 0 ]; then exit 2; fi
 else
     case "$engine_status" in ''|141|143) ;; *) exit 2 ;; esac
 fi
@@ -232,12 +226,10 @@ if [ "$codex_grep_status" -ne 0 ] || [ "$codex_grep_empty" -ne 1 ] ||
 fi
 fifo=$scratch/fifo
 data=$scratch/data
-status=$scratch/status
 engine_error=$scratch/engine-error
 input=$scratch/input
 cat >"$input" || exit 2
 mkfifo "$fifo" || exit 2
-(
 xargs -0 -r sh -c '
 query=$1
 engine_error=$2
@@ -247,9 +239,7 @@ status=$?
 if [ "$status" -eq 1 ]; then exit 0; fi
 if [ "$status" -gt 1 ]; then printf "%s" "$status" >"$engine_error"; exit 255; fi
 exit "$status"
-' codex-ssh-bridge-grep "$query" "$engine_error" <"$input" >"$fifo" 2>/dev/null
-printf '%s' "$?" >"$status"
-) &
+' codex-ssh-bridge-grep "$query" "$engine_error" <"$input" >"$fifo" 2>/dev/null &
 producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
@@ -262,7 +252,7 @@ if [ "$capped" -eq 1 ]; then
     dd <&3 >/dev/null 2>&1 &
     drain=$!
     cap_wait=0
-    while [ ! -e "$status" ] && [ "$cap_wait" -lt 100 ]; do
+    while [ ! -e "$engine_error" ] && [ "$cap_wait" -lt 100 ]; do
         sleep 0
         cap_wait=$((cap_wait + 1))
     done
@@ -273,12 +263,10 @@ fi
 exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
-producer_status=$(cat "$status" 2>/dev/null || :)
 engine_status=$(cat "$engine_error" 2>/dev/null || :)
 if [ "$head_status" -ne 0 ]; then exit 2; fi
 if [ "$capped" -eq 0 ]; then
-    if [ -n "$engine_status" ] || [ "$wait_status" -ne 0 ] ||
-       [ "$producer_status" != 0 ]; then exit 2; fi
+    if [ -n "$engine_status" ] || [ "$wait_status" -ne 0 ]; then exit 2; fi
 else
     case "$engine_status" in ''|141|143) ;; *) exit 2 ;; esac
 fi
