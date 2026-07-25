@@ -2,6 +2,7 @@
 target/
 .superpowers/
 **/.superpowers/
+docs/superpowers/
 .mcp.json
 __pycache__/
 *.pyc
