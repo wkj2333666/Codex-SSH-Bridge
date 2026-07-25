@@ -260,7 +260,29 @@ impl RemoteBridge {
         owned: T,
         cancel: CancellationToken,
     ) -> BridgeResult<OutputReference> {
-        let stored = match provenance {
+        let stored = self.resolve_retention_provenance(provenance).await?;
+        self.runner
+            .retain_serialized_detail(stored, owned, cancel)
+            .await
+    }
+
+    pub async fn retain_presentation(
+        &self,
+        provenance: RetentionProvenance,
+        owned: String,
+        cancel: CancellationToken,
+    ) -> BridgeResult<OutputReference> {
+        let stored = self.resolve_retention_provenance(provenance).await?;
+        self.runner
+            .retain_bytes(stored, owned.into_bytes(), cancel)
+            .await
+    }
+
+    async fn resolve_retention_provenance(
+        &self,
+        provenance: RetentionProvenance,
+    ) -> BridgeResult<StoredProvenance> {
+        Ok(match provenance {
             RetentionProvenance::Remote(context) => {
                 if !context.remote {
                     return Err(invalid_retention_provenance());
@@ -339,10 +361,7 @@ impl RemoteBridge {
                 },
                 source_count,
             },
-        };
-        self.runner
-            .retain_serialized_detail(stored, owned, cancel)
-            .await
+        })
     }
 
     async fn execute_readonly_fixed(

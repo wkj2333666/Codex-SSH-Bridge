@@ -628,6 +628,17 @@ impl SshRunner {
             .await
     }
 
+    pub(crate) async fn retain_bytes(
+        &self,
+        provenance: StoredProvenance,
+        owned: Vec<u8>,
+        cancel: CancellationToken,
+    ) -> BridgeResult<OutputReference> {
+        self.output_store
+            .retain_bytes(provenance, owned, cancel)
+            .await
+    }
+
     pub(crate) async fn execute_fixed_once(
         &self,
         mut request: FixedRunRequest,

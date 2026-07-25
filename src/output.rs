@@ -728,6 +728,98 @@ impl OutputStore {
         Ok(OutputReference(token))
     }
 
+    pub(crate) async fn retain_bytes(
+        &self,
+        provenance: StoredProvenance,
+        owned: Vec<u8>,
+        cancel: CancellationToken,
+    ) -> BridgeResult<OutputReference> {
+        retry_tombstones(&self.tombstones);
+        let _job = Arc::clone(&self.retention_jobs)
+            .try_acquire_owned()
+            .map_err(|_| retention_unavailable())?;
+        let slot = Arc::clone(&self.entry_slots)
+            .try_acquire_owned()
+            .map_err(|_| retention_unavailable())?;
+        if !self.quota.try_reserve(MAX_OUTPUT_BYTES) {
+            return Err(retention_unavailable());
+        }
+        let accounting = Arc::new(EntryAccounting::with_reservation(
+            Arc::clone(&self.quota),
+            MAX_OUTPUT_BYTES,
+            slot,
+        ));
+        if cancel.is_cancelled() {
+            return Err(retention_cancelled());
+        }
+
+        let (token, path, file) = create_detail_file(self.spool_directory.path())?;
+        let worker_cancel = cancel.child_token();
+        let actual_written = Arc::new(AtomicU64::new(0));
+        let (sender, receiver) = oneshot::channel();
+        let handle = match std::thread::Builder::new()
+            .name("codex-retention-writer".to_owned())
+            .spawn({
+                let worker_cancel = worker_cancel.clone();
+                let actual_written = Arc::clone(&actual_written);
+                move || {
+                    let mut writer = CappedDetailWriter::new(file, worker_cancel, actual_written);
+                    let result = match std::io::Write::write_all(&mut writer, &owned) {
+                        Ok(()) => writer.finish(),
+                        Err(_) if writer.cancel.is_cancelled() => Err(retention_cancelled()),
+                        Err(_) => Err(retention_serialization_failed()),
+                    };
+                    let _ = sender.send(result);
+                }
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                accounting.shrink_stdout_to(0);
+                cleanup_paths(vec![path], vec![accounting], &self.tombstones);
+                return Err(BridgeError::io(error));
+            }
+        };
+        let guard = SerializationJoinGuard::new(
+            handle,
+            worker_cancel,
+            path,
+            accounting,
+            actual_written,
+            Arc::clone(&self.tombstones),
+        );
+        let retention = receiver
+            .await
+            .unwrap_or_else(|_| Err(retention_serialization_failed()));
+        let (path, length, accounting) = guard.finish(retention)?;
+        if cancel.is_cancelled() {
+            cleanup_paths(vec![path], vec![accounting], &self.tombstones);
+            return Err(retention_cancelled());
+        }
+        let expires_at = Instant::now() + self.ttl;
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                token.clone(),
+                SpoolEntry {
+                    stdout_path: path,
+                    stderr_path: None,
+                    stdout_len: length,
+                    stderr_len: 0,
+                    expires_at,
+                    provenance: Some(provenance),
+                    accounting: Some(accounting),
+                },
+            );
+        schedule_expiry(
+            Arc::clone(&self.entries),
+            Arc::clone(&self.tombstones),
+            token.clone(),
+            expires_at,
+        );
+        Ok(OutputReference(token))
+    }
+
     pub async fn capture<Stdout, Stderr>(
         &self,
         stdout: Stdout,

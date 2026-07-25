@@ -87,7 +87,6 @@ pub async fn hosts(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
-                    detail: result,
                     provenance,
                     output_ref: None,
                     truncated: false,
@@ -117,7 +116,6 @@ pub async fn list(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
-                    detail: result,
                     provenance,
                     output_ref: None,
                     truncated,
@@ -146,7 +144,6 @@ pub async fn stat(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
-                    detail: result,
                     provenance,
                     output_ref: None,
                     truncated: false,
@@ -176,7 +173,6 @@ pub async fn search(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
-                    detail: result,
                     provenance,
                     output_ref: None,
                     truncated,
@@ -214,7 +210,6 @@ pub async fn read(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
-                    detail: result,
                     provenance,
                     output_ref: None,
                     truncated,
@@ -307,7 +302,6 @@ pub async fn write(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
-                    detail: result,
                     provenance,
                     output_ref: None,
                     truncated: false,
@@ -335,7 +329,6 @@ pub async fn apply_patch(
                 RetainedPresentation {
                     text: "Done!".to_owned(),
                     structured_content: json!({}),
-                    detail: result,
                     provenance,
                     output_ref: None,
                     truncated: false,
@@ -381,7 +374,6 @@ pub async fn run(
                 RetainedPresentation {
                     text,
                     structured_content: metadata,
-                    detail: result,
                     provenance,
                     output_ref: existing_ref,
                     truncated: source_truncated,
@@ -395,18 +387,17 @@ pub async fn run(
     }
 }
 
-struct RetainedPresentation<T> {
+struct RetainedPresentation {
     text: String,
     structured_content: Value,
-    detail: T,
     provenance: RetentionProvenance,
     output_ref: Option<String>,
     truncated: bool,
 }
 
-async fn render_text_retained<T: Serialize + Send + 'static>(
+async fn render_text_retained(
     bridge: Arc<RemoteBridge>,
-    presentation: RetainedPresentation<T>,
+    presentation: RetainedPresentation,
     budget: WireBudget,
     cancel: CancellationToken,
 ) -> CallToolResult {
@@ -423,7 +414,7 @@ async fn render_text_retained<T: Serialize + Send + 'static>(
     let retained = match presentation.output_ref {
         Some(output_ref) => Some(output_ref),
         None => bridge
-            .retain_serialized_detail(presentation.provenance, presentation.detail, cancel)
+            .retain_presentation(presentation.provenance, presentation.text.clone(), cancel)
             .await
             .ok()
             .map(|reference| reference.as_str().to_owned()),
@@ -1423,5 +1414,49 @@ mod tests {
         assert_eq!(run_result["structuredContent"]["exit_code"], 0);
         assert_eq!(run_result["structuredContent"]["truncated"], true);
         assert!(run_result["structuredContent"].get("output_ref").is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_success_pages_are_the_original_presentation_not_internal_json() {
+        let (_runtime, bridge) = bridge_fixture();
+        let hosts = (0..8_000)
+            .map(|index| HostInfo {
+                host: format!("host-{index:05}"),
+            })
+            .collect::<Vec<_>>();
+        let expected = hosts
+            .iter()
+            .map(|host| host.host.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rendered = result_value(
+            super::hosts(
+                Arc::clone(&bridge),
+                Ok(HostsResult { hosts }),
+                roomy_budget(),
+                CancellationToken::new(),
+            )
+            .await,
+        );
+        let output_ref = rendered["structuredContent"]["output_ref"]
+            .as_str()
+            .expect("large presentation must be retained");
+        let page = bridge
+            .output_read(
+                crate::remote::OutputReadRequest {
+                    output_ref: output_ref.to_owned(),
+                    stream: StreamKind::Stdout,
+                    offset: 0,
+                    max_bytes: expected.len(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("retained presentation must be readable");
+        assert_eq!(page.data.encoding, ValueEncoding::Utf8);
+        assert_eq!(page.data.value, expected);
+        assert!(page.eof);
+        assert!(!page.data.value.starts_with('{'));
+        assert!(!page.data.value.contains("\"hosts\""));
     }
 }
