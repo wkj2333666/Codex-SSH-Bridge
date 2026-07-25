@@ -1515,6 +1515,7 @@ fn task3_runner(
     let base = TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
     let store = Arc::new(OutputStore::with_ttl(&runtime, ttl).unwrap());
+    let isolated_helper_directory = base.path().join("helpers-disabled");
     let mut environment: BTreeMap<OsString, OsString> = environment
         .iter()
         .map(|(key, value)| (OsString::from(key), OsString::from(value)))
@@ -1522,6 +1523,10 @@ fn task3_runner(
     environment
         .entry(OsString::from("FAKE_SSH_ROOT"))
         .or_insert_with(|| OsString::from("/"));
+    environment.insert(
+        OsString::from("CODEX_SSH_BRIDGE_HELPERS_DIR"),
+        isolated_helper_directory.into_os_string(),
+    );
     let runner = Arc::new(
         SshRunner::with_executable(
             task3_config(hosts, limits),
