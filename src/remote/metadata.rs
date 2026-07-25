@@ -240,7 +240,7 @@ pub(super) async fn list(
             return Err(attach(protocol_error("list relative path is invalid")));
         }
         let actual = join_raw(root, discovered);
-        let relative = join_raw(request.path.relative().as_bytes(), discovered);
+        let relative = discovered.to_vec();
         completed_records += 1;
         if !request.include_hidden
             && discovered

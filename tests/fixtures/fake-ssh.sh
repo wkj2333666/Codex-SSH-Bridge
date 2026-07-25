@@ -316,7 +316,7 @@ case "${FAKE_SSH_MODE:-echo-argv}" in
 			*codex-sentinel-search-find*)
 				candidate_root=${FAKE_SSH_CANDIDATE_ROOT:-.}
 				record_bytes=838
-				leaf_bytes=$((record_bytes - 10))
+				leaf_bytes=$((record_bytes - ${#candidate_root} - 9))
 				if [ "$leaf_bytes" -le 0 ]; then exit 2; fi
 				leaf=$(dd if=/dev/zero bs=1 count="$leaf_bytes" 2>/dev/null | tr '\000' x)
 				if [ "${FAKE_SSH_MODE:-}" = large-candidates-all-match ]; then
@@ -329,7 +329,7 @@ case "${FAKE_SSH_MODE:-echo-argv}" in
 						for (i = 1; i < 10000; i++) printf "%s/reject/%s%c", root, leaf, 0
 					}'
 				fi
-				lookahead_leaf_bytes=$((8608 - 10))
+				lookahead_leaf_bytes=$((8608 - ${#candidate_root} - 9))
 				lookahead_leaf=$(dd if=/dev/zero bs=1 count="$lookahead_leaf_bytes" 2>/dev/null | tr '\000' y)
 				if [ "${FAKE_SSH_MODE:-}" = large-candidates-all-match ]; then
 					printf '%s/accept/%s\000' "$candidate_root" "$lookahead_leaf"
