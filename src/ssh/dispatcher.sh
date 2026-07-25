@@ -497,6 +497,8 @@ exit 0"
         kill -TERM -"$run_watchdog_pid" 2>/dev/null || true
         wait "$run_watchdog_launcher" 2>/dev/null || true
     fi
+    run_process_group_alive=0
+    if kill -0 -"$run_pid" 2>/dev/null; then run_process_group_alive=1; fi
     run_process_may_continue=0
     if [ ! -f "$run_stdout.done" ] || [ ! -f "$run_stderr.done" ]; then
         run_process_may_continue=1
