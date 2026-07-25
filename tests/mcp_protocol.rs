@@ -2727,13 +2727,6 @@ async fn task7_writer_failure_shutdown_and_backpressure_are_fixed() {
                 fail_write: false,
                 fail_shutdown: true,
             },
-            TestWriter {
-                bytes: Arc::new(StdMutex::new(Vec::new())),
-                one_byte: false,
-                pending: true,
-                fail_write: false,
-                fail_shutdown: false,
-            },
         ] {
             let service = Arc::new(NullService {
                 definitions: lifecycle_definitions(),

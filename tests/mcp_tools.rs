@@ -2219,7 +2219,7 @@ fn retention_models_fixture(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), root.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
     ]);
     let runner = Arc::new(
         SshRunner::with_executable(
