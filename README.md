@@ -125,8 +125,8 @@ ssh devbox
 ```
 
 Future aliases are discovered automatically from `~/.ssh/config` and its
-supported `Include` files. `hosts add` remains available for compatibility
-profiles, but MCP operations do not use a configured root to infer paths. The default local config is
+supported `Include` files. MCP operations do not use a configured root to
+infer paths. The default local config is
 `~/.config/codex-ssh-bridge/config.toml`; [config.example.toml](config.example.toml)
 documents limits. It accepts configuration `version = 2` and contains only
 global transport and bounded-I/O limits—never credentials.

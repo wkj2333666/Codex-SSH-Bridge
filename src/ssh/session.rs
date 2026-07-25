@@ -154,8 +154,8 @@ impl OutputForwarder {
     }
 
     fn finish(mut self) -> bool {
-        self.sender.take();
-        self.cancel.take();
+        drop(self.sender.take());
+        drop(self.cancel.take());
         self.failed()
     }
 }
