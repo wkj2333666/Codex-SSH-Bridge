@@ -1537,8 +1537,22 @@ fn fixed_script_prefix(command: &str, marker: &str) -> String {
 
 fn normalized_remote_run_shape(log: &std::path::Path) -> (String, String) {
     // The payload is carried in DATA frames; a hostile stdin value must not
-    // alter the static direct-rendered remote command at all.
-    only_command_record(log)
+    // alter the static direct-rendered remote command at all. The final shell
+    // word is the remaining request deadline, so normalize only that dynamic
+    // value before comparing repeated calls.
+    let (argv, command) = only_command_record(log);
+    let (prefix, timeout) = command
+        .rsplit_once(' ')
+        .expect("remote_run command has a timeout argument");
+    let seconds = timeout
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix("s'"))
+        .expect("remote_run timeout is a quoted seconds value");
+    let seconds = seconds
+        .parse::<f64>()
+        .expect("remote_run timeout contains a finite number");
+    assert!(seconds.is_finite(), "remote_run timeout must be finite");
+    (argv, format!("{prefix} '<timeout>'"))
 }
 
 fn assert_hostile_marker_absent(remote: &std::path::Path) {
