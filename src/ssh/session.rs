@@ -1216,8 +1216,6 @@ mod tests {
             max_write_bytes: 8 * 1024 * 1024,
             preview_bytes: 1024,
             max_output_bytes: 8 * 1024 * 1024,
-            global_concurrency: 8,
-            per_host_concurrency: 8,
         }
     }
 

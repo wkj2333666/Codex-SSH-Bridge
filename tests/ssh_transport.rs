@@ -3167,11 +3167,8 @@ async fn output_capture_read_error_cleans_an_unregistered_spool() {
 }
 
 #[tokio::test]
-async fn queued_cancellation_never_claims_a_remote_process_may_continue() {
-    let limits = Limits {
-        per_host_concurrency: 1,
-        ..Limits::default()
-    };
+async fn concurrent_cancellation_reports_the_started_remote_process() {
+    let limits = Limits::default();
     let log_dir = TempDir::new().unwrap();
     let log = log_dir.path().join("calls.log");
     let fixture = task3_runner(
@@ -3199,10 +3196,10 @@ async fn queued_cancellation_never_claims_a_remote_process_may_continue() {
     };
     wait_for_log_marker(&log, "C").await;
 
-    let queued_cancel = CancellationToken::new();
-    let queued = {
+    let second_cancel = CancellationToken::new();
+    let second = {
         let runner = Arc::clone(&fixture.runner);
-        let token = queued_cancel.clone();
+        let token = second_cancel.clone();
         tokio::spawn(async move {
             runner
                 .execute(
@@ -3213,10 +3210,10 @@ async fn queued_cancellation_never_claims_a_remote_process_may_continue() {
         })
     };
     sleep(Duration::from_millis(20)).await;
-    queued_cancel.cancel();
-    let error = queued.await.unwrap().unwrap_err();
+    second_cancel.cancel();
+    let error = second.await.unwrap().unwrap_err();
     assert_eq!(error.code, ErrorCode::Cancelled);
-    assert_eq!(error.details.remote_process_may_continue, Some(false));
+    assert_eq!(error.details.remote_process_may_continue, Some(true));
 
     first_cancel.cancel();
     first.await.unwrap().unwrap_err();

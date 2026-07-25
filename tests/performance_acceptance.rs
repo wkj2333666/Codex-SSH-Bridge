@@ -55,8 +55,6 @@ fn fake_fixture(hosts: &[&str], environment: &[(&str, OsString)]) -> FakeFixture
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = Config::default();
-    config.limits.global_concurrency = 8;
-    config.limits.per_host_concurrency = 2;
     config.hosts = hosts
         .iter()
         .map(|host| {
@@ -104,8 +102,6 @@ fn persistent_fake_fixture(remote_home: &Path) -> FakeFixture {
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = Config::default();
-    config.limits.global_concurrency = 8;
-    config.limits.per_host_concurrency = 2;
     config.hosts.insert(
         "dev".to_owned(),
         codex_ssh_bridge::config::HostProfile {

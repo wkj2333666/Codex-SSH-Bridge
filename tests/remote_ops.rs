@@ -7011,8 +7011,6 @@ async fn task5_five_hosts_write_four_mib_with_bounded_rss_and_complete_cleanup()
         host.root = root.to_str().unwrap().to_owned();
         config.hosts.insert(format!("h{index}"), host);
     }
-    config.limits.global_concurrency = 5;
-    config.limits.per_host_concurrency = 1;
     let environment = BTreeMap::from([
         (
             OsString::from("FAKE_SSH_MODE"),
@@ -7184,8 +7182,6 @@ async fn five_hosts_successfully_stream_forty_mib_below_rss_bound() {
     for index in 1..5 {
         config.hosts.insert(format!("h{index}"), profile.clone());
     }
-    config.limits.global_concurrency = 5;
-    config.limits.per_host_concurrency = 1;
     let environment = BTreeMap::from([
         (
             OsString::from("FAKE_SSH_MODE"),

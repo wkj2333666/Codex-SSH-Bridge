@@ -58,10 +58,6 @@ pub struct Limits {
     pub max_write_bytes: usize,
     pub preview_bytes: usize,
     pub max_output_bytes: u64,
-    #[serde(skip)]
-    pub global_concurrency: usize,
-    #[serde(skip)]
-    pub per_host_concurrency: usize,
     pub global_spool_quota_bytes: u64,
     pub retention_serialization_jobs: usize,
 }
@@ -77,8 +73,6 @@ impl Default for Limits {
             max_write_bytes: MAX_WRITE_BYTES,
             preview_bytes: 256 * 1024,
             max_output_bytes: MAX_OUTPUT_BYTES,
-            global_concurrency: 8,
-            per_host_concurrency: 2,
             global_spool_quota_bytes: DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES,
             retention_serialization_jobs: DEFAULT_RETENTION_SERIALIZATION_JOBS,
         }
@@ -106,7 +100,6 @@ pub struct HostLimitOverrides {
     pub max_write_bytes: Option<usize>,
     pub preview_bytes: Option<usize>,
     pub max_output_bytes: Option<u64>,
-    pub per_host_concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,8 +112,6 @@ pub struct EffectiveLimits {
     pub max_write_bytes: usize,
     pub preview_bytes: usize,
     pub max_output_bytes: u64,
-    pub global_concurrency: usize,
-    pub per_host_concurrency: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,8 +337,10 @@ struct LimitsV1 {
     max_write_bytes: usize,
     preview_bytes: usize,
     max_output_bytes: u64,
-    global_concurrency: usize,
-    per_host_concurrency: usize,
+    #[serde(rename = "global_concurrency")]
+    _global_concurrency: usize,
+    #[serde(rename = "per_host_concurrency")]
+    _per_host_concurrency: usize,
     global_spool_quota_bytes: u64,
     retention_serialization_jobs: usize,
 }
@@ -364,8 +357,8 @@ impl Default for LimitsV1 {
             max_write_bytes: current.max_write_bytes,
             preview_bytes: current.preview_bytes,
             max_output_bytes: current.max_output_bytes,
-            global_concurrency: current.global_concurrency,
-            per_host_concurrency: current.per_host_concurrency,
+            _global_concurrency: 8,
+            _per_host_concurrency: 2,
             global_spool_quota_bytes: current.global_spool_quota_bytes,
             retention_serialization_jobs: current.retention_serialization_jobs,
         }
@@ -392,8 +385,6 @@ pub fn migrate_v1_text(contents: &str) -> BridgeResult<MigratedV1> {
             max_write_bytes: old.limits.max_write_bytes,
             preview_bytes: old.limits.preview_bytes,
             max_output_bytes: old.limits.max_output_bytes,
-            global_concurrency: old.limits.global_concurrency,
-            per_host_concurrency: old.limits.per_host_concurrency,
             global_spool_quota_bytes: old.limits.global_spool_quota_bytes,
             retention_serialization_jobs: old.limits.retention_serialization_jobs,
         },
@@ -484,10 +475,6 @@ fn effective_limits(global: &Limits, host: &HostLimitOverrides) -> EffectiveLimi
         max_write_bytes: host.max_write_bytes.unwrap_or(global.max_write_bytes),
         preview_bytes: host.preview_bytes.unwrap_or(global.preview_bytes),
         max_output_bytes: host.max_output_bytes.unwrap_or(global.max_output_bytes),
-        global_concurrency: global.global_concurrency,
-        per_host_concurrency: host
-            .per_host_concurrency
-            .unwrap_or(global.per_host_concurrency),
     }
 }
 

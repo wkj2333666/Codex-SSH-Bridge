@@ -1825,11 +1825,7 @@ fn five_host_tools_fixture(
         })
         .collect();
     let config = Config {
-        limits: codex_ssh_bridge::config::Limits {
-            global_concurrency: 8,
-            per_host_concurrency: 2,
-            ..codex_ssh_bridge::config::Limits::default()
-        },
+        limits: codex_ssh_bridge::config::Limits::default(),
         hosts,
         ..Config::default()
     };
