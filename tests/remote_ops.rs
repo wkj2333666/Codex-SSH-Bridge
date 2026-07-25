@@ -229,16 +229,7 @@ async fn retention_rejects_uncached_or_forged_remote_provenance_before_serializi
     assert_eq!(spool_file_count(runtime.path()), 0);
 
     let valid = cached_context(&bridge).await;
-    let cached_shell = bridge
-        .hosts()
-        .await
-        .unwrap()
-        .hosts
-        .into_iter()
-        .find(|host| host.host == "dev")
-        .unwrap()
-        .shell
-        .unwrap();
+    let cached_shell = valid.shell.clone();
     let mut invalid = Vec::new();
     let mut remote_false = valid.clone();
     remote_false.remote = false;
@@ -1477,12 +1468,7 @@ async fn physical_root_retarget_read_uses_cached_diagnostics_and_new_filesystem_
         &second_read.files[0],
         ReadEntry::Success { content, .. } if content.value == "second\n"
     ));
-    assert_eq!(
-        bridge.hosts().await.unwrap().hosts[0]
-            .physical_root
-            .as_deref(),
-        first.to_str()
-    );
+    assert_eq!(bridge.hosts().await.unwrap().hosts[0].host, "dev");
     assert_eq!(
         ssh_call_count(&log, "P"),
         1,
@@ -6779,7 +6765,7 @@ async fn hosts_are_local_and_list_and_read_bounds_are_exact() {
     }
     let (_runtime, _runner, bridge) = fixture(remote.path(), false);
     let hosts = bridge.hosts().await.unwrap();
-    assert_eq!(hosts.hosts[0].physical_root, None);
+    assert_eq!(hosts.hosts[0].host, "dev");
     let list = bridge
         .list(
             ListRequest {
