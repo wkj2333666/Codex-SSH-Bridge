@@ -32,7 +32,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.rustup/toolchains/${{ env.RUST_TOOLCHAIN }}-*
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-toolchain-${{ env.RUST_TOOLCHAIN }}-minimal
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-toolchain-${{ env.RUST_TOOLCHAIN }}-quality-components
 
       - name: Install pinned Rust toolchain
         run: |
@@ -53,14 +53,17 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target
-          key: ${{ runner.os }}-rust-target-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-target-quality-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-rust-target-${{ env.RUST_TOOLCHAIN }}-
+            ${{ runner.os }}-${{ runner.arch }}-rust-target-quality-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-${{ runner.arch }}-rust-target-quality-${{ env.RUST_TOOLCHAIN }}-
 
       - name: Install command-line test dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ripgrep
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends ripgrep
+          fi
 
       - name: Check formatting
         run: cargo +"$RUST_TOOLCHAIN" fmt --all -- --check
@@ -69,10 +72,7 @@ jobs:
         run: cargo +"$RUST_TOOLCHAIN" clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
-        run: cargo +"$RUST_TOOLCHAIN" test --all-targets --all-features --locked -- --test-threads=1
-
-      - name: Build release binary
-        run: cargo +"$RUST_TOOLCHAIN" build --release --locked
+        run: cargo +"$RUST_TOOLCHAIN" test --all-targets --all-features --locked
 
       - name: Validate source package metadata
         shell: bash
@@ -89,7 +89,6 @@ jobs:
 
   diagnostics:
     name: Release profile and RSS diagnostics
-    needs: quality
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -118,14 +117,17 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target
-          key: ${{ runner.os }}-rust-target-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-target-diagnostics-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-rust-target-${{ env.RUST_TOOLCHAIN }}-
+            ${{ runner.os }}-${{ runner.arch }}-rust-target-diagnostics-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-${{ runner.arch }}-rust-target-diagnostics-${{ env.RUST_TOOLCHAIN }}-
 
       - name: Install command-line test dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ripgrep
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends ripgrep
+          fi
 
       - name: Collect cold/warm profile
         shell: bash
