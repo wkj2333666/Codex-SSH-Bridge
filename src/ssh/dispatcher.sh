@@ -451,7 +451,7 @@ exit 0"
             if kill -0 -"$2" 2>/dev/null; then
                 : >"$3"
                 kill -TERM -"$2" 2>/dev/null || true
-                sleep 1
+                sleep 0.05
                 kill -KILL -"$2" 2>/dev/null || true
             fi
         ' codex-ssh-watchdog "$run_timeout_delay" "$run_pid" "$run_timeout_marker" \
