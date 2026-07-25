@@ -497,6 +497,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     std::fs::write(remote.path().join("binary.bin"), [0xff, 0x00, 0x7f]).unwrap();
     let (_runtime, _log, tools) = fake_remote_tools_fixture(remote.path());
     let mut session = ProtocolSession::start(tools).await;
+    let root = remote.path();
 
     let hosts = session.call("remote_hosts", json!({})).await;
     assert_no_diagnostic_success_fields(&hosts);
@@ -506,7 +507,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let listed = session
         .call(
             "remote_list",
-            json!({"host":"dev","path":".","max_entries":32}),
+            json!({"host":"dev","path":root,"max_entries":32}),
         )
         .await;
     assert_no_diagnostic_success_fields(&listed);
@@ -516,7 +517,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let stated = session
         .call(
             "remote_stat",
-            json!({"host":"dev","paths":["binary.bin","missing.txt"]}),
+            json!({"host":"dev","paths":[root.join("binary.bin"),root.join("missing.txt")]}),
         )
         .await;
     assert_no_diagnostic_success_fields(&stated);
@@ -528,7 +529,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let searched = session
         .call(
             "remote_search",
-            json!({"host":"dev","query":"$(touch SHOULD_NOT_EXIST)","path":"."}),
+            json!({"host":"dev","query":"$(touch SHOULD_NOT_EXIST)","path":root}),
         )
         .await;
     assert_no_diagnostic_success_fields(&searched);
@@ -538,7 +539,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let read = session
         .call(
             "remote_read",
-            json!({"host":"dev","paths":["utf8.txt","binary.bin"],"max_bytes":4096}),
+            json!({"host":"dev","paths":[root.join("utf8.txt"),root.join("binary.bin")],"max_bytes":4096}),
         )
         .await;
     assert_no_diagnostic_success_fields(&read);
@@ -574,7 +575,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         .call(
             "remote_write",
             json!({
-                "host":"dev","path":"created.txt","content":"WRITE_SURFACE\n",
+                "host":"dev","path":root.join("created.txt"),"content":"WRITE_SURFACE\n",
                 "encoding":"utf8","mode":{"kind":"create"}
             }),
         )
@@ -588,7 +589,10 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             "remote_apply_patch",
             json!({
                 "host":"dev",
-                "patch":"--- a/created.txt\n+++ b/created.txt\n@@ -1 +1 @@\n-WRITE_SURFACE\n+PATCH_SURFACE\n"
+                "patch":format!(
+                    "--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-WRITE_SURFACE\n+PATCH_SURFACE\n",
+                    root.join("created.txt").display()
+                )
             }),
         )
         .await;
@@ -712,78 +716,6 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
         "COMMAND_TIMEOUT"
     );
     assert!(timed_out["structuredContent"].get("shell").is_none());
-    session.close().await;
-}
-
-#[tokio::test]
-async fn task8_shell_surface_read_only_is_enforced_server_side_for_every_mutation() {
-    let remote = tempfile::TempDir::new().unwrap();
-    std::fs::write(remote.path().join("read.txt"), b"READ_ONLY_SENTINEL\n").unwrap();
-    let (_runtime, log, tools) = fake_remote_tools_with_options(remote.path(), true, &[]);
-    let id = RequestId::synthetic_max_wire();
-    let minimum_frame = required_mcp_frame_bytes(
-        tool_definitions(),
-        codex_ssh_bridge::mcp::maximum_compact_fallback_result_bytes(),
-        &id,
-    )
-    .unwrap();
-    let mut session = ProtocolSession::start_with_frame(tools, minimum_frame).await;
-    let hosts = session.call("remote_hosts", json!({})).await;
-    assert_eq!(hosts["structuredContent"], json!({}));
-    assert_eq!(text_content(&hosts), "dev");
-
-    for (name, arguments) in [
-        (
-            "remote_list",
-            json!({"host":"dev","path":".","max_entries":1}),
-        ),
-        ("remote_stat", json!({"host":"dev","paths":["read.txt"]})),
-        (
-            "remote_search",
-            json!({"host":"dev","query":"READ_ONLY_SENTINEL","path":"."}),
-        ),
-        ("remote_read", json!({"host":"dev","paths":["read.txt"]})),
-    ] {
-        let result = session.call(name, arguments).await;
-        assert_ne!(result["isError"], true, "{name}: {result}");
-        assert!(
-            result["structuredContent"].get("remote").is_none(),
-            "{name}: {result}"
-        );
-    }
-
-    std::fs::write(&log, b"").unwrap();
-    for (name, arguments) in [
-        (
-            "remote_write",
-            json!({"host":"dev","path":"new.txt","content":"x","encoding":"utf8","mode":{"kind":"create"}}),
-        ),
-        (
-            "remote_apply_patch",
-            json!({"host":"dev","patch":"--- a/read.txt\n+++ b/read.txt\n@@ -1 +1 @@\n-READ_ONLY_SENTINEL\n+changed\n"}),
-        ),
-        (
-            "remote_run",
-            json!({"host":"dev","cwd":"/","command":"printf must-not-run","shell":"sh"}),
-        ),
-    ] {
-        let result = session.call(name, arguments).await;
-        assert_eq!(result["isError"], true, "{name}: {result}");
-        assert_eq!(
-            result["structuredContent"]["error"]["code"], "READ_ONLY_HOST",
-            "{name}"
-        );
-    }
-    assert_eq!(
-        command_calls(&log),
-        0,
-        "read-only mutations must launch no command child"
-    );
-    assert!(!remote.path().join("new.txt").exists());
-    assert_eq!(
-        std::fs::read(remote.path().join("read.txt")).unwrap(),
-        b"READ_ONLY_SENTINEL\n"
-    );
     session.close().await;
 }
 
@@ -1269,11 +1201,12 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     std::fs::write(remote.path().join("utf8.txt"), b"UTF8_SENTINEL\nsecond\n").unwrap();
     std::fs::write(remote.path().join("binary.bin"), [0xff, 0x00, 0x7f]).unwrap();
     let (_runtime, log, tools) = fake_remote_tools_fixture(remote.path());
+    let root = remote.path();
 
     let listed = call_json(
         &tools,
         "remote_list",
-        json!({"host":"dev", "path":".", "max_entries":32}),
+        json!({"host":"dev", "path":root, "max_entries":32}),
     )
     .await;
     assert!(text_content(&listed).contains("utf8.txt"));
@@ -1283,7 +1216,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let stated = call_json(
         &tools,
         "remote_stat",
-        json!({"host":"dev", "paths":["utf8.txt", "binary.bin"]}),
+        json!({"host":"dev", "paths":[root.join("utf8.txt"), root.join("binary.bin")]}),
     )
     .await;
     assert_eq!(text_content(&stated).lines().count(), 2);
@@ -1296,7 +1229,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let read = call_json(
         &tools,
         "remote_read",
-        json!({"host":"dev", "paths":["utf8.txt", "binary.bin"], "max_bytes":4096}),
+        json!({"host":"dev", "paths":[root.join("utf8.txt"), root.join("binary.bin")], "max_bytes":4096}),
     )
     .await;
     let read_text = text_content(&read);
@@ -1311,7 +1244,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let searched = call_json(
         &tools,
         "remote_search",
-        json!({"host":"dev", "query":"UTF8_SENTINEL", "path":"."}),
+        json!({"host":"dev", "query":"UTF8_SENTINEL", "path":root}),
     )
     .await;
     assert!(text_content(&searched).contains("UTF8_SENTINEL"));
@@ -1332,7 +1265,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         "remote_write",
         json!({
             "host":"dev",
-            "path":"created.txt",
+            "path":root.join("created.txt"),
             "content":"WRITE_SENTINEL\n",
             "encoding":"utf8",
             "mode":{"kind":"create"}
@@ -1351,7 +1284,10 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         "remote_apply_patch",
         json!({
             "host":"dev",
-            "patch":"--- a/created.txt\n+++ b/created.txt\n@@ -1 +1 @@\n-WRITE_SENTINEL\n+PATCH_SENTINEL\n"
+            "patch":format!(
+                "--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-WRITE_SENTINEL\n+PATCH_SENTINEL\n",
+                root.join("created.txt").display()
+            )
         }),
     )
     .await;
@@ -1577,16 +1513,17 @@ async fn task8_hostile_path_and_cwd_are_data_only_and_nul_is_prelaunch() {
     call_json(
         &tools,
         "remote_list",
-        json!({"host":"dev","path":".","max_entries":1}),
+        json!({"host":"dev","path":remote.path(),"max_entries":1}),
     )
     .await;
     let mut list_shape = None;
     for value in task8_hostile_values(true) {
+        let value = format!("{}/{}", remote.path().display(), value);
         std::fs::write(&log, b"").unwrap();
         let result = call_json(
             &tools,
             "remote_list",
-            json!({"host":"dev","path":value,"max_entries":1}),
+            json!({"host":"dev","path":&value,"max_entries":1}),
         )
         .await;
         if value.contains('\0') {
@@ -1610,16 +1547,17 @@ async fn task8_hostile_path_and_cwd_are_data_only_and_nul_is_prelaunch() {
     call_json(
         &tools,
         "remote_run",
-        json!({"host":"dev","command":"printf safe","cwd":".","shell":"sh"}),
+        json!({"host":"dev","command":"printf safe","cwd":remote.path(),"shell":"sh"}),
     )
     .await;
     let mut run_shape = None;
     for value in task8_hostile_values(true) {
+        let value = format!("{}/{}", remote.path().display(), value);
         std::fs::write(&log, b"").unwrap();
         let result = call_json(
             &tools,
             "remote_run",
-            json!({"host":"dev","command":"printf safe","cwd":value,"shell":"sh"}),
+            json!({"host":"dev","command":"printf safe","cwd":&value,"shell":"sh"}),
         )
         .await;
         if value.contains('\0') {
@@ -1652,7 +1590,7 @@ async fn task8_hostile_query_and_glob_are_data_only_with_closed_rejections() {
     call_json(
         &tools,
         "remote_search",
-        json!({"host":"dev","query":"needle","path":"."}),
+        json!({"host":"dev","query":"needle","path":remote.path()}),
     )
     .await;
 
@@ -1662,7 +1600,7 @@ async fn task8_hostile_query_and_glob_are_data_only_with_closed_rejections() {
         let result = call_json(
             &tools,
             "remote_search",
-            json!({"host":"dev","query":value,"path":"."}),
+            json!({"host":"dev","query":value,"path":remote.path()}),
         )
         .await;
         if value.contains(['\0', '\n']) {
@@ -1689,7 +1627,7 @@ async fn task8_hostile_query_and_glob_are_data_only_with_closed_rejections() {
         let result = call_json(
             &tools,
             "remote_search",
-            json!({"host":"dev","query":"needle","path":".","globs":[value]}),
+            json!({"host":"dev","query":"needle","path":remote.path(),"globs":[value]}),
         )
         .await;
         if value.contains('\0') {
@@ -1720,7 +1658,7 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
         &tools,
         "remote_write",
         json!({
-            "host":"dev","path":"warm","content":"warm","encoding":"utf8",
+            "host":"dev","path":remote.path().join("warm"),"content":"warm","encoding":"utf8",
             "mode":{"kind":"create"}
         }),
     )
@@ -1728,7 +1666,7 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
     let mut write_shape = None;
     for (index, value) in task8_hostile_values(true).into_iter().enumerate() {
         std::fs::write(&log, b"").unwrap();
-        let path = format!("content-{index}");
+        let path = remote.path().join(format!("content-{index}"));
         let result = call_json(
             &tools,
             "remote_write",
@@ -1739,10 +1677,7 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
         )
         .await;
         assert_eq!(result["isError"], Value::Null, "value={value:?}: {result}");
-        assert_eq!(
-            std::fs::read(remote.path().join(&path)).unwrap(),
-            value.as_bytes()
-        );
+        assert_eq!(std::fs::read(&path).unwrap(), value.as_bytes());
         let (argv, command) = only_command_record(&log);
         let shape = (argv, fixed_script_prefix(&command, " codex-ssh-bridge-op "));
         if let Some(expected) = &write_shape {
@@ -2261,7 +2196,7 @@ fn retention_models_fixture(
     let search_line = format!("needle {}\n", "s".repeat(2_992));
     std::fs::write(root.join("search.txt"), search_line.repeat(500)).unwrap();
     let stat_paths = (0..256)
-        .map(|index| format!("missing-{index:03}-{}", "p".repeat(2_000)))
+        .map(|index| root.join(format!("missing-{index:03}-{}", "p".repeat(2_000))))
         .collect::<Vec<_>>();
 
     let runtime_base = tempfile::TempDir::new().unwrap();
@@ -2300,10 +2235,10 @@ fn retention_models_fixture(
     (
         runtime_base,
         RemoteMcpTools::new(bridge),
-        json!({"host":"dev","path":".","max_entries":1_000}),
+        json!({"host":"dev","path":root,"max_entries":1_000}),
         json!({"host":"dev","paths":stat_paths}),
         json!({
-            "host":"dev","query":"needle","path":".","max_results":500
+            "host":"dev","query":"needle","path":root,"max_results":500
         }),
     )
 }

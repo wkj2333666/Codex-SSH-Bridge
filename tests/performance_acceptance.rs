@@ -72,8 +72,10 @@ fn fake_fixture(hosts: &[&str], environment: &[(&str, OsString)]) -> FakeFixture
         ..Config::default()
     };
     let log = runtime_base.path().join("ssh.log");
-    let mut fixed_environment =
-        BTreeMap::from([(OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned())]);
+    let mut fixed_environment = BTreeMap::from([
+        (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
+    ]);
     for (key, value) in environment {
         fixed_environment.insert(OsString::from(key), value.clone());
     }
@@ -122,7 +124,7 @@ fn persistent_fake_fixture(remote_home: &Path) -> FakeFixture {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/tmp")),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_SHELL"), OsString::from("sh")),
         (
             OsString::from("FAKE_SSH_INSTALL_LOG"),
