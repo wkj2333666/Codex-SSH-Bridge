@@ -68,7 +68,14 @@ impl RuntimePaths {
                 let base = Path::new(&base);
                 let directory = base.join(RUNTIME_DIRECTORY);
                 if control_path_candidate_is_usable(&directory) {
-                    Self::ensure_from_base(base)
+                    match Self::ensure_from_base(base) {
+                        Ok(paths) if paths.is_writable() => Ok(paths),
+                        Ok(_) => Self::ensure_tmp_fallback(),
+                        Err(error) if error.code == crate::ErrorCode::Io => {
+                            Self::ensure_tmp_fallback()
+                        }
+                        Err(error) => Err(error),
+                    }
                 } else {
                     Self::ensure_tmp_fallback()
                 }
@@ -84,6 +91,13 @@ impl RuntimePaths {
 
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    fn is_writable(&self) -> bool {
+        tempfile::Builder::new()
+            .prefix(".codex-ssh-bridge-writable-")
+            .tempdir_in(&self.directory)
+            .is_ok()
     }
 
     fn ensure_tmp_fallback() -> BridgeResult<Self> {
@@ -410,4 +424,23 @@ fn unsafe_runtime_path(path: &Path, message: &str) -> BridgeError {
     let mut error = unsafe_runtime_directory(message);
     error.details.path = Some(path.to_string_lossy().into_owned());
     error
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+
+    use super::RuntimePaths;
+
+    #[test]
+    fn writable_probe_rejects_read_only_runtime_directory() {
+        let directory = TempDir::new().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let paths = RuntimePaths {
+            directory: directory.path().to_owned(),
+        };
+        assert!(!paths.is_writable());
+    }
 }
