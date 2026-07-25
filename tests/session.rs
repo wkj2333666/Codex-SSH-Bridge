@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use support::config_with_host;
 
-static PERSISTENT_HELPER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PERSISTENT_HELPER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn session_runner(base: &TempDir, log: &std::path::Path) -> Arc<SshRunner> {
     let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
@@ -136,7 +136,7 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
         );
         return;
     }
-    let _test_lock = PERSISTENT_HELPER_TEST_LOCK.lock().unwrap();
+    let _test_lock = PERSISTENT_HELPER_TEST_LOCK.lock().await;
     let helper_source = std::env::var("CARGO_BIN_EXE_codex-ssh-bridge-helper")
         .or_else(|_| std::env::var("CARGO_BIN_EXE_codex_ssh_bridge_helper"))
         .map(std::path::PathBuf::from)
@@ -273,7 +273,7 @@ async fn persistent_startup_failure_falls_back_to_temporary_helper() {
         );
         return;
     }
-    let _test_lock = PERSISTENT_HELPER_TEST_LOCK.lock().unwrap();
+    let _test_lock = PERSISTENT_HELPER_TEST_LOCK.lock().await;
     let helper_source = std::env::var("CARGO_BIN_EXE_codex-ssh-bridge-helper")
         .or_else(|_| std::env::var("CARGO_BIN_EXE_codex_ssh_bridge_helper"))
         .map(std::path::PathBuf::from)
