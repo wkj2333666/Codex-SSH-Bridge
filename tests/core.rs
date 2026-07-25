@@ -8,7 +8,7 @@ use std::process::Command;
 use codex_ssh_bridge::config::{
     Config, DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES, DEFAULT_RETENTION_SERIALIZATION_JOBS,
     HostLimitOverrides, HostProfile, Limits, MAX_GLOBAL_SPOOL_QUOTA_BYTES,
-    MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES,
+    MAX_RETENTION_SERIALIZATION_JOBS, MIN_GLOBAL_SPOOL_QUOTA_BYTES, migrate_v1_text,
 };
 use codex_ssh_bridge::error::{BridgeError, ErrorCode};
 use codex_ssh_bridge::path::RemotePath;
@@ -48,6 +48,59 @@ fn write_config(contents: &str) -> NamedTempFile {
     file.write_all(contents.as_bytes()).unwrap();
     file.as_file().sync_all().unwrap();
     file
+}
+
+#[test]
+fn v2_config_contains_only_global_non_admission_limits() {
+    let config: Config = toml::from_str(
+        r#"
+version = 2
+[limits]
+connect_timeout_ms = 10000
+command_timeout_ms = 300000
+max_frame_bytes = 8388608
+read_chunk_bytes = 262144
+max_read_bytes = 1048576
+max_write_bytes = 4194304
+preview_bytes = 262144
+max_output_bytes = 67108864
+global_spool_quota_bytes = 536870912
+retention_serialization_jobs = 2
+"#,
+    )
+    .unwrap();
+    let rendered = toml::to_string(&config).unwrap();
+    for forbidden in [
+        "[hosts",
+        "root",
+        "description",
+        "read_only",
+        "global_concurrency",
+        "per_host_concurrency",
+    ] {
+        assert!(!rendered.contains(forbidden), "{forbidden}");
+    }
+}
+
+#[test]
+fn v1_migration_preserves_limits_and_returns_explicit_aliases() {
+    const V1: &str = r#"
+version = 1
+[limits]
+command_timeout_ms = 300000
+retention_serialization_jobs = 2
+global_concurrency = 8
+per_host_concurrency = 2
+[hosts.nkai]
+root = "/home/wkj"
+[hosts.weibo]
+root = "/"
+"#;
+    let migrated = migrate_v1_text(V1).unwrap();
+    assert_eq!(migrated.config.version, 2);
+    assert_eq!(migrated.explicit_aliases, ["nkai", "weibo"]);
+    assert_eq!(migrated.config.limits.command_timeout_ms, 300_000);
+    assert_eq!(migrated.config.limits.retention_serialization_jobs, 2);
 }
 
 fn valid_config(root: &Path) -> String {
