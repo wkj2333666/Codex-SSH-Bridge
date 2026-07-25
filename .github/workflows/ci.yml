@@ -64,6 +64,7 @@ jobs:
             mkdir -p "$HOME/.local/bin"
             install -m 0755 /usr/bin/rg "$HOME/.local/bin/rg"
           fi
+          sudo install -m 0755 "$HOME/.local/bin/rg" /usr/bin/rg
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
 
       - name: Check formatting
@@ -137,6 +138,7 @@ jobs:
             mkdir -p "$HOME/.local/bin"
             install -m 0755 /usr/bin/rg "$HOME/.local/bin/rg"
           fi
+          sudo install -m 0755 "$HOME/.local/bin/rg" /usr/bin/rg
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
 
       - name: Collect cold/warm profile
