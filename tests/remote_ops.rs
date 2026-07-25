@@ -2,8 +2,10 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::ops::Deref;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -28,7 +30,132 @@ use tokio_util::sync::CancellationToken;
 use serde::Serialize;
 use serde::ser::{SerializeSeq, Serializer};
 
-fn fixture(root: &std::path::Path, rg: bool) -> (tempfile::TempDir, Arc<SshRunner>, RemoteBridge) {
+struct FixtureBridge {
+    inner: RemoteBridge,
+    root: PathBuf,
+}
+
+impl FixtureBridge {
+    fn new(inner: RemoteBridge, root: &Path) -> Self {
+        Self {
+            inner,
+            root: root.to_owned(),
+        }
+    }
+
+    fn absolute(&self, path: String) -> String {
+        if path.starts_with('/') {
+            path
+        } else {
+            self.root.join(path).to_string_lossy().into_owned()
+        }
+    }
+
+    fn absolute_optional(&self, path: Option<String>) -> Option<String> {
+        Some(match path {
+            Some(path) => self.absolute(path),
+            None => self.root.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn absolute_patch(&self, patch: String) -> String {
+        let root = self.root.to_string_lossy();
+        patch
+            .split_inclusive('\n')
+            .map(|line| {
+                for prefix in ["--- a/", "+++ b/"] {
+                    if let Some(remainder) = line.strip_prefix(prefix)
+                        && !remainder.starts_with('/')
+                    {
+                        return format!("{prefix}{root}/{remainder}");
+                    }
+                }
+                line.to_owned()
+            })
+            .collect()
+    }
+
+    async fn list(
+        &self,
+        mut request: ListRequest,
+        cancel: CancellationToken,
+    ) -> Result<ListResult, BridgeError> {
+        request.path = self.absolute_optional(request.path);
+        self.inner.list(request, cancel).await
+    }
+
+    async fn stat(
+        &self,
+        mut request: StatRequest,
+        cancel: CancellationToken,
+    ) -> Result<StatResult, BridgeError> {
+        request.paths = request
+            .paths
+            .into_iter()
+            .map(|path| self.absolute(path))
+            .collect();
+        self.inner.stat(request, cancel).await
+    }
+
+    async fn read(
+        &self,
+        mut request: ReadRequest,
+        cancel: CancellationToken,
+    ) -> Result<ReadResult, BridgeError> {
+        request.paths = request
+            .paths
+            .into_iter()
+            .map(|path| self.absolute(path))
+            .collect();
+        self.inner.read(request, cancel).await
+    }
+
+    async fn search(
+        &self,
+        mut request: SearchRequest,
+        cancel: CancellationToken,
+    ) -> Result<SearchResult, BridgeError> {
+        request.path = self.absolute_optional(request.path);
+        self.inner.search(request, cancel).await
+    }
+
+    async fn run(
+        &self,
+        mut request: RemoteRunRequest,
+        cancel: CancellationToken,
+    ) -> Result<codex_ssh_bridge::remote::RemoteRunResult, BridgeError> {
+        request.cwd = self.absolute_optional(request.cwd);
+        self.inner.run(request, cancel).await
+    }
+
+    async fn write(
+        &self,
+        mut request: WriteRequest,
+        cancel: CancellationToken,
+    ) -> Result<WriteResult, BridgeError> {
+        request.path = self.absolute(request.path);
+        self.inner.write(request, cancel).await
+    }
+
+    async fn apply_patch(
+        &self,
+        mut request: ApplyPatchRequest,
+        cancel: CancellationToken,
+    ) -> Result<ApplyPatchResult, BridgeError> {
+        request.patch = self.absolute_patch(request.patch);
+        self.inner.apply_patch(request, cancel).await
+    }
+}
+
+impl Deref for FixtureBridge {
+    type Target = RemoteBridge;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+fn fixture(root: &std::path::Path, rg: bool) -> (tempfile::TempDir, Arc<SshRunner>, FixtureBridge) {
     fixture_with_options(root, rg, None, &[])
 }
 
@@ -37,7 +164,7 @@ fn fixture_with_options(
     rg: bool,
     max_frame: Option<usize>,
     extra: &[(&str, OsString)],
-) -> (tempfile::TempDir, Arc<SshRunner>, RemoteBridge) {
+) -> (tempfile::TempDir, Arc<SshRunner>, FixtureBridge) {
     let runtime_base = tempfile::TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
@@ -50,7 +177,7 @@ fn fixture_with_options(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), root.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
     ]);
     for (key, value) in extra {
         environment.insert(OsString::from(key), value.clone());
@@ -80,7 +207,7 @@ fn fixture_with_options(
         )
         .unwrap(),
     );
-    let bridge = RemoteBridge::new(Arc::clone(&runner));
+    let bridge = FixtureBridge::new(RemoteBridge::new(Arc::clone(&runner)), root);
     (runtime_base, runner, bridge)
 }
 
@@ -90,7 +217,7 @@ fn fixture_with_probed_login_shell(
 ) -> (
     tempfile::TempDir,
     Arc<SshRunner>,
-    RemoteBridge,
+    FixtureBridge,
     tempfile::TempDir,
 ) {
     use std::os::unix::fs::MetadataExt;
@@ -130,7 +257,7 @@ fn fixture_with_patch_policy(
     max_output_bytes: Option<u64>,
     read_only: bool,
     extra: &[(&str, OsString)],
-) -> (tempfile::TempDir, Arc<SshRunner>, RemoteBridge) {
+) -> (tempfile::TempDir, Arc<SshRunner>, FixtureBridge) {
     let runtime_base = tempfile::TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
@@ -147,7 +274,7 @@ fn fixture_with_patch_policy(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), root.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
     ]);
     for (key, value) in extra {
         environment.insert(OsString::from(key), value.clone());
@@ -162,7 +289,7 @@ fn fixture_with_patch_policy(
         )
         .unwrap(),
     );
-    let bridge = RemoteBridge::new(Arc::clone(&runner));
+    let bridge = FixtureBridge::new(RemoteBridge::new(Arc::clone(&runner)), root);
     (runtime_base, runner, bridge)
 }
 
@@ -180,7 +307,7 @@ fn context() -> RemoteContext {
     }
 }
 
-async fn cached_context(bridge: &RemoteBridge) -> RemoteContext {
+async fn cached_context(bridge: &FixtureBridge) -> RemoteContext {
     bridge
         .stat(
             StatRequest {
