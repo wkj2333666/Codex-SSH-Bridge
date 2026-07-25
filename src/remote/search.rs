@@ -60,12 +60,8 @@ cleanup() { rm -rf -- "$scratch"; }
 trap cleanup EXIT HUP INT TERM
 fifo=$scratch/fifo
 data=$scratch/data
-status=$scratch/status
 mkfifo "$fifo" || exit 2
-(
-    find -H "$root" -type f -print0 2>/dev/null >"$fifo"
-    printf '%s' "$?" >"$status"
-) &
+find -H "$root" -type f -print0 2>/dev/null >"$fifo" &
 producer=$!
 exec 3<"$fifo"
 head -c "$limit" <&3 >"$data"
@@ -75,7 +71,7 @@ capped=0
 if [ "$bytes" -eq "$limit" ]; then capped=1; fi
 if [ "$capped" -eq 1 ]; then
     cap_wait=0
-    while [ ! -e "$status" ] && [ "$cap_wait" -lt 100 ]; do
+    while [ "$cap_wait" -lt 100 ]; do
         sleep 0
         cap_wait=$((cap_wait + 1))
     done
@@ -84,10 +80,9 @@ fi
 exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
-producer_status=$(cat "$status" 2>/dev/null || :)
 if [ "$head_status" -ne 0 ]; then exit 2; fi
 if [ "$capped" -eq 0 ]; then
-    if [ "$wait_status" -ne 0 ] || [ "$producer_status" != 0 ]; then exit 2; fi
+    if [ "$wait_status" -ne 0 ]; then exit 2; fi
 fi
 cat "$data"
 if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
