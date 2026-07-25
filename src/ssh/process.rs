@@ -1321,6 +1321,7 @@ struct ChildSpec {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum Phase {
     Resolve,
     Probe,
