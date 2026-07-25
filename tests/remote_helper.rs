@@ -321,7 +321,7 @@ fn helper_drains_beyond_output_limit_and_reports_truncation() {
         }
     };
     assert_eq!(stdout, b"123");
-    assert_eq!(exit, b"0\n1\n0\n0\n");
+    assert_eq!(exit, b"0\n1\n0\n0\n0\n");
     send_frame(
         &mut input,
         Frame {
