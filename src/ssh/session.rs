@@ -565,14 +565,16 @@ impl HostSession {
             } else {
                 cancelled_error(&self.inner.host, false)
             }),
-            Ok(Err(_)) | Err(_) => {
-                self.inner.shutdown().await;
-                Err(if timed_out {
-                    timeout_error(&self.inner.host, true)
-                } else {
-                    cancelled_error(&self.inner.host, true)
-                })
-            }
+            // Cancellation is request-scoped. A slow command teardown must not
+            // close the shared transport and fail unrelated requests. Keep the
+            // pending entry until its eventual EXIT (or transport failure) so
+            // late frames remain protocol-valid; dropping this receiver simply
+            // makes completion delivery a no-op.
+            Ok(Err(_)) | Err(_) => Err(if timed_out {
+                timeout_error(&self.inner.host, true)
+            } else {
+                cancelled_error(&self.inner.host, true)
+            }),
         }
     }
 
