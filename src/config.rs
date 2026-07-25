@@ -406,6 +406,16 @@ pub fn migrate_v1_text(contents: &str) -> BridgeResult<MigratedV1> {
     })
 }
 
+pub fn migrate_v1_file(path: &Path) -> BridgeResult<MigratedV1> {
+    validate_secure_existing_ancestors(path)?;
+    let mut file = open_config(path)?;
+    validate_file_security(&file)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(BridgeError::io)?;
+    migrate_v1_text(&contents)
+}
+
 fn validate_limits(limits: &Limits) -> BridgeResult<()> {
     validate_u64(
         "connect_timeout_ms",

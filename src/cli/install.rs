@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::{LocalCommandSpec, run_local_command};
+use crate::config::{Config, discover_ssh_aliases_from, migrate_v1_file};
 use crate::error::{BridgeError, BridgeResult};
 
 const MCP_NAME: &str = "ssh-bridge";
@@ -30,6 +31,8 @@ pub struct InstallLayout {
     pub skill_target: PathBuf,
     pub identity_file: PathBuf,
     pub codex_executable: PathBuf,
+    pub config_file: PathBuf,
+    pub ssh_config: PathBuf,
     #[doc(hidden)]
     pub quarantine_delete_failure: Option<usize>,
 }
@@ -59,6 +62,14 @@ impl InstallLayout {
         let state_base = nonempty_environment("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/state"));
+        let config_file = nonempty_environment("CODEX_SSH_BRIDGE_CONFIG")
+            .map(PathBuf::from)
+            .map_or_else(Config::default_path, Ok)?;
+        if !config_file.is_absolute() {
+            return Err(BridgeError::invalid_config(
+                "bridge configuration path must be absolute",
+            ));
+        }
         Ok(Self {
             binary,
             plugin_manifest: bundle.join(".codex-plugin/plugin.json"),
@@ -68,6 +79,8 @@ impl InstallLayout {
             skill_target: home.join(".codex/skills/remote-ssh-ops"),
             identity_file: state_base.join("codex-ssh-bridge/install.toml"),
             codex_executable: find_executable("codex")?,
+            config_file,
+            ssh_config: home.join(".ssh/config"),
             quarantine_delete_failure: None,
         })
     }
@@ -82,6 +95,8 @@ impl InstallLayout {
             skill_target: self.skill_target.clone(),
             identity_file: self.identity_file.clone(),
             codex_executable: self.codex_executable.clone(),
+            config_file: self.config_file.clone(),
+            ssh_config: self.ssh_config.clone(),
             quarantine_delete_failure: self.quarantine_delete_failure,
         }
     }
@@ -125,7 +140,14 @@ struct InstallPreflight {
     mcp: Presence,
     skill: Presence,
     marker: Presence,
+    config_migration: Option<ConfigMigrationPlan>,
     actions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigMigrationPlan {
+    original_sha256: String,
+    migrated: Config,
 }
 
 struct InstallLock {
@@ -165,6 +187,8 @@ async fn install_preflight(
     validate_install_destinations(&resolved)?;
     let skill = skill_presence(&resolved)?;
     let marker = marker_presence(&resolved)?;
+    let config_migration =
+        inspect_config_migration(&resolved.layout.config_file, &resolved.layout.ssh_config)?;
     if probe_mutations {
         if skill == Presence::Absent {
             probe_absent_destination(&resolved.layout.skill_target)?;
@@ -179,7 +203,7 @@ async fn install_preflight(
         probe_parent_mutation(&resolved.layout.stable_binary)?;
     }
     let mcp = codex_get(&resolved).await?;
-    let actions = vec![
+    let mut actions = vec![
         match mcp {
             Presence::Absent => "register MCP ssh-bridge".to_owned(),
             Presence::Matching => "MCP ssh-bridge already matches".to_owned(),
@@ -198,11 +222,15 @@ async fn install_preflight(
             Presence::NeedsUpdate => "replace managed installation identity".to_owned(),
         },
     ];
+    if config_migration.is_some() {
+        actions.insert(0, "migrate bridge configuration from v1 to v2".to_owned());
+    }
     Ok(InstallPreflight {
         resolved,
         mcp,
         skill,
         marker,
+        config_migration,
         actions,
     })
 }
@@ -245,6 +273,7 @@ async fn uninstall_preflight(
         mcp,
         skill,
         marker,
+        config_migration: None,
         actions,
     })
 }
@@ -253,6 +282,7 @@ fn validate_install_destinations(resolved: &ResolvedInstall) -> BridgeResult<()>
     crate::config::validate_secure_existing_ancestors(&resolved.layout.skill_target)?;
     crate::config::validate_secure_existing_ancestors(&resolved.layout.identity_file)?;
     crate::config::validate_secure_existing_ancestors(&resolved.layout.stable_binary)?;
+    crate::config::validate_secure_existing_ancestors(&resolved.layout.config_file)?;
     Ok(())
 }
 
@@ -334,11 +364,15 @@ pub async fn install_user(layout: InstallLayout, apply: bool) -> BridgeResult<In
         mcp,
         skill,
         marker,
+        config_migration,
         actions,
     } = preflight;
 
     let mut journal = InstallJournal::default();
     let applied = async {
+        if let Some(plan) = config_migration.as_ref() {
+            apply_config_migration(&resolved.layout.config_file, plan, &mut journal)?;
+        }
         ensure_stable_binary(&resolved, &mut journal)?;
 
         if mcp == Presence::NeedsUpdate {
@@ -787,6 +821,9 @@ async fn rollback_uninstall(
 
 #[derive(Default)]
 struct InstallJournal {
+    config_created: bool,
+    config_written_sha256: Option<String>,
+    config_quarantine: Option<QuarantinedPath>,
     mcp_added: bool,
     mcp_removed: bool,
     stable_created: bool,
@@ -796,6 +833,74 @@ struct InstallJournal {
     marker_created: bool,
     marker_quarantine: Option<QuarantinedPath>,
     created_directories: Vec<PathBuf>,
+}
+
+fn inspect_config_migration(
+    config_file: &Path,
+    ssh_config: &Path,
+) -> BridgeResult<Option<ConfigMigrationPlan>> {
+    match fs::symlink_metadata(config_file) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(BridgeError::io(error)),
+    }
+    if Config::load(config_file).is_ok() {
+        return Ok(None);
+    }
+    let migrated = migrate_v1_file(config_file)?;
+    let discovered = discover_ssh_aliases_from(ssh_config);
+    for alias in &migrated.explicit_aliases {
+        if discovered.binary_search(alias).is_err() {
+            return Err(BridgeError::invalid_config(format!(
+                "version-1 host alias {alias:?} is missing from the OpenSSH configuration"
+            )));
+        }
+    }
+    Ok(Some(ConfigMigrationPlan {
+        original_sha256: sha256_file(config_file)?,
+        migrated: migrated.config,
+    }))
+}
+
+fn apply_config_migration(
+    config_file: &Path,
+    plan: &ConfigMigrationPlan,
+    journal: &mut InstallJournal,
+) -> BridgeResult<()> {
+    if sha256_file(config_file)? != plan.original_sha256 {
+        return Err(BridgeError::invalid_config(
+            "bridge configuration changed after installation preflight",
+        ));
+    }
+    journal.config_quarantine = Some(quarantine_path(config_file)?);
+    plan.migrated.save_atomic(config_file)?;
+    journal.config_created = true;
+    journal.config_written_sha256 = Some(sha256_file(config_file)?);
+    Ok(())
+}
+
+fn rollback_config_migration(config_file: &Path, journal: &InstallJournal) -> BridgeResult<()> {
+    if journal.config_created {
+        let expected = journal.config_written_sha256.as_deref().ok_or_else(|| {
+            BridgeError::invalid_config("migrated configuration hash was not recorded")
+        })?;
+        match fs::symlink_metadata(config_file) {
+            Ok(_) if sha256_file(config_file)? == expected => {
+                fs::remove_file(config_file).map_err(BridgeError::io)?;
+            }
+            Ok(_) => {
+                return Err(BridgeError::invalid_config(
+                    "migrated configuration changed before rollback",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(BridgeError::io(error)),
+        }
+    }
+    if let Some(quarantine) = journal.config_quarantine.as_ref() {
+        restore_quarantine(quarantine)?;
+    }
+    Ok(())
 }
 
 fn ensure_stable_binary(
@@ -861,6 +966,7 @@ fn ensure_stable_binary(
 
 fn cleanup_install_quarantine(journal: &mut InstallJournal) -> BridgeResult<()> {
     for quarantine in [
+        journal.config_quarantine.take(),
         journal.stable_quarantine.take(),
         journal.skill_quarantine.take(),
         journal.marker_quarantine.take(),
@@ -999,6 +1105,9 @@ async fn rollback_install(
     if let Some(quarantine) = journal.marker_quarantine.as_ref()
         && restore_quarantine(quarantine).is_err()
     {
+        failed = true;
+    }
+    if rollback_config_migration(&resolved.layout.config_file, journal).is_err() {
         failed = true;
     }
     for directory in journal.created_directories.iter().rev() {
@@ -1272,6 +1381,8 @@ fn resolve_layout(layout: InstallLayout) -> BridgeResult<ResolvedInstall> {
             skill_target: layout.skill_target,
             identity_file: layout.identity_file,
             codex_executable,
+            config_file: layout.config_file,
+            ssh_config: layout.ssh_config,
             quarantine_delete_failure: layout.quarantine_delete_failure,
         },
         identity,
