@@ -13,17 +13,13 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::error::{BridgeError, BridgeResult};
-use crate::path::RemotePath;
 use crate::{MAX_FRAME_BYTES, MAX_OUTPUT_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES};
 
 const MAX_CONNECT_TIMEOUT_MS: u64 = 120_000;
 const MAX_COMMAND_TIMEOUT_MS: u64 = 3_600_000;
 const MAX_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
-const MAX_GLOBAL_CONCURRENCY: usize = 32;
-const MAX_PER_HOST_CONCURRENCY: usize = 8;
-
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 pub const MAX_REMOTE_CONTEXT_ROOT_BYTES: usize = 65_536;
 pub const DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
 pub const MIN_GLOBAL_SPOOL_QUOTA_BYTES: u64 = 64 * 1024 * 1024;
@@ -37,6 +33,7 @@ pub const MAX_SPOOL_ENTRIES: usize = 1024;
 pub struct Config {
     pub version: u32,
     pub limits: Limits,
+    #[serde(skip)]
     pub hosts: BTreeMap<String, HostProfile>,
 }
 
@@ -61,7 +58,9 @@ pub struct Limits {
     pub max_write_bytes: usize,
     pub preview_bytes: usize,
     pub max_output_bytes: u64,
+    #[serde(skip)]
     pub global_concurrency: usize,
+    #[serde(skip)]
     pub per_host_concurrency: usize,
     pub global_spool_quota_bytes: u64,
     pub retention_serialization_jobs: usize,
@@ -131,6 +130,17 @@ pub struct LoadedConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigratedV1 {
+    pub config: Config,
+    pub explicit_aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredHost {
+    pub alias: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigSource {
     pub path: PathBuf,
     pub from_environment: bool,
@@ -195,8 +205,21 @@ impl Config {
         Ok(config)
     }
 
+    pub fn load_with_discovery_from(path: &Path, ssh_config: &Path) -> BridgeResult<Self> {
+        let mut config = Self::load(path)?;
+        config.merge_ssh_aliases_from(ssh_config);
+        Ok(config)
+    }
+
     fn merge_ssh_aliases(&mut self) {
-        for alias in discover_ssh_aliases() {
+        let Some(home) = nonempty_environment("HOME") else {
+            return;
+        };
+        self.merge_ssh_aliases_from(&PathBuf::from(home).join(".ssh/config"));
+    }
+
+    fn merge_ssh_aliases_from(&mut self, ssh_config: &Path) {
+        for alias in discover_ssh_aliases_from(ssh_config) {
             self.hosts.entry(alias).or_insert_with(|| HostProfile {
                 root: "/".to_owned(),
                 description: None,
@@ -250,6 +273,31 @@ impl Config {
         })
     }
 
+    pub fn limits(&self) -> EffectiveLimits {
+        effective_limits(&self.limits, &HostLimitOverrides::default())
+    }
+
+    pub fn discover_hosts(&self) -> Vec<DiscoveredHost> {
+        self.hosts
+            .keys()
+            .map(|alias| DiscoveredHost {
+                alias: alias.clone(),
+            })
+            .collect()
+    }
+
+    pub fn require_discovered_alias(&self, alias: &str) -> BridgeResult<DiscoveredHost> {
+        if !valid_alias(alias) {
+            return Err(BridgeError::invalid_argument("invalid host alias"));
+        }
+        if !self.hosts.contains_key(alias) {
+            return Err(BridgeError::invalid_config("unknown host alias"));
+        }
+        Ok(DiscoveredHost {
+            alias: alias.to_owned(),
+        })
+    }
+
     fn validate(&self) -> BridgeResult<()> {
         if self.version != CONFIG_VERSION {
             return Err(BridgeError::invalid_config(format!(
@@ -258,24 +306,104 @@ impl Config {
             )));
         }
         validate_limits(&self.limits)?;
-        for (alias, profile) in &self.hosts {
+        for alias in self.hosts.keys() {
             if !valid_alias(alias) {
                 return Err(BridgeError::invalid_config(format!(
                     "invalid host alias: {alias}"
                 )));
             }
-            let normalized_root = RemotePath::resolve(&profile.root, ".").map_err(|_| {
-                BridgeError::invalid_config(format!("host {alias} has an invalid root"))
-            })?;
-            if normalized_root.absolute().len() > MAX_REMOTE_CONTEXT_ROOT_BYTES {
-                return Err(BridgeError::invalid_config(format!(
-                    "host {alias} root exceeds {MAX_REMOTE_CONTEXT_ROOT_BYTES} UTF-8 bytes"
-                )));
-            }
-            validate_host_limits(alias, &profile.limits, &self.limits)?;
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ConfigV1 {
+    version: u32,
+    limits: LimitsV1,
+    hosts: BTreeMap<String, HostProfile>,
+}
+
+impl Default for ConfigV1 {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            limits: LimitsV1::default(),
+            hosts: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LimitsV1 {
+    connect_timeout_ms: u64,
+    command_timeout_ms: u64,
+    max_frame_bytes: usize,
+    read_chunk_bytes: usize,
+    max_read_bytes: usize,
+    max_write_bytes: usize,
+    preview_bytes: usize,
+    max_output_bytes: u64,
+    global_concurrency: usize,
+    per_host_concurrency: usize,
+    global_spool_quota_bytes: u64,
+    retention_serialization_jobs: usize,
+}
+
+impl Default for LimitsV1 {
+    fn default() -> Self {
+        let current = Limits::default();
+        Self {
+            connect_timeout_ms: current.connect_timeout_ms,
+            command_timeout_ms: current.command_timeout_ms,
+            max_frame_bytes: current.max_frame_bytes,
+            read_chunk_bytes: current.read_chunk_bytes,
+            max_read_bytes: current.max_read_bytes,
+            max_write_bytes: current.max_write_bytes,
+            preview_bytes: current.preview_bytes,
+            max_output_bytes: current.max_output_bytes,
+            global_concurrency: current.global_concurrency,
+            per_host_concurrency: current.per_host_concurrency,
+            global_spool_quota_bytes: current.global_spool_quota_bytes,
+            retention_serialization_jobs: current.retention_serialization_jobs,
+        }
+    }
+}
+
+pub fn migrate_v1_text(contents: &str) -> BridgeResult<MigratedV1> {
+    let old: ConfigV1 = toml::from_str(contents)
+        .map_err(|error| BridgeError::invalid_config(format!("invalid configuration: {error}")))?;
+    if old.version != 1 {
+        return Err(BridgeError::invalid_config(
+            "configuration is not version 1",
+        ));
+    }
+    let explicit_aliases = old.hosts.keys().cloned().collect::<Vec<_>>();
+    let config = Config {
+        version: CONFIG_VERSION,
+        limits: Limits {
+            connect_timeout_ms: old.limits.connect_timeout_ms,
+            command_timeout_ms: old.limits.command_timeout_ms,
+            max_frame_bytes: old.limits.max_frame_bytes,
+            read_chunk_bytes: old.limits.read_chunk_bytes,
+            max_read_bytes: old.limits.max_read_bytes,
+            max_write_bytes: old.limits.max_write_bytes,
+            preview_bytes: old.limits.preview_bytes,
+            max_output_bytes: old.limits.max_output_bytes,
+            global_concurrency: old.limits.global_concurrency,
+            per_host_concurrency: old.limits.per_host_concurrency,
+            global_spool_quota_bytes: old.limits.global_spool_quota_bytes,
+            retention_serialization_jobs: old.limits.retention_serialization_jobs,
+        },
+        hosts: BTreeMap::new(),
+    };
+    config.validate()?;
+    Ok(MigratedV1 {
+        config,
+        explicit_aliases,
+    })
 }
 
 fn validate_limits(limits: &Limits) -> BridgeResult<()> {
@@ -303,16 +431,6 @@ fn validate_limits(limits: &Limits) -> BridgeResult<()> {
         limits.max_output_bytes,
         MAX_OUTPUT_BYTES,
     )?;
-    validate_usize(
-        "global_concurrency",
-        limits.global_concurrency,
-        MAX_GLOBAL_CONCURRENCY,
-    )?;
-    validate_usize(
-        "per_host_concurrency",
-        limits.per_host_concurrency,
-        MAX_PER_HOST_CONCURRENCY,
-    )?;
     if !(MIN_GLOBAL_SPOOL_QUOTA_BYTES..=MAX_GLOBAL_SPOOL_QUOTA_BYTES)
         .contains(&limits.global_spool_quota_bytes)
     {
@@ -325,45 +443,6 @@ fn validate_limits(limits: &Limits) -> BridgeResult<()> {
         limits.retention_serialization_jobs,
         MAX_RETENTION_SERIALIZATION_JOBS,
     )?;
-    if limits.per_host_concurrency > limits.global_concurrency {
-        return Err(BridgeError::invalid_config(
-            "per_host_concurrency cannot exceed global_concurrency",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_host_limits(
-    alias: &str,
-    overrides: &HostLimitOverrides,
-    global: &Limits,
-) -> BridgeResult<()> {
-    if let Some(value) = overrides.connect_timeout_ms {
-        validate_u64("connect_timeout_ms", value, MAX_CONNECT_TIMEOUT_MS)?;
-    }
-    if let Some(value) = overrides.command_timeout_ms {
-        validate_u64("command_timeout_ms", value, MAX_COMMAND_TIMEOUT_MS)?;
-    }
-    if let Some(value) = overrides.max_read_bytes {
-        validate_usize("max_read_bytes", value, MAX_READ_BYTES)?;
-    }
-    if let Some(value) = overrides.max_write_bytes {
-        validate_usize("max_write_bytes", value, MAX_WRITE_BYTES)?;
-    }
-    if let Some(value) = overrides.preview_bytes {
-        validate_usize("preview_bytes", value, MAX_PREVIEW_BYTES)?;
-    }
-    if let Some(value) = overrides.max_output_bytes {
-        validate_u64("max_output_bytes", value, MAX_OUTPUT_BYTES)?;
-    }
-    if let Some(value) = overrides.per_host_concurrency {
-        validate_usize("per_host_concurrency", value, MAX_PER_HOST_CONCURRENCY)?;
-        if value > global.global_concurrency {
-            return Err(BridgeError::invalid_config(format!(
-                "host {alias} per_host_concurrency cannot exceed global_concurrency"
-            )));
-        }
-    }
     Ok(())
 }
 
@@ -411,14 +490,10 @@ fn valid_alias(alias: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn discover_ssh_aliases() -> Vec<String> {
-    let Some(home) = nonempty_environment("HOME") else {
-        return Vec::new();
-    };
-    let path = PathBuf::from(home).join(".ssh/config");
+pub fn discover_ssh_aliases_from(path: &Path) -> Vec<String> {
     let mut aliases = BTreeMap::new();
     let mut visited = HashSet::new();
-    collect_ssh_aliases(&path, &mut visited, &mut aliases, 0);
+    collect_ssh_aliases(path, &mut visited, &mut aliases, 0);
     aliases.into_keys().collect()
 }
 
