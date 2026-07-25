@@ -74,6 +74,8 @@ jobs:
         run: cargo +"$RUST_TOOLCHAIN" clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
+        env:
+          CODEX_SSH_BRIDGE_PERSISTENT_HELPER_INTEGRATION: "1"
         run: cargo +"$RUST_TOOLCHAIN" test --all-targets --all-features --locked
 
       - name: Validate source package metadata

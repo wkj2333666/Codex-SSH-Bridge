@@ -30,6 +30,8 @@ ssh devbox
 Add future servers to local OpenSSH config the same way. The bridge accepts concrete aliases and stores no credentials. The default bridge config is `~/.config/codex-ssh-bridge/config.toml`; set `CODEX_SSH_BRIDGE_CONFIG` only as trusted local execution-authority input.
 
 The first operation performs local SSH identity checks and a bounded capability probe. User commands and fixed read/write operations then reuse one persistent SSH session per alias; warm requests send one framed request without another `ssh -G` or root observation. On supported Linux targets a verified helper file persists under the remote account for reuse; its process and the POSIX dispatcher remain session-scoped. No Codex installation or credential is placed remotely. The bridge does not bind a task to a hidden remote workspace: every MCP path and command cwd is absolute and supplied by the caller.
+The dispatcher applies the framed cwd, shell, and timeout itself, so a warm
+`remote_run` does not add a second shell or GNU `timeout` wrapper.
 
 ## MCP tool shapes
 
@@ -96,7 +98,6 @@ The human CLI accepts argv after `--` and performs the shell-word encoding insid
 
 ```bash
 ./target/release/codex-ssh-bridge hosts list
-./target/release/codex-ssh-bridge hosts show devbox
 ./target/release/codex-ssh-bridge doctor devbox
 ./target/release/codex-ssh-bridge doctor devbox --verbose-ssh
 ./target/release/codex-ssh-bridge run devbox --cwd /absolute/remote/project --shell bash -- git status --short

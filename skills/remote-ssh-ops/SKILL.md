@@ -12,6 +12,9 @@ Keep Codex, credentials, approvals, and the bridge on the local machine. Every p
 Use only aliases returned by `remote_hosts`. Never construct raw SSH commands or invent a hostname. The bridge owns host resolution, transport quoting, capability probes, limits, and shell selection.
 
 The bridge keeps one local-owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities. On a supported Linux host it verifies or installs a private mode-0700 helper under the remote account's `~/.local/share/codex-ssh-bridge/helpers/<bridge-version>/<target>/helper`; the helper process ends with the SSH session, while the verified file is reused after a bridge restart. Warm requests send one framed command with no per-request `ssh -G`, root observation, installation probe, hash, lock, or upload. Unsupported hosts and pre-request helper failures use the ordered temporary-helper then POSIX-dispatcher fallback. Transport mode remains internal diagnostic data. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
+The selected dispatcher applies the absolute cwd, requested shell, and timeout
+directly; the bridge does not insert an additional `sh` or GNU `timeout`
+wrapper around the model's command.
 
 ## Default workflow
 

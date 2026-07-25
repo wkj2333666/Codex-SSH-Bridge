@@ -47,13 +47,6 @@ const PROBE_OUTPUT_LIMIT: u64 = 1024 * 1024;
 const REMOTE_TIMEOUT_RETURN_GRACE: Duration = Duration::from_millis(200);
 const TERM_GRACE: Duration = Duration::from_millis(50);
 const DRAIN_GRACE: Duration = Duration::from_millis(125);
-const LOGIN_OPERATION_SCRIPT: &str = r#"[ "$#" -eq 3 ]||exit 2
-cwd=$1
-login_shell=$2
-payload=$3
-CDPATH= cd -P -- "$cwd"||exit 126
-[ -f "$login_shell" ]&&[ -x "$login_shell" ]||exit 126
-exec "$login_shell" -c "$payload""#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
@@ -247,48 +240,29 @@ impl SshRunner {
             elapsed_us: 0,
             bytes: None,
         });
-        let remote_timeout = !matches!(shell.shell, ShellKind::Login)
-            && capability.tools.get("timeout") == Some(&true);
         let prepared = (|| {
             let remaining = remaining_timeout(operation_deadline)?;
-            let timeout_ms = u64::try_from(remaining.as_millis())
-                .map_err(|_| BridgeError::invalid_argument("command timeout is too large"))?;
-            let cwd = root_relative_one(&root, &request.cwd)?;
-            let remote_command = if matches!(shell.shell, ShellKind::Login) {
-                let login_shell = capability.login_shell.as_deref().ok_or_else(|| {
+            let cwd = request.cwd.clone();
+            let login_shell = if matches!(shell.shell, ShellKind::Login) {
+                Some(capability.login_shell.clone().ok_or_else(|| {
                     BridgeError::new(
                         ErrorCode::RemoteCapabilityMissing,
                         "remote account login shell could not be resolved safely",
                         false,
                     )
-                })?;
-                render_fixed_command(
-                    LOGIN_OPERATION_SCRIPT,
-                    &[cwd, login_shell.to_owned(), request.command.clone()],
-                )?
+                })?)
             } else {
-                render_remote_command(
-                    &request.command,
-                    &cwd,
-                    &shell.shell,
-                    remote_timeout,
-                    timeout_ms,
-                    limits.max_frame_bytes,
-                )?
+                None
             };
-            let local_deadline = if remote_timeout {
-                remaining
-                    .checked_add(REMOTE_TIMEOUT_RETURN_GRACE)
-                    .ok_or_else(|| BridgeError::invalid_argument("command timeout is too large"))?
-            } else {
-                remaining
-            };
-            Ok((remote_command, local_deadline))
+            let response_timeout = remaining
+                .checked_add(REMOTE_TIMEOUT_RETURN_GRACE)
+                .ok_or_else(|| BridgeError::invalid_argument("command timeout is too large"))?;
+            Ok((cwd, login_shell, remaining, response_timeout))
         })()
         .map_err(|error| {
             attach_selected_context(error, &request.host, &capability.physical_root, &shell)
         })?;
-        let (remote_command, local_deadline) = prepared;
+        let (cwd, login_shell, command_timeout, response_timeout) = prepared;
         let preparation_ms = elapsed_ms(operation_started.elapsed());
         drop(preparation_profile);
         let (stdout_writer, stdout_reader) = duplex(64 * 1024);
@@ -309,16 +283,14 @@ impl SshRunner {
             .execute_with_capture(
                 &session,
                 SessionRequest {
-                    command: remote_command,
-                    cwd: root.clone(),
-                    shell: ShellSelection {
-                        shell: ShellKind::PosixSh,
-                        fallback: false,
-                    },
-                    login_shell: None,
+                    command: request.command,
+                    cwd,
+                    shell: shell.clone(),
+                    login_shell,
                     env: BTreeMap::new(),
                     stdin: request.stdin,
-                    timeout: local_deadline,
+                    timeout: command_timeout,
+                    response_timeout,
                     stdout_limit: limits.max_output_bytes,
                     stderr_limit: limits.max_output_bytes,
                     output: Some(SessionOutput {
@@ -737,6 +709,12 @@ impl SshRunner {
             .ok_or_else(rendered_too_large)?;
         let remote_command =
             render_fixed_command_text(request.script, &request.args, command_limit)?;
+        let command_timeout = remaining_timeout(operation_deadline).map_err(|error| {
+            attach_selected_context(error, &request.host, &capability.physical_root, &shell)
+        })?;
+        let response_timeout = command_timeout
+            .checked_add(REMOTE_TIMEOUT_RETURN_GRACE)
+            .ok_or_else(|| BridgeError::invalid_argument("fixed command timeout is too large"))?;
         let session_result = match session
             .execute(
                 SessionRequest {
@@ -746,14 +724,8 @@ impl SshRunner {
                     login_shell: None,
                     env: BTreeMap::new(),
                     stdin: request.stdin,
-                    timeout: remaining_timeout(operation_deadline).map_err(|error| {
-                        attach_selected_context(
-                            error,
-                            &request.host,
-                            &capability.physical_root,
-                            &shell,
-                        )
-                    })?,
+                    timeout: command_timeout,
+                    response_timeout,
                     stdout_limit: request.stdout_limit,
                     stderr_limit: request.stderr_limit,
                     output: None,
@@ -1024,9 +996,7 @@ impl SshRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        if spec.phase.forces_c_locale() {
-            command.env("LC_ALL", "C");
-        }
+        command.env("LC_ALL", "C");
         // SAFETY: pre_exec runs in the child after fork and calls only setpgid,
         // an async-signal-safe libc function. It captures no parent references.
         unsafe {
@@ -1225,12 +1195,6 @@ impl SshRunner {
         if code == 0 {
             return Ok(ChildOutcome { output });
         }
-        if matches!(phase, Phase::Command { .. })
-            && code != 255
-            && !(phase.remote_timeout_wrapped() && code == 124)
-        {
-            return Ok(ChildOutcome { output });
-        }
         self.failed_exit(code, output, phase, host, elapsed).await
     }
 
@@ -1242,9 +1206,7 @@ impl SshRunner {
         host: &str,
         elapsed: Duration,
     ) -> BridgeResult<ChildOutcome> {
-        let error_code = if phase.remote_timeout_wrapped() && code == 124 {
-            ErrorCode::CommandTimeout
-        } else if code == 255 && phase.allows_transport_classification() {
+        let error_code = if code == 255 && phase.allows_transport_classification() {
             classify_ssh_255(output.stderr_signals())
         } else {
             ErrorCode::RemoteExit
@@ -1263,11 +1225,6 @@ impl SshRunner {
         error.details.elapsed_ms = Some(elapsed_ms(elapsed));
         error.details.exit_status = Some(code);
         error.details.bytes_seen = Some(output.aggregate_bytes());
-        if error_code == ErrorCode::CommandTimeout
-            || (code == 255 && matches!(phase, Phase::Command { .. }))
-        {
-            error.details.remote_process_may_continue = Some(true);
-        }
         if let ChildCaptured::Public(output) = &output {
             self.output_store.discard(output).await;
         }
@@ -1364,36 +1321,21 @@ struct ChildSpec {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 enum Phase {
     Resolve,
     Probe,
-    Command { remote_timeout_wrapped: bool },
     Fixed { kind: FixedOperationKind },
 }
 
 impl Phase {
-    fn forces_c_locale(self) -> bool {
-        !matches!(self, Self::Command { .. })
-    }
-
     fn remote_started(self) -> bool {
         !matches!(self, Self::Resolve)
-    }
-
-    fn remote_timeout_wrapped(self) -> bool {
-        matches!(
-            self,
-            Self::Command {
-                remote_timeout_wrapped: true
-            }
-        )
     }
 
     fn after_spawn_error(self, error: BridgeError) -> BridgeError {
         match self {
             Self::Fixed { kind } => kind.after_spawn_error(error),
-            Self::Resolve | Self::Probe | Self::Command { .. } => error,
+            Self::Resolve | Self::Probe => error,
         }
     }
 
@@ -1404,10 +1346,9 @@ impl Phase {
     fn accepts_early_stdin_close(self) -> bool {
         matches!(
             self,
-            Self::Command { .. }
-                | Self::Fixed {
-                    kind: FixedOperationKind::Mutation
-                }
+            Self::Fixed {
+                kind: FixedOperationKind::Mutation
+            }
         )
     }
 
@@ -1423,9 +1364,7 @@ impl Phase {
                 "SSH capability probe timed out",
                 true,
             ),
-            Self::Command { .. } | Self::Fixed { .. } => {
-                (ErrorCode::CommandTimeout, "remote command timed out", false)
-            }
+            Self::Fixed { .. } => (ErrorCode::CommandTimeout, "remote command timed out", false),
         };
         let mut error = BridgeError::new(code, message, retryable);
         error.details.remote_process_may_continue = Some(self.remote_started());
@@ -1482,84 +1421,6 @@ fn validate_request(request: &RunRequest, limits: EffectiveLimits) -> BridgeResu
         ));
     }
     Ok(())
-}
-
-fn render_remote_command(
-    command: &str,
-    cwd: &str,
-    shell: &ShellKind,
-    remote_timeout: bool,
-    timeout_ms: u64,
-    max_frame_bytes: usize,
-) -> BridgeResult<String> {
-    if matches!(shell, ShellKind::Login) {
-        const PREFIX: &str = "cd -- ";
-        const MIDDLE: &str = " || exit 126\n";
-        let cwd = PreparedShellWord::new(cwd)?;
-        let length =
-            checked_rendered_length([PREFIX.len(), cwd.len(), MIDDLE.len(), command.len()])?;
-        ensure_rendered_bound(length, max_frame_bytes)?;
-        let mut rendered = String::with_capacity(length);
-        rendered.push_str(PREFIX);
-        cwd.push_to(&mut rendered)?;
-        rendered.push_str(MIDDLE);
-        rendered.push_str(command);
-        debug_assert_eq!(rendered.len(), length);
-        return Ok(rendered);
-    }
-    const BASH_SCRIPT: &str = r#"set -u
-[ "$#" -eq 3 ] || exit 2
-cd -P -- "$1" || exit 126
-if [ -n "$3" ]; then
-    exec timeout --signal=TERM --kill-after=1s "$3" bash --noprofile --norc -c "$2"
-fi
-exec bash --noprofile --norc -c "$2""#;
-    const SH_SCRIPT: &str = r#"set -u
-[ "$#" -eq 3 ] || exit 2
-cd -P -- "$1" || exit 126
-if [ -n "$3" ]; then
-    exec timeout --signal=TERM --kill-after=1s "$3" sh -c "$2"
-fi
-exec sh -c "$2""#;
-    let script = match shell {
-        ShellKind::Bash { .. } => BASH_SCRIPT,
-        ShellKind::PosixSh => SH_SCRIPT,
-        ShellKind::Login => unreachable!(),
-    };
-    let duration = if remote_timeout {
-        format_timeout_duration(timeout_ms)?
-    } else {
-        String::new()
-    };
-    const PREFIX: &str = "exec sh -c ";
-    const ARG0: &str = " codex-ssh-bridge-run ";
-    const SEPARATOR: &str = " ";
-    let script = PreparedShellWord::new(script)?;
-    let cwd = PreparedShellWord::new(cwd)?;
-    let command = PreparedShellWord::new(command)?;
-    let duration = PreparedShellWord::new(&duration)?;
-    let length = checked_rendered_length([
-        PREFIX.len(),
-        script.len(),
-        ARG0.len(),
-        cwd.len(),
-        SEPARATOR.len(),
-        command.len(),
-        SEPARATOR.len(),
-        duration.len(),
-    ])?;
-    ensure_rendered_bound(length, max_frame_bytes)?;
-    let mut rendered = String::with_capacity(length);
-    rendered.push_str(PREFIX);
-    script.push_to(&mut rendered)?;
-    rendered.push_str(ARG0);
-    cwd.push_to(&mut rendered)?;
-    rendered.push_str(SEPARATOR);
-    command.push_to(&mut rendered)?;
-    rendered.push_str(SEPARATOR);
-    duration.push_to(&mut rendered)?;
-    debug_assert_eq!(rendered.len(), length);
-    Ok(rendered)
 }
 
 fn checked_rendered_length(lengths: impl IntoIterator<Item = usize>) -> BridgeResult<usize> {
@@ -1715,17 +1576,6 @@ fn rooted_path_error() -> BridgeError {
     )
 }
 
-fn format_timeout_duration(timeout_ms: u64) -> BridgeResult<String> {
-    if timeout_ms == 0 {
-        return Err(BridgeError::invalid_argument(
-            "command timeout must be positive",
-        ));
-    }
-    let seconds = timeout_ms / 1000;
-    let milliseconds = timeout_ms % 1000;
-    Ok(format!("{seconds}.{milliseconds:03}s"))
-}
-
 fn capability_probe_command(root: &str) -> BridgeResult<String> {
     Ok(format!(
         "exec sh -c {} codex-ssh-probe {}",
@@ -1875,9 +1725,9 @@ fn elapsed_ms(duration: Duration) -> u64 {
 mod tests {
     use super::{
         ChildSpec, FixedOperationKind, Phase, SshRunner, capability_probe_command,
-        mutation_unknown, render_fixed_command, render_fixed_command_text, render_remote_command,
+        mutation_unknown, render_fixed_command, render_fixed_command_text,
     };
-    use crate::capability::{ShellKind, parse_probe_output};
+    use crate::capability::parse_probe_output;
     use crate::config::{Config, HostProfile};
     use crate::error::{BridgeError, ErrorCode};
     use crate::output::{CaptureLimits, InternalSpoolOwner, OutputStore};
@@ -1914,107 +1764,6 @@ mod tests {
             let capability = parse_probe_output(&output.stdout, &expected).unwrap();
             assert_eq!(capability.physical_root, root);
         }
-    }
-
-    #[test]
-    fn remote_timeout_uses_gnu_decimal_seconds() {
-        let command =
-            render_remote_command("exit 0", "/", &ShellKind::PosixSh, true, 123, usize::MAX)
-                .unwrap();
-        let output = std::process::Command::new("/bin/sh")
-            .args(["-c", &command])
-            .env("PATH", "/usr/bin")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "command={command:?}\nstatus={:?}\nstderr={}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(command.contains(" codex-ssh-bridge-run '/' 'exit 0' '0.123s'"));
-        assert_eq!(
-            render_remote_command("exit 0", "/", &ShellKind::PosixSh, true, 1000, usize::MAX,)
-                .unwrap()
-                .rsplit(' ')
-                .next(),
-            Some("'1.000s'")
-        );
-        assert_eq!(
-            render_remote_command(
-                "exit 0",
-                "/",
-                &ShellKind::PosixSh,
-                true,
-                u64::MAX,
-                usize::MAX,
-            )
-            .unwrap()
-            .rsplit(' ')
-            .next(),
-            Some("'18446744073709551.615s'")
-        );
-        assert_eq!(
-            render_remote_command("exit 0", "/", &ShellKind::PosixSh, true, 0, usize::MAX,)
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidArgument
-        );
-    }
-
-    #[test]
-    fn task78_run_render_accepts_exact_bound_rejects_minus_one_without_quote_expansion() {
-        let command = "'".repeat(4 * 1024);
-        let rendered = render_remote_command(
-            &command,
-            "/srv/quote'root",
-            &ShellKind::PosixSh,
-            false,
-            1000,
-            usize::MAX,
-        )
-        .unwrap();
-        let exact = rendered.len();
-        assert!(rendered.capacity() >= exact);
-        assert_eq!(
-            render_remote_command(
-                &command,
-                "/srv/quote'root",
-                &ShellKind::PosixSh,
-                false,
-                1000,
-                exact,
-            )
-            .unwrap(),
-            rendered
-        );
-        assert_eq!(
-            render_remote_command(
-                &command,
-                "/srv/quote'root",
-                &ShellKind::PosixSh,
-                false,
-                1000,
-                exact - 1,
-            )
-            .unwrap_err()
-            .code,
-            ErrorCode::RequestTooLarge
-        );
-        let hostile = "'".repeat(crate::MAX_FRAME_BYTES);
-        assert_eq!(
-            render_remote_command(
-                &hostile,
-                "/srv/quote'root",
-                &ShellKind::PosixSh,
-                false,
-                1000,
-                512,
-            )
-            .unwrap_err()
-            .code,
-            ErrorCode::RequestTooLarge
-        );
     }
 
     #[test]
@@ -2162,22 +1911,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_rendering_has_no_physical_root_protocol() {
+    fn fixed_rendering_has_no_physical_root_protocol() {
         let fixed = render_fixed_command("printf ok", &[]).unwrap();
         assert!(!fixed.contains("CODEX_SSH_ROOT_OBSERVE"));
         assert!(!fixed.contains("237"));
-
-        let run = render_remote_command(
-            "printf ok",
-            ".",
-            &ShellKind::PosixSh,
-            false,
-            1000,
-            usize::MAX,
-        )
-        .unwrap();
-        assert!(!run.contains("CODEX_SSH_ROOT_OBSERVE"));
-        assert!(!run.contains("237"));
     }
 
     #[test]
@@ -2400,20 +2137,6 @@ mod tests {
             .unwrap();
         assert_eq!(error.code, ErrorCode::RemoteExit);
         assert_eq!(error.details.mutation_may_have_applied, None);
-
-        let mut ordinary = task5_child(
-            "exit 0",
-            FixedOperationKind::ReadOnly,
-            Duration::from_secs(1),
-        );
-        ordinary.phase = Phase::Command {
-            remote_timeout_wrapped: false,
-        };
-        ordinary.stdin = Some(vec![b'x'; 4 * 1024 * 1024]);
-        runner
-            .run_child(ordinary, &CancellationToken::new(), "dev")
-            .await
-            .unwrap();
 
         let mut readonly = task5_child(
             "exit 0",
