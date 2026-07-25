@@ -28,7 +28,7 @@ fn session_runner(base: &TempDir, log: &std::path::Path) -> Arc<SshRunner> {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/tmp")),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_SHELL"), OsString::from("sh")),
         (
             OsString::from("FAKE_SSH_LOCAL_FIXED_PROBE"),
@@ -72,7 +72,7 @@ fn persistent_session_runner(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/tmp")),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_SHELL"), OsString::from("sh")),
         (
             OsString::from("FAKE_SSH_LOCAL_FIXED_PROBE"),
