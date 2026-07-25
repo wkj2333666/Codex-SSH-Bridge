@@ -29,6 +29,7 @@ use crate::error::{BridgeError, BridgeResult, ErrorCode};
 const CANCEL_GRACE: Duration = Duration::from_millis(200);
 const OUTPUT_FORWARD_QUEUE_CAPACITY: usize = 16;
 const OUTPUT_FORWARD_CHUNK_BYTES: usize = 64 * 1024;
+const OUTPUT_FORWARD_BACKPRESSURE_GRACE: Duration = Duration::from_millis(25);
 
 #[derive(Debug)]
 pub(crate) struct SessionRequest {
@@ -132,12 +133,19 @@ impl OutputForwarder {
         }
     }
 
-    fn forward(&mut self, bytes: &[u8]) -> bool {
+    async fn forward(&mut self, bytes: &[u8]) -> bool {
         let Some(sender) = &self.sender else {
             return false;
         };
         for chunk in bytes.chunks(OUTPUT_FORWARD_CHUNK_BYTES) {
-            if sender.try_send(chunk.to_vec()).is_err() {
+            if !matches!(
+                timeout(
+                    OUTPUT_FORWARD_BACKPRESSURE_GRACE,
+                    sender.send(chunk.to_vec())
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
                 self.failed.store(true, Ordering::Release);
                 if let Some(cancel) = self.cancel.take() {
                     cancel.cancel();
@@ -905,7 +913,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 }
                 let allowed = remaining.min(frame.payload.len());
                 let write_failed = if let Some(sink) = request.stdout_sink.as_mut() {
-                    !sink.forward(&frame.payload[..allowed])
+                    !sink.forward(&frame.payload[..allowed]).await
                 } else {
                     request.stdout.extend_from_slice(&frame.payload[..allowed]);
                     false
@@ -913,6 +921,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 if write_failed {
                     request.stdout_sink.take();
                     request.stdout_truncated = true;
+                    request.stdout_limit = request.stdout_seen as usize;
                 }
                 request.stdout_seen = request
                     .stdout_seen
@@ -941,7 +950,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 }
                 let allowed = remaining.min(frame.payload.len());
                 let write_failed = if let Some(sink) = request.stderr_sink.as_mut() {
-                    !sink.forward(&frame.payload[..allowed])
+                    !sink.forward(&frame.payload[..allowed]).await
                 } else {
                     request.stderr.extend_from_slice(&frame.payload[..allowed]);
                     false
@@ -949,6 +958,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 if write_failed {
                     request.stderr_sink.take();
                     request.stderr_truncated = true;
+                    request.stderr_limit = request.stderr_seen as usize;
                 }
                 request.stderr_seen = request
                     .stderr_seen

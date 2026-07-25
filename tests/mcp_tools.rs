@@ -75,7 +75,7 @@ fn fake_remote_tools_with_options(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
-        (OsString::from("FAKE_SSH_ROOT"), root.as_os_str().to_owned()),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
     ]);
     for (key, value) in extra {
@@ -115,6 +115,7 @@ async fn remote_run_nonzero_exit_is_a_failed_result_not_an_mcp_error() {
             "remote_run",
             json!({
                 "host":"dev",
+                "cwd":remote.path(),
                 "command":format!("printf stdout-{exit_status}; printf stderr-{exit_status} >&2; exit {exit_status}"),
                 "shell":"sh"
             }),
@@ -140,6 +141,7 @@ async fn remote_run_nonzero_exit_is_a_failed_result_not_an_mcp_error() {
         "remote_run",
         json!({
             "host":"dev",
+            "cwd":remote.path(),
             "command":"printf applied > review-side-effect; dd if=/dev/zero bs=1024 count=300 >&2 2>/dev/null; exit 2",
             "shell":"sh"
         }),
@@ -1320,7 +1322,7 @@ async fn task8_dispatch_pre_cancelled_call_launches_no_ssh_process() {
     let result = tools
         .call(
             "remote_list".to_owned(),
-            json!({"host":"dev"}),
+            json!({"host":"dev","path":"/"}),
             ToolCallContext {
                 cancel,
                 wire_budget: roomy_context().wire_budget,
@@ -1338,7 +1340,7 @@ async fn task8_error_rendering_is_direct_bounded_and_does_not_serialize_bridge_e
     let result = tools
         .call(
             "remote_list".to_owned(),
-            json!({"host":"not-configured"}),
+            json!({"host":"not-configured","path":"/"}),
             roomy_context(),
         )
         .await;
@@ -1700,7 +1702,7 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
             .call(
                 "remote_run",
                 json!({
-                    "host":"dev","command":"cat","shell":"sh",
+                    "host":"dev","cwd":remote.path(),"command":"cat","shell":"sh",
                     "stdin":{"encoding":"utf8","value":value}
                 }),
             )
@@ -1773,6 +1775,7 @@ fn five_host_tools_fixture(
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
     ]);
     let runner = Arc::new(
@@ -1825,6 +1828,7 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
                 "jsonrpc":"2.0","id":id,"method":"tools/call",
                 "params":{"name":"remote_run","arguments":{
                     "host":host,
+                    "cwd":&root_paths[index].1,
                     "command":format!("sleep 1; printf HOST-{index}"),
                     "shell":"sh"
                 }}
@@ -1939,6 +1943,7 @@ fn cancellation_tools_fixture() -> (
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("local-fixed"),
         ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("FAKE_SSH_FIXED_SLEEP_SECONDS"),
             OsString::from("10"),
@@ -1977,7 +1982,7 @@ async fn task8_cancel_process_mcp_reaches_group_under_250ms_and_service_recovers
         .send(json!({
             "jsonrpc":"2.0","id":cancelled_id,"method":"tools/call",
             "params":{"name":"remote_run","arguments":{
-                "host":"dev","command":"printf NEVER","shell":"sh"
+                "host":"dev","cwd":remote.path(),"command":"printf NEVER","shell":"sh"
             }}
         }))
         .await;
@@ -2087,7 +2092,7 @@ async fn task8_hostile_cancellation_reason_matrix_is_local_data_only() {
             .send(json!({
                 "jsonrpc":"2.0","id":request_id,"method":"tools/call",
                 "params":{"name":"remote_run","arguments":{
-                    "host":"dev","command":"printf NEVER","shell":"sh"
+                    "host":"dev","cwd":remote.path(),"command":"printf NEVER","shell":"sh"
                 }}
             }))
             .await;
@@ -2262,7 +2267,11 @@ async fn retain_all_large_models(
         )
         .unwrap();
         let serialized_bytes = serde_json::to_vec(&result).unwrap().len();
-        assert_eq!(result["isError"], Value::Null, "{name} returned an error");
+        assert_eq!(
+            result["isError"],
+            Value::Null,
+            "{name} returned an error: {result}"
+        );
         assert_eq!(
             result["structuredContent"]["truncated"],
             true,
