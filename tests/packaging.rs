@@ -230,8 +230,12 @@ fn ci_and_release_workflows_use_split_caches() {
     assert_eq!(release.matches("Restore cross binary cache").count(), 2);
     assert_eq!(release.matches("Verify cross compiler").count(), 2);
     assert!(release.contains("~/.rustup/toolchains/${{ env.RUST_TOOLCHAIN }}-*"));
-    assert!(release.contains("bridge-${{ matrix.target }}"));
-    assert!(release.contains("helper-${{ matrix.target }}"));
+    assert_eq!(
+        release
+            .matches("rust-target-cross-${{ env.RUST_TOOLCHAIN }}-${{ matrix.target }}")
+            .count(),
+        4
+    );
     assert!(release.contains("path: target"));
     assert!(release.contains("steps.cross-cache.outputs.cache-hit != 'true'"));
 }

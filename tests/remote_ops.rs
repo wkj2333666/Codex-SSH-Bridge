@@ -7189,6 +7189,10 @@ async fn five_hosts_successfully_stream_forty_mib_below_rss_bound() {
         ),
         (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
+            OsString::from("FAKE_SSH_CANDIDATE_ROOT"),
+            remote.path().as_os_str().to_owned(),
+        ),
+        (
             OsString::from("FAKE_SSH_FIXED_SLEEP_SECONDS"),
             OsString::from("0.3"),
         ),
