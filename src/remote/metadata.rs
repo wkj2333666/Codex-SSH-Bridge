@@ -243,7 +243,7 @@ pub(super) async fn list(
         let relative = join_raw(request.path.relative().as_bytes(), discovered);
         completed_records += 1;
         if !request.include_hidden
-            && relative
+            && discovered
                 .split(|byte| *byte == b'/')
                 .any(|part| part.first() == Some(&b'.'))
         {

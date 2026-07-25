@@ -2048,7 +2048,7 @@ async fn task8_cancel_process_mcp_reaches_group_under_250ms_and_service_recovers
                 RemoteRunRequest {
                     host: "dev".to_owned(),
                     command: "printf NEVER".to_owned(),
-                    cwd: None,
+                    cwd: Some(remote.path().to_string_lossy().into_owned()),
                     shell: RunShell::Sh,
                     timeout_ms: None,
                     stdin: None,
