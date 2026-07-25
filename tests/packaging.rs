@@ -166,6 +166,11 @@ fn release_workflow_builds_and_packages_all_common_targets() {
     assert!(workflow.contains("--bin codex-ssh-bridge-helper"));
     assert!(workflow.contains("statically linked|musl"));
     assert!(workflow.contains("find release-assets -maxdepth 1 -type f"));
+    assert!(
+        workflow.contains("(cd dist && sha256sum \"$name.tar.gz\" > \"$name.tar.gz.sha256\")"),
+        "downloaded checksum files must name the adjacent archive, not a CI-internal path"
+    );
+    assert!(!workflow.contains("sha256sum \"dist/$name.tar.gz\""));
 }
 
 #[test]
