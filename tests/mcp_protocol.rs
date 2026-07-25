@@ -1,22 +1,20 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use codex_ssh_bridge::error::ErrorShellMetadata;
 use codex_ssh_bridge::mcp::stdio::{
     CappedJsonBuffer, FrameEvent, FrameReader, MIN_MCP_FRAME_BYTES, SerializeLineError,
     exact_tools_list_response_bytes, required_mcp_frame_bytes, serialize_json_line,
     write_json_line,
 };
 use codex_ssh_bridge::mcp::{
-    CallToolResult, MAX_INVALID_ARGUMENT_ACTION_BYTES, McpServer, ProtocolState, RequestId,
-    SUPPORTED_PROTOCOL_VERSIONS, StrictJsonError, ToolAnnotations, ToolCallContext, ToolDefinition,
-    ToolFuture, ToolService, WireBudget, duplicate_request_id_response, internal_error_response,
-    invalid_params_response, invalid_request_id_response, invalid_request_response,
-    maximum_compact_fallback_result_bytes, method_not_found_response, parse_error_response,
-    parse_strict_json, request_too_large_response, result_response, server_busy_response,
-    server_not_initialized_response,
+    CallToolResult, McpServer, ProtocolState, RequestId, SUPPORTED_PROTOCOL_VERSIONS,
+    StrictJsonError, ToolAnnotations, ToolCallContext, ToolDefinition, ToolFuture, ToolService,
+    WireBudget, duplicate_request_id_response, internal_error_response, invalid_params_response,
+    invalid_request_id_response, invalid_request_response, maximum_compact_fallback_result_bytes,
+    method_not_found_response, parse_error_response, parse_strict_json, request_too_large_response,
+    result_response, server_busy_response, server_not_initialized_response,
 };
-use codex_ssh_bridge::{BridgeError, ErrorCode, ErrorDetails};
+use codex_ssh_bridge::{BridgeError, ErrorCode};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::io;
@@ -393,7 +391,7 @@ fn task7_tool_protocol_models_serialize_exact_shapes() {
             "structuredContent":{}
         })
     );
-    let invalid = CallToolResult::invalid_argument("provide arguments.host");
+    let invalid = CallToolResult::invalid_argument();
     let wire = serde_json::to_value(invalid).unwrap();
     assert_eq!(wire["isError"], true);
     assert_eq!(
@@ -401,64 +399,26 @@ fn task7_tool_protocol_models_serialize_exact_shapes() {
         "INVALID_ARGUMENT"
     );
     assert_eq!(
-        wire["structuredContent"]["action"],
-        "provide arguments.host"
+        wire["structuredContent"]["error"]["message"],
+        "invalid tool arguments"
     );
+    assert!(wire["structuredContent"].get("action").is_none());
     let text: Value = serde_json::from_str(wire["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(text["error"]["code"], "INVALID_ARGUMENT");
-    assert_eq!(text["action"], "provide arguments.host");
+    assert_eq!(text["error"]["message"], "invalid tool arguments");
+    assert!(text.get("action").is_none());
 }
 
 #[test]
-fn task7_invalid_argument_accepts_only_static_bounded_actions() {
-    const OVERSIZED_STATIC_ACTION: &str = concat!(
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "x"
-    );
-    assert_eq!(MAX_INVALID_ARGUMENT_ACTION_BYTES, 1024);
-    assert_eq!(OVERSIZED_STATIC_ACTION.len(), 1025);
-
-    let bounded = serde_json::to_value(CallToolResult::invalid_argument(
-        "provide arguments.host as a configured alias",
-    ))
-    .unwrap();
+fn invalid_argument_is_fixed_factual_and_contains_no_action() {
+    let rendered = serde_json::to_value(CallToolResult::invalid_argument()).unwrap();
     assert_eq!(
-        bounded["structuredContent"]["action"],
-        "provide arguments.host as a configured alias"
+        rendered["structuredContent"],
+        json!({"error":{"code":"INVALID_ARGUMENT","message":"invalid tool arguments"}})
     );
-
-    let oversized =
-        serde_json::to_value(CallToolResult::invalid_argument(OVERSIZED_STATIC_ACTION)).unwrap();
-    assert_eq!(
-        oversized["structuredContent"]["action"],
-        "provide valid tool arguments"
-    );
-    assert!(
-        oversized["structuredContent"]["action"]
-            .as_str()
-            .unwrap()
-            .len()
-            <= MAX_INVALID_ARGUMENT_ACTION_BYTES
-    );
-
+    assert!(!rendered.to_string().contains("action"));
     let source = include_str!("../src/mcp/protocol.rs");
-    assert!(source.contains("pub fn invalid_argument(actionable_safe_text: &'static str) -> Self"));
-    assert!(!source.contains("invalid_argument(actionable_safe_text: impl Into<String>)"));
+    assert!(source.contains("pub fn invalid_argument() -> Self"));
 }
 
 #[derive(Debug)]
@@ -600,7 +560,7 @@ impl ToolService for StubTools {
                         bridge_ops.fetch_add(1, Ordering::SeqCst);
                         CallToolResult::text(text)
                     }
-                    None => CallToolResult::invalid_argument("provide arguments.text as a string"),
+                    None => CallToolResult::invalid_argument(),
                 };
             }
             unreachable!("the lifecycle owner rejects unknown names")
@@ -3336,130 +3296,11 @@ fn task7_min_frame_counts_complete_tools_list_and_definition_growth() {
     );
 }
 
-#[derive(Serialize)]
-struct ProjectedContext<'a> {
-    remote: bool,
-    host: &'a str,
-    physical_root: &'a str,
-    shell: ProjectedShell<'a>,
-}
-
-#[derive(Serialize)]
-struct ProjectedShell<'a> {
-    kind: &'a str,
-    version: &'a str,
-    fallback: bool,
-}
-
-#[derive(Serialize)]
-struct ProjectedCore<'a> {
-    code: ErrorCode,
-    message: &'a str,
-    retryable: bool,
-    mutation_may_have_applied: bool,
-    action: &'a str,
-    warnings: Vec<&'a str>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectedStructured<'a> {
-    #[serde(flatten)]
-    context: &'a ProjectedContext<'a>,
-    error: &'a ProjectedCore<'a>,
-}
-
 #[test]
-fn task7_min_frame_authoritative_future_renderer_projection_fits_compiled_floor() {
-    // Task 7 replaces this shape-only projection with its real RenderedErrorCore
-    // assertion. Keeping it test-only avoids inventing renderer semantics early.
-    let root = format!(
-        "/{}",
-        "\u{1}".repeat(codex_ssh_bridge::config::MAX_REMOTE_CONTEXT_ROOT_BYTES - 1)
-    );
-    assert_eq!(
-        root.len(),
-        codex_ssh_bridge::config::MAX_REMOTE_CONTEXT_ROOT_BYTES
-    );
-    let version = "\u{1}".repeat(codex_ssh_bridge::capability::MAX_SHELL_VERSION_BYTES);
-    assert_eq!(
-        version.len(),
-        codex_ssh_bridge::capability::MAX_SHELL_VERSION_BYTES
-    );
-    assert!(version.chars().all(char::is_control));
-    assert!(serde_json::to_vec(&version).unwrap().len() > version.len());
-    // Task 7's real safe-string projection must replace every Unicode control
-    // character with one ASCII '?' before/during UTF-8-bound truncation. Quotes
-    // and backslashes are therefore the largest legal JSON-escaping pattern.
-    let message = "\"\\".repeat(512);
-    let action = "\\\"".repeat(512);
-    let warning = "\"\\".repeat(512);
-    let bridge_error = BridgeError {
-        code: ErrorCode::MutationOutcomeUnknown,
-        message: message.clone(),
-        retryable: false,
-        details: ErrorDetails {
-            host: Some("largest-host".into()),
-            physical_root: Some(root.clone()),
-            shell: Some(ErrorShellMetadata {
-                kind: "bash".into(),
-                version: Some(version.clone()),
-                fallback: false,
-            }),
-            mutation_may_have_applied: Some(true),
-            suggested_action: Some(action.clone()),
-            ..ErrorDetails::default()
-        },
-    };
-    let error_shell = bridge_error.details.shell.as_ref().unwrap();
-    let context = ProjectedContext {
-        remote: true,
-        host: bridge_error.details.host.as_deref().unwrap(),
-        physical_root: bridge_error.details.physical_root.as_deref().unwrap(),
-        shell: ProjectedShell {
-            kind: &error_shell.kind,
-            version: error_shell.version.as_deref().unwrap(),
-            fallback: error_shell.fallback,
-        },
-    };
-    let core = ProjectedCore {
-        code: bridge_error.code,
-        message: &bridge_error.message,
-        retryable: bridge_error.retryable,
-        mutation_may_have_applied: true,
-        action: bridge_error.details.suggested_action.as_deref().unwrap(),
-        warnings: vec![warning.as_str(); 16],
-    };
-    let projected = ProjectedStructured {
-        context: &context,
-        error: &core,
-    };
-    let core_value = serde_json::to_value(&core).unwrap();
-    assert!(core_value.get("host").is_none());
-    assert!(core_value.get("physical_root").is_none());
-    assert!(core_value.get("shell").is_none());
-    let projected_value = serde_json::to_value(&projected).unwrap();
-    assert_eq!(projected_value["physical_root"], root);
-    assert!(projected_value["error"].get("host").is_none());
-    assert!(projected_value["error"].get("physical_root").is_none());
-    assert!(projected_value["error"].get("shell").is_none());
-    let inner = serde_json::to_string(&projected).unwrap();
-    let parsed_inner: Value = serde_json::from_str(&inner).unwrap();
-    assert_eq!(count_exact_string(&parsed_inner, &root), 1);
-    assert_eq!(count_exact_string(&parsed_inner, &version), 1);
-    let result = json!({
-        "content":[{"type":"text","text":inner}],
-        "structuredContent": projected,
-        "isError":true
-    });
-    assert_eq!(count_exact_string(&result["structuredContent"], &root), 1);
-    assert_eq!(
-        count_exact_string(&result["structuredContent"], &version),
-        1
-    );
+fn compact_fallback_fits_the_compiled_frame_floor() {
+    let result = serde_json::to_value(CallToolResult::invalid_argument()).unwrap();
     let response = result_response(RequestId::synthetic_max_wire(), result);
     let exact = serde_json::to_vec(&response).unwrap().len();
-    eprintln!("authoritative worst safe fallback bytes={exact}");
     assert!(serialize_json_line(&response, exact).is_ok());
     assert!(matches!(
         serialize_json_line(&response, exact - 1),

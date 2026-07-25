@@ -125,23 +125,14 @@ async fn remote_run_nonzero_exit_is_a_failed_result_not_an_mcp_error() {
             rendered.get("isError").is_none() || rendered["isError"] == false,
             "completed command failure must not be an MCP protocol/tool error: {rendered}"
         );
-        assert_eq!(rendered["structuredContent"]["status"], "failed");
-        assert_eq!(rendered["structuredContent"]["exit_status"], exit_status);
         assert_eq!(
-            rendered["structuredContent"]["remote_process_may_continue"],
-            false
+            rendered["structuredContent"],
+            json!({"exit_code":exit_status})
         );
-        assert_eq!(
-            rendered["structuredContent"]["mutation_may_have_applied"],
-            true
-        );
-        let text = rendered["content"][0]["text"].as_str().unwrap();
+        let text = text_content(&rendered);
         assert!(text.contains(&format!("stdout-{exit_status}")), "{text}");
         assert!(text.contains(&format!("stderr-{exit_status}")), "{text}");
-        assert!(
-            text.contains(&format!("\"exit_status\":{exit_status}")),
-            "{text}"
-        );
+        assert!(text.contains("POSIX sh"), "{text}");
     }
 
     let rendered = call_json(
@@ -154,11 +145,8 @@ async fn remote_run_nonzero_exit_is_a_failed_result_not_an_mcp_error() {
         }),
     )
     .await;
-    assert_eq!(rendered["structuredContent"]["status"], "failed");
-    assert_eq!(
-        rendered["structuredContent"]["mutation_may_have_applied"],
-        true
-    );
+    assert_eq!(rendered["structuredContent"]["exit_code"], 2);
+    assert_eq!(rendered["structuredContent"]["truncated"], true);
     assert_eq!(
         std::fs::read_to_string(remote.path().join("review-side-effect")).unwrap(),
         "applied"
@@ -178,18 +166,53 @@ async fn remote_run_nonzero_exit_is_a_failed_result_not_an_mcp_error() {
     )
     .await;
     assert!(page.get("isError").is_none() || page["isError"] == false);
-    let page_text = text_json(&page);
-    assert_eq!(page_text["data"]["encoding"], "base64");
+    let page_text = text_content(&page)
+        .strip_prefix("base64:")
+        .expect("binary page must be explicitly marked");
     assert_eq!(
-        page_text["data"]["value"],
+        page_text,
         base64::engine::general_purpose::STANDARD.encode(vec![0; 4096])
     );
-    assert_eq!(page_text["next_offset"], 260 * 1024);
-    assert_eq!(page_text["eof"], false);
+    assert_eq!(page["structuredContent"]["next_offset"], 260 * 1024);
+    assert_eq!(page["structuredContent"]["eof"], false);
 }
 
-fn text_json(result: &Value) -> Value {
-    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+fn text_content(result: &Value) -> &str {
+    result["content"][0]["text"].as_str().unwrap()
+}
+
+fn assert_no_diagnostic_success_fields(result: &Value) {
+    const FORBIDDEN: &[&str] = &[
+        "remote",
+        "host",
+        "physical_root",
+        "helper_mode",
+        "shell",
+        "elapsed_ms",
+        "entry_count",
+        "match_count",
+        "raw_bytes",
+        "aggregate_bytes",
+        "detail_retained",
+        "action",
+        "suggested_action",
+    ];
+    fn visit(value: &Value) {
+        match value {
+            Value::Array(values) => values.iter().for_each(visit),
+            Value::Object(object) => {
+                for key in FORBIDDEN {
+                    assert!(
+                        !object.contains_key(*key),
+                        "normal success leaked diagnostic field {key}: {value}"
+                    );
+                }
+                object.values().for_each(visit);
+            }
+            _ => {}
+        }
+    }
+    visit(&result["structuredContent"]);
 }
 
 fn command_calls(log: &std::path::Path) -> usize {
@@ -332,7 +355,8 @@ fn task8_binary_lifecycle_smoke_exposes_exact_surface_without_leaks() {
             .collect::<Vec<_>>()
     );
     assert_eq!(lines[2]["result"]["isError"], Value::Null);
-    assert_eq!(lines[2]["result"]["structuredContent"]["host_count"], 1);
+    assert_eq!(lines[2]["result"]["structuredContent"], json!({}));
+    assert_eq!(text_content(&lines[2]["result"]), "dev");
     assert_eq!(std::fs::read(&ssh_log).unwrap_or_default(), b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     for forbidden in [
@@ -448,14 +472,6 @@ impl ProtocolSession {
     }
 }
 
-fn assert_remote_context(result: &Value, root: &std::path::Path) {
-    let structured = &result["structuredContent"];
-    assert_eq!(structured["remote"], true);
-    assert_eq!(structured["host"], "dev");
-    assert_eq!(structured["physical_root"], root.to_str().unwrap());
-    assert!(structured["shell"]["kind"].is_string());
-}
-
 #[tokio::test]
 async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let remote = tempfile::TempDir::new().unwrap();
@@ -476,8 +492,9 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     let mut session = ProtocolSession::start(tools).await;
 
     let hosts = session.call("remote_hosts", json!({})).await;
-    assert_eq!(hosts["structuredContent"]["remote"], true);
-    assert_eq!(hosts["structuredContent"]["host_count"], 1);
+    assert_no_diagnostic_success_fields(&hosts);
+    assert_eq!(hosts["structuredContent"], json!({}));
+    assert_eq!(text_content(&hosts), "dev");
 
     let listed = session
         .call(
@@ -485,12 +502,9 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             json!({"host":"dev","path":".","max_entries":32}),
         )
         .await;
-    assert_remote_context(&listed, remote.path());
-    assert!(
-        text_json(&listed)
-            .to_string()
-            .contains("hostile $(touch SHOULD_NOT_EXIST)\\nname.txt")
-    );
+    assert_no_diagnostic_success_fields(&listed);
+    assert_eq!(listed["structuredContent"], json!({}));
+    assert!(text_content(&listed).contains("hostile $(touch SHOULD_NOT_EXIST)\nname.txt"));
 
     let stated = session
         .call(
@@ -498,10 +512,11 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             json!({"host":"dev","paths":["binary.bin","missing.txt"]}),
         )
         .await;
-    assert_remote_context(&stated, remote.path());
-    let stat_text = text_json(&stated);
-    assert_eq!(stat_text["entries"].as_array().unwrap().len(), 2);
-    assert!(stat_text.to_string().contains("missing.txt"));
+    assert_no_diagnostic_success_fields(&stated);
+    assert_eq!(stated["structuredContent"], json!({}));
+    let stat_lines = text_content(&stated).lines().collect::<Vec<_>>();
+    assert_eq!(stat_lines.len(), 2);
+    assert!(text_content(&stated).contains("missing.txt"));
 
     let searched = session
         .call(
@@ -509,12 +524,9 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             json!({"host":"dev","query":"$(touch SHOULD_NOT_EXIST)","path":"."}),
         )
         .await;
-    assert_remote_context(&searched, remote.path());
-    assert!(
-        text_json(&searched)
-            .to_string()
-            .contains("$(touch SHOULD_NOT_EXIST)")
-    );
+    assert_no_diagnostic_success_fields(&searched);
+    assert_eq!(searched["structuredContent"], json!({}));
+    assert!(text_content(&searched).contains("$(touch SHOULD_NOT_EXIST)"));
 
     let read = session
         .call(
@@ -522,8 +534,9 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             json!({"host":"dev","paths":["utf8.txt","binary.bin"],"max_bytes":4096}),
         )
         .await;
-    assert_remote_context(&read, remote.path());
-    let read_text = text_json(&read).to_string();
+    assert_no_diagnostic_success_fields(&read);
+    assert_eq!(read["structuredContent"], json!({}));
+    let read_text = text_content(&read);
     assert!(read_text.contains("UTF8_SURFACE"), "read={read_text}");
     assert!(read_text.contains("/wB/"));
 
@@ -533,8 +546,8 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             json!({"host":"dev","command":"printf RUN_SURFACE; dd if=/dev/zero bs=1024 count=300 2>/dev/null","shell":"sh"}),
         )
         .await;
-    assert_remote_context(&run, remote.path());
-    assert_eq!(run["structuredContent"]["exit_status"], 0);
+    assert_no_diagnostic_success_fields(&run);
+    assert_eq!(run["structuredContent"]["exit_code"], 0);
     let output_ref = run["structuredContent"]["output_ref"]
         .as_str()
         .expect("run must publish a pageable output reference")
@@ -546,8 +559,9 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             json!({"output_ref":output_ref,"stream":"stdout","offset":0,"max_bytes":11}),
         )
         .await;
-    assert_remote_context(&output, remote.path());
-    assert!(text_json(&output).to_string().contains("RUN_SURFACE"));
+    assert_no_diagnostic_success_fields(&output);
+    assert!(text_content(&output).contains("RUN_SURFACE"));
+    assert_eq!(output["structuredContent"]["next_offset"], 11);
 
     let written = session
         .call(
@@ -558,8 +572,9 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             }),
         )
         .await;
-    assert_remote_context(&written, remote.path());
-    assert_eq!(written["structuredContent"]["status"], "applied");
+    assert_no_diagnostic_success_fields(&written);
+    assert_eq!(written["structuredContent"], json!({}));
+    assert!(text_content(&written).starts_with("Wrote "));
 
     let patched = session
         .call(
@@ -570,8 +585,9 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
             }),
         )
         .await;
-    assert_remote_context(&patched, remote.path());
-    assert_eq!(patched["structuredContent"]["status"], "applied");
+    assert_no_diagnostic_success_fields(&patched);
+    assert_eq!(patched["structuredContent"], json!({}));
+    assert_eq!(text_content(&patched), "Done!");
     assert_eq!(
         std::fs::read(remote.path().join("created.txt")).unwrap(),
         b"PATCH_SURFACE\n"
@@ -599,15 +615,8 @@ async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
         .call("remote_run", json!({"host":"dev","command":"printf safe"}))
         .await;
     assert_eq!(default_bash["isError"], Value::Null, "{default_bash}");
-    assert_eq!(default_bash["structuredContent"]["shell"]["kind"], "bash");
-    assert_eq!(
-        default_bash["structuredContent"]["shell"]["version"],
-        "5.2.15"
-    );
-    assert_eq!(
-        default_bash["structuredContent"]["shell"]["fallback"],
-        false
-    );
+    assert_eq!(default_bash["structuredContent"], json!({"exit_code":0}));
+    assert!(!default_bash.to_string().contains("5.2.15"));
     session.close().await;
 
     let (_runtime, _log, tools) = fake_remote_tools_with_options(remote.path(), false, &extra);
@@ -619,15 +628,8 @@ async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
         )
         .await;
     assert_eq!(explicit_sh["isError"], Value::Null, "{explicit_sh}");
-    assert_eq!(explicit_sh["structuredContent"]["shell"]["kind"], "sh");
-    assert_eq!(explicit_sh["structuredContent"]["shell"]["fallback"], false);
-    assert!(
-        explicit_sh["structuredContent"]["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| warning.as_str().unwrap().contains("POSIX sh"))
-    );
+    assert_eq!(explicit_sh["structuredContent"], json!({"exit_code":0}));
+    assert!(text_content(&explicit_sh).contains("POSIX sh"));
     session.close().await;
 }
 
@@ -654,6 +656,9 @@ async fn task8_shell_surface_missing_bash_rejects_before_command_child() {
         run["structuredContent"]["error"]["code"],
         "REMOTE_CAPABILITY_MISSING"
     );
+    assert_eq!(run["structuredContent"]["requested_shell"], "bash");
+    assert_eq!(run["structuredContent"]["available_shells"], json!(["sh"]));
+    assert!(!run.to_string().contains("action"));
     assert_eq!(command_calls(&log), 0);
     session.close().await;
 }
@@ -673,10 +678,7 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
             json!({"host":"dev","command":"printf safe","shell":"login"}),
         )
         .await;
-    assert_eq!(
-        run["structuredContent"]["shell"],
-        json!({"kind":"login","fallback":false})
-    );
+    assert_eq!(run["structuredContent"], json!({"exit_code":0}));
     session.close().await;
 
     let (_runtime, _log, tools) = fake_remote_tools_with_options(
@@ -699,10 +701,7 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
         timed_out["structuredContent"]["error"]["code"],
         "COMMAND_TIMEOUT"
     );
-    assert_eq!(
-        timed_out["structuredContent"]["shell"],
-        json!({"kind":"login","fallback":false})
-    );
+    assert!(timed_out["structuredContent"].get("shell").is_none());
     session.close().await;
 }
 
@@ -719,15 +718,9 @@ async fn task8_shell_surface_read_only_is_enforced_server_side_for_every_mutatio
     )
     .unwrap();
     let mut session = ProtocolSession::start_with_frame(tools, minimum_frame).await;
-    let retained = session.call("remote_hosts", json!({})).await;
-    assert_eq!(
-        retained["structuredContent"]["detail_retained"], true,
-        "{retained}"
-    );
-    let output_ref = retained["structuredContent"]["output_ref"]
-        .as_str()
-        .expect("read-only list detail must be retained")
-        .to_owned();
+    let hosts = session.call("remote_hosts", json!({})).await;
+    assert_eq!(hosts["structuredContent"], json!({}));
+    assert_eq!(text_content(&hosts), "dev");
 
     for (name, arguments) in [
         (
@@ -743,17 +736,11 @@ async fn task8_shell_surface_read_only_is_enforced_server_side_for_every_mutatio
     ] {
         let result = session.call(name, arguments).await;
         assert_ne!(result["isError"], true, "{name}: {result}");
-        assert_remote_context(&result, remote.path());
+        assert!(
+            result["structuredContent"].get("remote").is_none(),
+            "{name}: {result}"
+        );
     }
-    let output = session
-        .call(
-            "remote_output_read",
-            json!({"output_ref":output_ref,"stream":"stdout","offset":0,"max_bytes":1024}),
-        )
-        .await;
-    assert_ne!(output["isError"], true, "{output}");
-    assert_eq!(output["structuredContent"]["remote"], true);
-    assert_eq!(output["structuredContent"]["aggregate"], "hosts");
 
     std::fs::write(&log, b"").unwrap();
     for (name, arguments) in [
@@ -1263,11 +1250,8 @@ async fn task8_single_copy_hosts_payload_is_only_in_text_content() {
         .await;
     let rendered = serde_json::to_value(result).unwrap();
     assert_eq!(rendered["content"].as_array().unwrap().len(), 1);
-    let text = rendered["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("/srv/remote"));
-    assert!(rendered["structuredContent"].get("hosts").is_none());
-    assert_eq!(rendered["structuredContent"]["remote"], true);
-    assert_eq!(rendered["structuredContent"]["host_count"], 1);
+    assert_eq!(text_content(&rendered), "dev");
+    assert_eq!(rendered["structuredContent"], json!({}));
 }
 
 #[tokio::test]
@@ -1283,7 +1267,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         json!({"host":"dev", "path":".", "max_entries":32}),
     )
     .await;
-    assert!(text_json(&listed).to_string().contains("utf8.txt"));
+    assert!(text_content(&listed).contains("utf8.txt"));
     assert!(listed["structuredContent"].get("entries").is_none());
 
     std::fs::write(&log, b"").unwrap();
@@ -1293,7 +1277,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         json!({"host":"dev", "paths":["utf8.txt", "binary.bin"]}),
     )
     .await;
-    assert_eq!(text_json(&stated)["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(text_content(&stated).lines().count(), 2);
     assert_eq!(
         command_calls(&log),
         1,
@@ -1306,7 +1290,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         json!({"host":"dev", "paths":["utf8.txt", "binary.bin"], "max_bytes":4096}),
     )
     .await;
-    let read_text = text_json(&read).to_string();
+    let read_text = text_content(&read);
     assert!(read_text.contains("UTF8_SENTINEL"));
     assert!(read_text.contains("/wB/"), "binary content must be base64");
     assert!(
@@ -1321,7 +1305,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         json!({"host":"dev", "query":"UTF8_SENTINEL", "path":"."}),
     )
     .await;
-    assert!(text_json(&searched).to_string().contains("UTF8_SENTINEL"));
+    assert!(text_content(&searched).contains("UTF8_SENTINEL"));
 
     let run = call_json(
         &tools,
@@ -1329,10 +1313,10 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         json!({"host":"dev", "command":"printf RUN_SENTINEL", "shell":"sh"}),
     )
     .await;
-    let run_text = text_json(&run).to_string();
+    let run_text = text_content(&run);
     assert!(run_text.contains("RUN_SENTINEL"));
     assert!(run_text.contains("POSIX sh"));
-    assert_eq!(run["structuredContent"]["mutation_may_have_applied"], false);
+    assert_eq!(run["structuredContent"]["exit_code"], 0);
 
     let written = call_json(
         &tools,
@@ -1346,7 +1330,8 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         }),
     )
     .await;
-    assert_eq!(written["structuredContent"]["status"], "applied");
+    assert_eq!(written["structuredContent"], json!({}));
+    assert!(text_content(&written).starts_with("Wrote "));
     assert_eq!(
         std::fs::read(remote.path().join("created.txt")).unwrap(),
         b"WRITE_SENTINEL\n"
@@ -1361,8 +1346,8 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         }),
     )
     .await;
-    assert_eq!(patched["structuredContent"]["status"], "applied");
-    assert_eq!(patched["structuredContent"]["changed_count"], 1);
+    assert_eq!(patched["structuredContent"], json!({}));
+    assert_eq!(text_content(&patched), "Done!");
     assert_eq!(
         std::fs::read(remote.path().join("created.txt")).unwrap(),
         b"PATCH_SENTINEL\n"
@@ -1426,16 +1411,16 @@ async fn task8_error_rendering_is_direct_bounded_and_does_not_serialize_bridge_e
             .len()
             <= 1_024
     );
+    assert!(rendered["structuredContent"].get("host").is_none());
     assert!(
-        rendered["structuredContent"]["error"]["details"]
-            .get("host")
-            .is_none(),
-        "remote context must not be nested into the error core"
+        rendered["structuredContent"]["error"]
+            .get("details")
+            .is_none()
     );
 }
 
 #[tokio::test]
-async fn task8_retention_hosts_fallback_is_truthful_and_pageable() {
+async fn host_descriptions_are_not_exposed_or_retained_in_model_output() {
     let runtime_base = tempfile::TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
@@ -1464,7 +1449,7 @@ async fn task8_retention_hosts_fallback_is_truthful_and_pageable() {
         .unwrap(),
     );
     let bridge = Arc::new(RemoteBridge::new(runner));
-    let tools = RemoteMcpTools::new(Arc::clone(&bridge));
+    let tools = RemoteMcpTools::new(bridge);
     let id = RequestId::synthetic_max_wire();
     let minimum_frame = required_mcp_frame_bytes(
         tool_definitions(),
@@ -1474,43 +1459,9 @@ async fn task8_retention_hosts_fallback_is_truthful_and_pageable() {
     .unwrap();
     let mut session = ProtocolSession::start_with_frame(tools, minimum_frame).await;
     let rendered = session.call("remote_hosts", json!({})).await;
-    assert_eq!(rendered["structuredContent"]["host_count"], 7);
-    assert_eq!(rendered["structuredContent"]["truncated"], true);
-    assert_eq!(rendered["structuredContent"]["detail_retained"], true);
-    let output_ref = rendered["structuredContent"]["output_ref"]
-        .as_str()
-        .unwrap();
-    let paged = session
-        .call(
-            "remote_output_read",
-            json!({
-                "output_ref":output_ref,
-                "stream":"stdout",
-                "offset":0,
-                "max_bytes":1024
-            }),
-        )
-        .await;
-    let paged_text = text_json(&paged);
-    assert_eq!(paged_text["remote"], true);
-    assert_eq!(paged_text["aggregate"], "hosts");
-    assert_eq!(paged_text["source_count"], 7);
-    assert_eq!(paged_text["output_ref"], output_ref);
-    assert_eq!(paged_text["offset"], 0);
-    assert!(paged_text["next_offset"].as_u64().unwrap() > 0);
-    let page = bridge
-        .output_read(
-            codex_ssh_bridge::remote::OutputReadRequest {
-                output_ref: output_ref.to_owned(),
-                stream: codex_ssh_bridge::output::StreamKind::Stdout,
-                offset: 0,
-                max_bytes: 1_024,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert!(page.data.value.contains("DETAIL-0"));
+    assert_eq!(rendered["structuredContent"], json!({}));
+    assert_eq!(text_content(&rendered).lines().count(), 7);
+    assert!(!rendered.to_string().contains("DETAIL-"));
     session.close().await;
 }
 
@@ -1593,50 +1544,6 @@ fn normalized_remote_run_shape(log: &std::path::Path) -> (String, String) {
 fn assert_hostile_marker_absent(remote: &std::path::Path) {
     assert!(!remote.join("SHOULD_NOT_EXIST").exists());
     assert!(!std::path::Path::new("SHOULD_NOT_EXIST").exists());
-}
-
-fn json_contains_exact_string(value: &Value, expected: &str) -> bool {
-    match value {
-        Value::String(value) => value == expected,
-        Value::Array(values) => values
-            .iter()
-            .any(|value| json_contains_exact_string(value, expected)),
-        Value::Object(values) => values
-            .values()
-            .any(|value| json_contains_exact_string(value, expected)),
-        _ => false,
-    }
-}
-
-fn json_contains_exact_encoded_bytes(value: &Value, expected: &[u8]) -> bool {
-    if let Value::Object(object) = value
-        && let (Some(encoding), Some(encoded)) = (
-            object.get("encoding").and_then(Value::as_str),
-            object.get("value").and_then(Value::as_str),
-        )
-    {
-        let matches = match encoding {
-            "utf8" => encoded.as_bytes() == expected,
-            "base64" => base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                encoded.as_bytes(),
-            )
-            .is_ok_and(|decoded| decoded == expected),
-            _ => false,
-        };
-        if matches {
-            return true;
-        }
-    }
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .any(|value| json_contains_exact_encoded_bytes(value, expected)),
-        Value::Object(values) => values
-            .values()
-            .any(|value| json_contains_exact_encoded_bytes(value, expected)),
-        _ => false,
-    }
 }
 
 #[tokio::test]
@@ -1841,10 +1748,9 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
             )
             .await;
         assert_eq!(result["isError"], Value::Null, "value={value:?}: {result}");
-        let text = text_json(&result);
+        let text = text_content(&result);
         assert!(
-            json_contains_exact_string(&text, value)
-                || json_contains_exact_encoded_bytes(&text, value.as_bytes()),
+            text.contains(value),
             "command output was not preserved exactly: {text}"
         );
         let shape = normalized_remote_run_shape(&log);
@@ -1976,18 +1882,15 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
             "five-host release elapsed={elapsed:?}"
         );
     }
-    for (index, (host, root)) in root_paths.iter().enumerate() {
+    for (index, (host, _root)) in root_paths.iter().enumerate() {
         let id = 100 + index as u64;
         let result = &responses[&id]["result"];
         assert_eq!(result["isError"], Value::Null, "host={host}: {result}");
-        assert_eq!(result["structuredContent"]["host"], host.as_str());
-        assert_eq!(
-            result["structuredContent"]["physical_root"],
-            root.to_string_lossy().as_ref()
-        );
-        let text = text_json(result);
+        assert_eq!(result["structuredContent"]["exit_code"], 0);
+        assert!(result["structuredContent"].get("host").is_none());
+        let text = text_content(result);
         assert!(
-            json_contains_exact_encoded_bytes(&text, format!("HOST-{index}").as_bytes()),
+            text.contains(&format!("HOST-{index}")),
             "host output was interleaved or lost: {text}"
         );
     }
@@ -2153,7 +2056,8 @@ async fn task8_cancel_process_mcp_reaches_group_under_250ms_and_service_recovers
         .await;
     let hosts = session.read_response(Duration::from_secs(1)).await;
     assert_eq!(hosts["id"], 43);
-    assert_eq!(hosts["result"]["structuredContent"]["host_count"], 1);
+    assert_eq!(hosts["result"]["structuredContent"], json!({}));
+    assert_eq!(text_content(&hosts["result"]), "dev");
     assert!(
         tokio::time::timeout(Duration::from_millis(500), session.output.fill_buf())
             .await
@@ -2384,11 +2288,10 @@ async fn retain_all_large_models(
     search_args: Value,
 ) -> Vec<Value> {
     let mut retained = Vec::new();
-    for (name, count_field, expected_count, arguments) in [
-        ("remote_hosts", "host_count", 1, json!({})),
-        ("remote_list", "entry_count", 1_000, list_args),
-        ("remote_stat", "entry_count", 256, stat_args),
-        ("remote_search", "match_count", 500, search_args),
+    for (name, arguments) in [
+        ("remote_list", list_args),
+        ("remote_stat", stat_args),
+        ("remote_search", search_args),
     ] {
         let result = serde_json::to_value(
             tools
@@ -2399,11 +2302,7 @@ async fn retain_all_large_models(
         let serialized_bytes = serde_json::to_vec(&result).unwrap().len();
         assert_eq!(result["isError"], Value::Null, "{name} returned an error");
         assert_eq!(
-            result["structuredContent"][count_field], expected_count,
-            "{name} did not exercise the intended full success model"
-        );
-        assert_eq!(
-            result["structuredContent"]["detail_retained"],
+            result["structuredContent"]["truncated"],
             true,
             "{name}: serialized_bytes={serialized_bytes}, result_budget={}",
             compact_context().wire_budget.result_bytes
@@ -2415,12 +2314,12 @@ async fn retain_all_large_models(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn task8_output_rss_large_host_list_stat_search_models_all_force_retention() {
+async fn task8_output_rss_large_list_stat_search_models_all_force_retention() {
     let root = tempfile::TempDir::new().unwrap();
     let (_runtime, tools, list_args, stat_args, search_args) =
         retention_models_fixture(root.path());
     let retained = retain_all_large_models(&tools, list_args, stat_args, search_args).await;
-    assert_eq!(retained.len(), 4);
+    assert_eq!(retained.len(), 3);
 }
 
 #[test]
@@ -2492,10 +2391,8 @@ async fn task8_output_rss_child() {
         )
         .await;
         assert_eq!(output["isError"], Value::Null, "{output}");
-        assert_eq!(
-            output["structuredContent"]["aggregate_bytes"],
-            codex_ssh_bridge::MAX_OUTPUT_BYTES
-        );
+        assert_eq!(output["structuredContent"]["exit_code"], 0);
+        assert_eq!(output["structuredContent"]["truncated"], true);
         assert!(output["structuredContent"]["output_ref"].is_string());
         (retained, output)
     });

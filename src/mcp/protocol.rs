@@ -17,7 +17,6 @@ pub const MAX_JSON_NODES: usize = 262_144;
 pub const MAX_JSON_OBJECT_MEMBERS: usize = 131_072;
 pub const MAX_JSON_KEY_BYTES: usize = 1_048_576;
 pub const MAX_REQUEST_ID_WIRE_BYTES: usize = 256;
-pub const MAX_INVALID_ARGUMENT_ACTION_BYTES: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RequestId {
@@ -159,19 +158,12 @@ impl CallToolResult {
         }
     }
 
-    pub fn invalid_argument(actionable_safe_text: &'static str) -> Self {
-        let action = if actionable_safe_text.len() <= MAX_INVALID_ARGUMENT_ACTION_BYTES {
-            actionable_safe_text
-        } else {
-            "provide valid tool arguments"
-        }
-        .to_owned();
+    pub fn invalid_argument() -> Self {
         let compact = serde_json::to_string(&serde_json::json!({
             "error": {
                 "code": "INVALID_ARGUMENT",
                 "message": "invalid tool arguments"
-            },
-            "action": &action
+            }
         }))
         .expect("serializing a JSON value cannot fail");
         Self {
@@ -180,8 +172,7 @@ impl CallToolResult {
                 "error": {
                     "code": "INVALID_ARGUMENT",
                     "message": "invalid tool arguments"
-                },
-                "action": action
+                }
             }),
             is_error: true,
         }

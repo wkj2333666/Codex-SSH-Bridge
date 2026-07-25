@@ -6,15 +6,17 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{BridgeError, ErrorCode, ErrorDetails, ErrorShellMetadata};
+use crate::error::{BridgeError, ErrorCode, ErrorDetails};
 use crate::remote::{
     AggregateKind, ApplyPatchResult, EncodedValue, HostsResult, ListResult, OutputReadResult,
-    ReadEntry, ReadResult, RemoteBridge, RemoteContext, RemoteRunResult, RetentionProvenance,
-    SearchEngine, SearchResult, ShellMetadata, ShellName, StatResult, ValueEncoding, WriteResult,
+    ReadEntry, ReadResult, RemoteBridge, RemoteContext, RemoteFileKind, RemoteRunResult,
+    RetentionProvenance, SearchResult, ShellMetadata, ShellName, StatEntry, StatResult,
+    ValueEncoding, WriteResult,
 };
 
 use super::{CallToolResult, TextContent, WireBudget};
 
+const MODEL_INLINE_RESULT_BYTES: usize = 32 * 1024;
 const SAFE_TEXT_BYTES: usize = 1_024;
 const MAX_WARNINGS: usize = 16;
 
@@ -22,19 +24,11 @@ pub fn maximum_compact_fallback_result_bytes() -> usize {
     static MAXIMUM: OnceLock<usize> = OnceLock::new();
     *MAXIMUM.get_or_init(|| {
         let hostile = "\\\"".repeat(SAFE_TEXT_BYTES / 2);
-        let root = "\\\"".repeat(65_536 / 2);
         let mut error = BridgeError::new(ErrorCode::MutationOutcomeUnknown, &hostile, false);
         error.details = ErrorDetails {
-            host: Some("h".repeat(128)),
-            shell: Some(ErrorShellMetadata {
-                kind: "bash".to_owned(),
-                version: Some("?".repeat(256)),
-                fallback: true,
-            }),
-            physical_root: Some(root.clone()),
-            operation: Some(hostile.clone()),
             path: Some(hostile.clone()),
-            suggested_action: Some(hostile.clone()),
+            requested_shell: Some("bash".to_owned()),
+            available_shells: Some(vec!["sh".to_owned()]),
             mutation_may_have_applied: Some(true),
             changed_paths: Some(vec![hostile.clone(); MAX_WARNINGS]),
             not_changed_paths: Some(vec![hostile.clone(); MAX_WARNINGS]),
@@ -48,61 +42,17 @@ pub fn maximum_compact_fallback_result_bytes() -> usize {
                 compact_fallback_bytes: usize::MAX / 4,
             },
         );
-        let warning = "\\\"".repeat(SAFE_TEXT_BYTES / 2);
         let run_result = compact_result(
             json!({
-                "remote":true,
-                "host":"h".repeat(128),
-                "physical_root":root.clone(),
-                "shell":{
-                    "kind":"bash",
-                    "version":"\\\"".repeat(128),
-                    "fallback":true,
-                },
-                "status":"completed",
-                "exit_status":i32::MIN,
-                "elapsed_ms":u64::MAX,
-                "stdout_raw_bytes":u64::MAX,
-                "stderr_raw_bytes":u64::MAX,
-                "aggregate_bytes":u64::MAX,
+                "exit_code":i32::MIN,
                 "output_ref":"f".repeat(32),
-                "output_stream":"stdout",
                 "remote_process_may_continue":true,
-                "warnings":vec![warning; MAX_WARNINGS],
-                "warnings_truncated":true,
                 "truncated":true,
-                "detail_retained":true,
-                "mutation_may_have_applied":true,
-                "changed_count":usize::MAX,
-                "not_changed_count":usize::MAX,
-                "outcome_unknown_count":usize::MAX,
             }),
             false,
         );
-        let list_text = json!({
-            "remote":true,
-            "host":"h".repeat(128),
-            "physical_root":root.clone(),
-            "shell":{
-                "kind":"bash",
-                "version":"\\\"".repeat(128),
-                "fallback":true,
-            },
-            "actual_path":{"encoding":"utf8", "value":root.clone()},
-            "relative_path":{"encoding":"utf8", "value":root},
-            "entry_count":usize::MAX,
-            "source_truncated":true,
-            "truncated":true,
-            "detail_retained":true,
-            "output_ref":"f".repeat(32),
-            "output_stream":"stdout",
-        });
-        let mut list_structured = object(list_text.clone());
-        list_structured.remove("actual_path");
-        list_structured.remove("relative_path");
-        let list_result = compact_split_result(&list_text, Value::Object(list_structured), false);
-        let invalid = CallToolResult::invalid_argument("provide valid tool arguments");
-        [&error_result, &run_result, &list_result, &invalid]
+        let invalid = CallToolResult::invalid_argument();
+        [&error_result, &run_result, &invalid]
             .into_iter()
             .map(|result| {
                 serde_json::to_vec(result)
@@ -122,28 +72,24 @@ pub async fn hosts(
 ) -> CallToolResult {
     match result {
         Ok(result) => {
-            let metadata = json!({
-                "remote": true,
-                "aggregate": "hosts",
-                "host_count": result.hosts.len(),
-                "cached_physical_root_count": result.hosts.iter().filter(|host| host.physical_root.is_some()).count(),
-                "cached_shell_count": result.hosts.iter().filter(|host| host.shell.is_some()).count(),
-                "truncated": false,
-            });
             let provenance = RetentionProvenance::Aggregate {
                 kind: AggregateKind::Hosts,
                 source_count: result.hosts.len(),
             };
-            let presentation = HostsPresentation {
-                remote: true,
-                hosts: result.hosts,
-            };
-            render_retained(
+            let text = result
+                .hosts
+                .iter()
+                .map(|host| host.host.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            render_text_retained(
                 bridge,
-                presentation,
-                metadata,
+                text,
+                json!({}),
+                result,
                 provenance,
                 None,
+                false,
                 budget,
                 cancel,
             )
@@ -161,16 +107,21 @@ pub async fn list(
 ) -> CallToolResult {
     match result {
         Ok(result) => {
-            let metadata = with_context(
-                &result.context,
-                json!({
-                    "actual_path":result.actual_path.clone(),
-                    "relative_path":result.relative_path.clone(),
-                    "entry_count":result.entries.len(),
-                    "truncated":result.truncated,
-                }),
-            );
-            retained_remote(bridge, result, metadata, budget, cancel).await
+            let text = list_text(&result);
+            let truncated = result.truncated;
+            let provenance = RetentionProvenance::Remote(result.context.clone());
+            render_text_retained(
+                bridge,
+                text,
+                json!({}),
+                result,
+                provenance,
+                None,
+                truncated,
+                budget,
+                cancel,
+            )
+            .await
         }
         Err(error) => render_error_retained(bridge, error, budget, cancel).await,
     }
@@ -184,11 +135,20 @@ pub async fn stat(
 ) -> CallToolResult {
     match result {
         Ok(result) => {
-            let metadata = with_context(
-                &result.context,
-                json!({"entry_count":result.entries.len(), "truncated":false}),
-            );
-            retained_remote(bridge, result, metadata, budget, cancel).await
+            let text = stat_text(&result);
+            let provenance = RetentionProvenance::Remote(result.context.clone());
+            render_text_retained(
+                bridge,
+                text,
+                json!({}),
+                result,
+                provenance,
+                None,
+                false,
+                budget,
+                cancel,
+            )
+            .await
         }
         Err(error) => render_error_retained(bridge, error, budget, cancel).await,
     }
@@ -202,19 +162,21 @@ pub async fn search(
 ) -> CallToolResult {
     match result {
         Ok(result) => {
-            let engine = match result.engine {
-                SearchEngine::Rg => "rg",
-                SearchEngine::Grep => "grep",
-            };
-            let metadata = with_context(
-                &result.context,
-                json!({
-                    "engine":engine,
-                    "match_count":result.matches.len(),
-                    "truncated":result.truncated,
-                }),
-            );
-            retained_remote(bridge, result, metadata, budget, cancel).await
+            let text = search_text(&result);
+            let truncated = result.truncated;
+            let provenance = RetentionProvenance::Remote(result.context.clone());
+            render_text_retained(
+                bridge,
+                text,
+                json!({}),
+                result,
+                provenance,
+                None,
+                truncated,
+                budget,
+                cancel,
+            )
+            .await
         }
         Err(error) => render_error_retained(bridge, error, budget, cancel).await,
     }
@@ -237,15 +199,20 @@ pub async fn read(
                     }
                 )
             });
-            let metadata = with_context(
-                &result.context,
-                json!({
-                    "file_count":result.files.len(),
-                    "returned_raw_bytes":result.returned_raw_bytes,
-                    "truncated":truncated,
-                }),
-            );
-            retained_remote(bridge, result, metadata, budget, cancel).await
+            let text = read_text(&result);
+            let provenance = RetentionProvenance::Remote(result.context.clone());
+            render_text_retained(
+                bridge,
+                text,
+                json!({}),
+                result,
+                provenance,
+                None,
+                truncated,
+                budget,
+                cancel,
+            )
+            .await
         }
         Err(error) => render_error_retained(bridge, error, budget, cancel).await,
     }
@@ -287,54 +254,26 @@ pub fn output_read(
                 inline -= 1;
             }
         }
-        let data = encode_bytes(&raw[..inline], result.data.encoding);
         let next_offset = result.offset.saturating_add(inline as u64);
         let eof = original_eof && next_offset == original_next;
-        let provenance = present_provenance(&result.provenance);
-        let presentation = OutputReadPresentation {
-            output_ref,
-            provenance,
-            output_stream: result.stream,
-            offset: result.offset,
-            next_offset,
-            raw_bytes: inline,
-            eof,
-            truncated: next_offset != original_next,
-            data: &data,
-        };
-        let metadata = with_provenance(
-            &result.provenance,
-            json!({
-                "output_ref":output_ref,
-                "output_stream":result.stream,
-                "offset":result.offset,
-                "next_offset":next_offset,
-                "eof":eof,
-                "encoding":data.encoding,
-                "raw_bytes":inline,
-                "truncated":next_offset != original_next,
-                "detail_retained":true,
-            }),
-        );
-        if let Some(rendered) = complete_result(&presentation, metadata, budget) {
+        let text = encoded_bytes_text(&raw[..inline], result.data.encoding);
+        let mut metadata = json!({"next_offset":next_offset, "eof":eof});
+        if next_offset != original_next {
+            metadata["truncated"] = Value::Bool(true);
+            metadata["output_ref"] = Value::String(output_ref.to_owned());
+        }
+        if let Some(rendered) = complete_text_result(text, metadata, budget) {
             return rendered;
         }
         if inline == 0 {
-            let eof = original_eof && result.offset == original_next;
-            return budgeted_compact_result(
-                with_provenance(
-                    &result.provenance,
-                    json!({
-                        "output_ref":output_ref,
-                        "output_stream":result.stream,
-                        "offset":result.offset,
-                        "next_offset":result.offset,
-                        "eof":eof,
-                        "raw_bytes":0,
-                        "truncated":result.offset != original_next,
-                        "detail_retained":true,
-                    }),
-                ),
+            return bounded_text_result(
+                String::new(),
+                json!({
+                    "next_offset":result.offset,
+                    "eof":original_eof && result.offset == original_next,
+                    "truncated":result.offset != original_next,
+                    "output_ref":output_ref,
+                }),
                 false,
                 budget,
             );
@@ -351,19 +290,20 @@ pub async fn write(
 ) -> CallToolResult {
     match result {
         Ok(result) => {
-            let metadata = with_context(
-                &result.context,
-                json!({
-                    "status":"applied",
-                    "operation":result.operation,
-                    "raw_bytes":result.raw_bytes,
-                    "sha256":result.sha256,
-                    "mode":result.mode,
-                    "temporary_cleanup_confirmed":result.temporary_cleanup_confirmed,
-                    "mutation_may_have_applied":false,
-                }),
-            );
-            retained_remote(bridge, result, metadata, budget, cancel).await
+            let text = format!("Wrote {}", encoded_value_text(&result.actual_path));
+            let provenance = RetentionProvenance::Remote(result.context.clone());
+            render_text_retained(
+                bridge,
+                text,
+                json!({}),
+                result,
+                provenance,
+                None,
+                false,
+                budget,
+                cancel,
+            )
+            .await
         }
         Err(error) => render_error_retained(bridge, error, budget, cancel).await,
     }
@@ -377,15 +317,19 @@ pub async fn apply_patch(
 ) -> CallToolResult {
     match result {
         Ok(result) => {
-            let metadata = with_context(
-                &result.context,
-                json!({
-                    "status":"applied",
-                    "changed_count":result.changed_paths.len(),
-                    "mutation_may_have_applied":false,
-                }),
-            );
-            retained_remote(bridge, result, metadata, budget, cancel).await
+            let provenance = RetentionProvenance::Remote(result.context.clone());
+            render_text_retained(
+                bridge,
+                "Done!".to_owned(),
+                json!({}),
+                result,
+                provenance,
+                None,
+                false,
+                budget,
+                cancel,
+            )
+            .await
         }
         Err(error) => render_error_retained(bridge, error, budget, cancel).await,
     }
@@ -409,39 +353,23 @@ pub async fn run(
                     .warnings
                     .push(crate::remote::POSIX_SH_WARNING.to_owned());
             }
-            let warnings_truncated = normalize_warnings(&mut result.warnings);
-            let status = if result.exit_status == 0 {
-                "completed"
-            } else {
-                "failed"
-            };
-            let mutation_may_have_applied =
-                result.exit_status != 0 || result.remote_process_may_continue;
-            let metadata = with_context(
-                &result.context,
-                json!({
-                    "status":status,
-                    "exit_status":result.exit_status,
-                    "elapsed_ms":result.elapsed_ms,
-                    "stdout_raw_bytes":result.stdout.raw_bytes,
-                    "stderr_raw_bytes":result.stderr.raw_bytes,
-                    "aggregate_bytes":result.aggregate_bytes,
-                    "output_ref":result.output_ref,
-                    "remote_process_may_continue":result.remote_process_may_continue,
-                    "mutation_may_have_applied":mutation_may_have_applied,
-                    "warnings":result.warnings,
-                    "warnings_truncated":warnings_truncated,
-                    "truncated":result.stdout.truncated || result.stderr.truncated,
-                }),
-            );
+            normalize_warnings(&mut result.warnings);
+            let text = run_text(&result);
+            let mut metadata = json!({"exit_code":result.exit_status});
+            if result.remote_process_may_continue {
+                metadata["remote_process_may_continue"] = Value::Bool(true);
+            }
+            let source_truncated = result.stdout.truncated || result.stderr.truncated;
             let provenance = RetentionProvenance::Remote(result.context.clone());
             let existing_ref = result.output_ref.clone();
-            render_retained(
+            render_text_retained(
                 bridge,
-                result,
+                text,
                 metadata,
+                result,
                 provenance,
                 existing_ref,
+                source_truncated,
                 budget,
                 cancel,
             )
@@ -451,94 +379,260 @@ pub async fn run(
     }
 }
 
-async fn retained_remote<T>(
+async fn render_text_retained<T: Serialize + Send + 'static>(
     bridge: Arc<RemoteBridge>,
-    result: T,
-    metadata: Value,
-    budget: WireBudget,
-    cancel: CancellationToken,
-) -> CallToolResult
-where
-    T: Serialize + Send + HasRemoteContext + 'static,
-{
-    let provenance = RetentionProvenance::Remote(result.remote_context().clone());
-    render_retained(bridge, result, metadata, provenance, None, budget, cancel).await
-}
-
-async fn render_retained<T: Serialize + Send + 'static>(
-    bridge: Arc<RemoteBridge>,
-    result: T,
-    metadata: Value,
+    text: String,
+    structured_content: Value,
+    retained_detail: T,
     provenance: RetentionProvenance,
     existing_ref: Option<String>,
+    source_truncated: bool,
     budget: WireBudget,
     cancel: CancellationToken,
 ) -> CallToolResult {
-    if let Some(rendered) = complete_result(&result, metadata.clone(), budget) {
+    if !source_truncated
+        && let Some(rendered) =
+            complete_text_result(text.clone(), structured_content.clone(), budget)
+    {
         return rendered;
     }
 
     let retained = match existing_ref {
         Some(output_ref) => Some(output_ref),
         None => bridge
-            .retain_serialized_detail(provenance, result, cancel)
+            .retain_serialized_detail(provenance, retained_detail, cancel)
             .await
             .ok()
             .map(|reference| reference.as_str().to_owned()),
     };
-    let mut metadata = object(metadata);
-    if let Some(source_truncated) = metadata.insert("truncated".to_owned(), Value::Bool(true)) {
-        metadata.insert("source_truncated".to_owned(), source_truncated);
-    }
-    metadata.insert(
-        "detail_retained".to_owned(),
-        Value::Bool(retained.is_some()),
-    );
+    let mut metadata = object(structured_content);
+    metadata.insert("truncated".to_owned(), Value::Bool(true));
     if let Some(output_ref) = retained {
         metadata.insert("output_ref".to_owned(), Value::String(output_ref));
-        metadata.insert(
-            "output_stream".to_owned(),
-            Value::String("stdout".to_owned()),
-        );
     }
-    let text_metadata = Value::Object(metadata.clone());
-    metadata.remove("actual_path");
-    metadata.remove("relative_path");
-    budgeted_compact_split_result(&text_metadata, Value::Object(metadata), false, budget)
+    bounded_text_result(text, Value::Object(metadata), false, budget)
 }
 
-fn complete_result<T: Serialize>(
-    presentation: &T,
+fn complete_text_result(
+    text: String,
     structured_content: Value,
     budget: WireBudget,
 ) -> Option<CallToolResult> {
-    let maximum = total_budget(budget);
-    let text = serialize_capped(presentation, maximum)?;
+    let maximum = model_budget(budget);
+    let visible = text
+        .len()
+        .checked_add(serde_json::to_vec(&structured_content).ok()?.len())?;
+    if visible > maximum {
+        return None;
+    }
     let result = CallToolResult {
         content: vec![TextContent::new(text)],
         structured_content,
         is_error: false,
     };
-    serialized_at_most(&result, maximum).then_some(result)
+    serialized_at_most(&result, total_budget(budget)).then_some(result)
+}
+
+fn bounded_text_result(
+    text: String,
+    structured_content: Value,
+    is_error: bool,
+    budget: WireBudget,
+) -> CallToolResult {
+    let structured_bytes = serde_json::to_vec(&structured_content)
+        .expect("MCP structured content is serializable")
+        .len();
+    let text_budget = model_budget(budget).saturating_sub(structured_bytes);
+    let mut text = truncate_utf8(&text, text_budget);
+    loop {
+        let result = CallToolResult {
+            content: vec![TextContent::new(text.clone())],
+            structured_content: structured_content.clone(),
+            is_error,
+        };
+        if serialized_at_most(&result, total_budget(budget)) {
+            return result;
+        }
+        if text.is_empty() {
+            return budgeted_compact_result(structured_content, is_error, budget);
+        }
+        text = truncate_utf8(&text, text.len() / 2);
+    }
+}
+
+fn truncate_utf8(value: &str, maximum: usize) -> String {
+    if value.len() <= maximum {
+        return value.to_owned();
+    }
+    let mut end = maximum;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn encoded_value_text(value: &EncodedValue) -> String {
+    match value.encoding {
+        ValueEncoding::Utf8 => value.value.clone(),
+        ValueEncoding::Base64 => format!("base64:{}", value.value),
+    }
+}
+
+fn encoded_bytes_text(bytes: &[u8], preferred: ValueEncoding) -> String {
+    if preferred == ValueEncoding::Utf8
+        && let Ok(value) = std::str::from_utf8(bytes)
+    {
+        return value.to_owned();
+    }
+    format!(
+        "base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+fn remote_kind(kind: RemoteFileKind) -> &'static str {
+    match kind {
+        RemoteFileKind::File => "file",
+        RemoteFileKind::Directory => "directory",
+        RemoteFileKind::Symlink => "symlink",
+        RemoteFileKind::BlockDevice => "block_device",
+        RemoteFileKind::CharacterDevice => "character_device",
+        RemoteFileKind::Fifo => "fifo",
+        RemoteFileKind::Socket => "socket",
+        RemoteFileKind::Other => "other",
+    }
+}
+
+fn list_text(result: &ListResult) -> String {
+    result
+        .entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}\t{}",
+                remote_kind(entry.metadata.kind),
+                encoded_value_text(&entry.actual_path)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn stat_text(result: &StatResult) -> String {
+    result
+        .entries
+        .iter()
+        .map(|entry| {
+            let record = match entry {
+                StatEntry::Success {
+                    actual_path,
+                    metadata,
+                    ..
+                } => json!({
+                    "path":encoded_value_text(actual_path),
+                    "kind":remote_kind(metadata.kind),
+                    "size":metadata.size,
+                    "mtime":format!("{}.{:09}", metadata.mtime_seconds, metadata.mtime_nanoseconds),
+                    "mode":format!("{:04o}", metadata.mode),
+                }),
+                StatEntry::Error {
+                    actual_path, error, ..
+                } => json!({
+                    "path":encoded_value_text(actual_path),
+                    "error":{"code":error.code, "message":error.message},
+                }),
+            };
+            serde_json::to_string(&record).expect("stat presentation is serializable")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn search_text(result: &SearchResult) -> String {
+    result
+        .matches
+        .iter()
+        .map(|matched| {
+            format!(
+                "{}:{}:{}",
+                encoded_value_text(&matched.actual_path),
+                matched.line,
+                encoded_value_text(&matched.content)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn read_text(result: &ReadResult) -> String {
+    let multiple = result.files.len() > 1;
+    let mut rendered = Vec::with_capacity(result.files.len());
+    for entry in &result.files {
+        match entry {
+            ReadEntry::Success {
+                actual_path,
+                content,
+                ..
+            } => {
+                let body = encoded_value_text(content);
+                if multiple {
+                    rendered.push(format!(
+                        "==> {} <==\n{}",
+                        encoded_value_text(actual_path),
+                        body
+                    ));
+                } else {
+                    rendered.push(body);
+                }
+            }
+            ReadEntry::Error {
+                actual_path, error, ..
+            } => rendered.push(format!(
+                "==> {} <==\nERROR {}: {}",
+                encoded_value_text(actual_path),
+                serde_json::to_value(error.code)
+                    .expect("entry error code is serializable")
+                    .as_str()
+                    .unwrap_or("UNKNOWN"),
+                error.message
+            )),
+        }
+    }
+    rendered.join("\n")
+}
+
+fn output_preview_text(preview: &crate::remote::EncodedOutputPreview) -> String {
+    let head = encoded_value_text(&preview.head);
+    if !preview.truncated {
+        return head;
+    }
+    let tail = encoded_value_text(&preview.tail);
+    if tail.is_empty() || tail == head {
+        format!("{head}\n...[truncated]...")
+    } else {
+        format!("{head}\n...[truncated]...\n{tail}")
+    }
+}
+
+fn run_text(result: &RemoteRunResult) -> String {
+    let mut sections = Vec::new();
+    let stdout = output_preview_text(&result.stdout);
+    let stderr = output_preview_text(&result.stderr);
+    if !stdout.is_empty() {
+        sections.push(format!("stdout:\n{stdout}"));
+    }
+    if !stderr.is_empty() {
+        sections.push(format!("stderr:\n{stderr}"));
+    }
+    for warning in &result.warnings {
+        sections.push(format!("warning:\n{warning}"));
+    }
+    sections.join("\n")
 }
 
 fn compact_result(structured_content: Value, is_error: bool) -> CallToolResult {
     let text = serde_json::to_string(&structured_content)
         .expect("compact MCP presentation metadata is serializable");
-    CallToolResult {
-        content: vec![TextContent::new(text)],
-        structured_content,
-        is_error,
-    }
-}
-
-fn compact_split_result<T: Serialize>(
-    text_projection: &T,
-    structured_content: Value,
-    is_error: bool,
-) -> CallToolResult {
-    let text = serde_json::to_string(text_projection)
-        .expect("compact MCP text projection is serializable");
     CallToolResult {
         content: vec![TextContent::new(text)],
         structured_content,
@@ -559,141 +653,112 @@ fn budgeted_compact_result(
     result
 }
 
-fn budgeted_compact_split_result<T: Serialize>(
-    text_projection: &T,
-    structured_content: Value,
-    is_error: bool,
-    budget: WireBudget,
-) -> CallToolResult {
-    let result = compact_split_result(text_projection, structured_content, is_error);
-    debug_assert!(
-        serialized_at_most(&result, budget.compact_fallback_bytes),
-        "compact MCP split result exceeded its reserved fallback budget"
-    );
-    result
-}
-
 fn render_error(error: BridgeError, budget: WireBudget) -> CallToolResult {
     render_error_borrowed(&error, budget)
 }
 
 fn render_error_borrowed(error: &BridgeError, budget: WireBudget) -> CallToolResult {
-    render_error_borrowed_with_progress(error, budget, ErrorProgress::from_details(&error.details))
+    full_error_result(error, true, budget).unwrap_or_else(|| {
+        bounded_text_result(
+            error_text(error),
+            error_structured(error, false),
+            true,
+            budget,
+        )
+    })
 }
 
-fn render_error_borrowed_with_progress(
-    error: &BridgeError,
-    budget: WireBudget,
-    progress: ErrorProgress,
-) -> CallToolResult {
+fn error_text(error: &BridgeError) -> String {
+    let code = serde_json::to_value(error.code)
+        .expect("error code is serializable")
+        .as_str()
+        .unwrap_or("ERROR")
+        .to_owned();
+    let (message, _) = safe_text(&error.message, SAFE_TEXT_BYTES);
+    format!("{code}: {message}")
+}
+
+fn error_structured(error: &BridgeError, include_progress: bool) -> Value {
     let details = &error.details;
-    let (message, message_truncated) = safe_text(&error.message, SAFE_TEXT_BYTES);
-    let (action, action_truncated) = details
-        .suggested_action
+    let (message, _) = safe_text(&error.message, SAFE_TEXT_BYTES);
+    let mut structured = object(json!({
+        "error":{"code":error.code, "message":message},
+    }));
+    if let Some(path) = details
+        .failed_path
         .as_deref()
-        .map(|action| safe_text(action, SAFE_TEXT_BYTES))
-        .map_or((None, false), |(action, truncated)| {
-            (Some(action), truncated)
-        });
-    let context = rendered_error_context(details);
-    let warnings = context
-        .as_ref()
-        .and_then(|context| context.shell.as_ref())
-        .filter(|shell| shell.kind == "sh")
-        .map(|_| vec![crate::remote::POSIX_SH_WARNING.to_owned()])
-        .unwrap_or_default();
-    let core = RenderedErrorCore {
-        code: error.code,
-        message,
-        message_truncated,
-        retryable: error.retryable,
-        details: RenderedErrorDetails {
-            operation: safe_optional(details.operation.as_deref()),
-            path: safe_optional(details.path.as_deref()),
-            elapsed_ms: details.elapsed_ms,
-            exit_status: details.exit_status,
-            remote_process_may_continue: details.remote_process_may_continue,
-            bytes_seen: details.bytes_seen,
-            mutation_may_have_applied: details.mutation_may_have_applied,
-            failed_path: safe_optional(details.failed_path.as_deref()),
-            changed_count: progress.changed_count,
-            not_changed_count: progress.not_changed_count,
-            outcome_unknown_count: progress.outcome_unknown_count,
-        },
-    };
-    let document = RenderedErrorDocument {
-        context: context.clone(),
-        status: progress.status,
-        error: &core,
-        action: action.as_deref(),
-        action_truncated,
-        warnings: &warnings,
-        warnings_truncated: false,
-    };
-    let text = serde_json::to_string(&document).expect("error projection is serializable");
-    let structured = RenderedErrorDocument {
-        context,
-        status: progress.status,
-        error: &core,
-        action: action.as_deref(),
-        action_truncated,
-        warnings: &warnings,
-        warnings_truncated: false,
-    };
-    let result = CallToolResult {
-        content: vec![TextContent::new(text)],
-        structured_content: serde_json::to_value(structured)
-            .expect("error projection is serializable"),
-        is_error: true,
-    };
-    if serialized_at_most(&result, total_budget(budget)) {
-        result
-    } else {
-        budgeted_compact_result(result.structured_content, true, budget)
+        .or(details.path.as_deref())
+        .map(normalize_controls)
+    {
+        structured.insert("path".to_owned(), Value::String(path));
     }
-}
-
-#[derive(Clone, Copy)]
-struct ErrorProgress {
-    status: Option<&'static str>,
-    changed_count: Option<usize>,
-    not_changed_count: Option<usize>,
-    outcome_unknown_count: Option<usize>,
-}
-
-impl ErrorProgress {
-    fn from_details(details: &ErrorDetails) -> Self {
-        Self {
-            status: mutation_status(details),
-            changed_count: details.changed_paths.as_ref().map(Vec::len),
-            not_changed_count: details.not_changed_paths.as_ref().map(Vec::len),
-            outcome_unknown_count: details.outcome_unknown_paths.as_ref().map(Vec::len),
+    if details.mutation_may_have_applied == Some(true) {
+        structured.insert("mutation_may_have_applied".to_owned(), Value::Bool(true));
+    }
+    if details.remote_process_may_continue == Some(true) {
+        structured.insert("remote_process_may_continue".to_owned(), Value::Bool(true));
+    }
+    if let Some(requested) = details.requested_shell.as_deref() {
+        structured.insert(
+            "requested_shell".to_owned(),
+            Value::String(normalize_controls(requested)),
+        );
+    }
+    if let Some(available) = details.available_shells.as_ref() {
+        structured.insert(
+            "available_shells".to_owned(),
+            Value::Array(
+                available
+                    .iter()
+                    .map(|shell| Value::String(normalize_controls(shell)))
+                    .collect(),
+            ),
+        );
+    }
+    if include_progress {
+        for (key, paths) in [
+            ("changed_paths", details.changed_paths.as_ref()),
+            ("not_changed_paths", details.not_changed_paths.as_ref()),
+            (
+                "outcome_unknown_paths",
+                details.outcome_unknown_paths.as_ref(),
+            ),
+        ] {
+            if let Some(paths) = paths {
+                structured.insert(
+                    key.to_owned(),
+                    Value::Array(
+                        paths
+                            .iter()
+                            .map(|path| Value::String(normalize_controls(path)))
+                            .collect(),
+                    ),
+                );
+            }
         }
     }
+    Value::Object(structured)
 }
 
-fn mutation_status(details: &ErrorDetails) -> Option<&'static str> {
-    if details.mutation_may_have_applied == Some(true)
-        || details
-            .outcome_unknown_paths
-            .as_ref()
-            .is_some_and(|paths| !paths.is_empty())
-    {
-        Some("unknown")
-    } else if details
-        .changed_paths
-        .as_ref()
-        .is_some_and(|paths| !paths.is_empty())
-    {
-        Some("partial")
-    } else if details.changed_paths.is_some()
-        || details.not_changed_paths.is_some()
-        || details.mutation_may_have_applied.is_some()
-    {
-        Some("not_applied")
-    } else {
-        None
+fn full_error_result(
+    error: &BridgeError,
+    include_progress: bool,
+    budget: WireBudget,
+) -> Option<CallToolResult> {
+    let text = error_text(error);
+    let structured_content = error_structured(error, include_progress);
+    let visible = text
+        .len()
+        .checked_add(serde_json::to_vec(&structured_content).ok()?.len())?;
+    if visible > model_budget(budget) {
+        return None;
     }
+    let result = CallToolResult {
+        content: vec![TextContent::new(text)],
+        structured_content,
+        is_error: true,
+    };
+    serialized_at_most(&result, total_budget(budget)).then_some(result)
 }
 
 async fn render_error_retained(
@@ -702,10 +767,10 @@ async fn render_error_retained(
     budget: WireBudget,
     cancel: CancellationToken,
 ) -> CallToolResult {
-    if let Some(result) = render_full_error(&mut error, budget) {
+    normalize_progress_controls(&mut error.details);
+    if let Some(result) = full_error_result(&error, true, budget) {
         return result;
     }
-    let progress = ErrorProgress::from_details(&error.details);
     let changed_paths = error.details.changed_paths.take();
     let not_changed_paths = error.details.not_changed_paths.take();
     let outcome_unknown_paths = error.details.outcome_unknown_paths.take();
@@ -723,7 +788,6 @@ async fn render_error_retained(
         not_changed_paths,
         outcome_unknown_paths,
     };
-    let mut result = render_error_borrowed_with_progress(&error, budget, progress);
     let retained = match provenance {
         Some(provenance) => bridge
             .retain_serialized_detail(provenance, detail, cancel)
@@ -732,76 +796,12 @@ async fn render_error_retained(
             .map(|reference| reference.as_str().to_owned()),
         None => None,
     };
-    let mut structured = object(result.structured_content);
-    structured.insert(
-        "detail_retained".to_owned(),
-        Value::Bool(retained.is_some()),
-    );
+    let mut structured = object(error_structured(&error, false));
+    structured.insert("truncated".to_owned(), Value::Bool(true));
     if let Some(output_ref) = retained {
         structured.insert("output_ref".to_owned(), Value::String(output_ref));
-        structured.insert(
-            "output_stream".to_owned(),
-            Value::String("stdout".to_owned()),
-        );
     }
-    result = budgeted_compact_result(Value::Object(structured), true, budget);
-    result
-}
-
-fn render_full_error(error: &mut BridgeError, budget: WireBudget) -> Option<CallToolResult> {
-    normalize_progress_controls(&mut error.details);
-    let details = &error.details;
-    let (message, message_truncated) = safe_text(&error.message, SAFE_TEXT_BYTES);
-    let (action, action_truncated) = details
-        .suggested_action
-        .as_deref()
-        .map(|action| safe_text(action, SAFE_TEXT_BYTES))
-        .map_or((None, false), |(action, truncated)| {
-            (Some(action), truncated)
-        });
-    let context = rendered_error_context(details);
-    let warnings = context
-        .as_ref()
-        .and_then(|context| context.shell.as_ref())
-        .filter(|shell| shell.kind == "sh")
-        .map(|_| vec![crate::remote::POSIX_SH_WARNING.to_owned()])
-        .unwrap_or_default();
-    let document = FullErrorDocument {
-        context,
-        status: mutation_status(details),
-        error: FullErrorCore {
-            code: error.code,
-            message,
-            message_truncated,
-            retryable: error.retryable,
-            details: FullErrorDetails {
-                operation: safe_optional(details.operation.as_deref()),
-                path: safe_optional(details.path.as_deref()),
-                elapsed_ms: details.elapsed_ms,
-                exit_status: details.exit_status,
-                remote_process_may_continue: details.remote_process_may_continue,
-                bytes_seen: details.bytes_seen,
-                mutation_may_have_applied: details.mutation_may_have_applied,
-                failed_path: safe_optional(details.failed_path.as_deref()),
-                changed_paths: details.changed_paths.as_deref(),
-                not_changed_paths: details.not_changed_paths.as_deref(),
-                outcome_unknown_paths: details.outcome_unknown_paths.as_deref(),
-            },
-        },
-        action,
-        action_truncated,
-        warnings,
-        warnings_truncated: false,
-    };
-    let maximum = total_budget(budget);
-    let text = serialize_capped(&document, maximum)?;
-    let structured_content = render_error_borrowed(error, budget).structured_content;
-    let result = CallToolResult {
-        content: vec![TextContent::new(text)],
-        structured_content,
-        is_error: true,
-    };
-    serialized_at_most(&result, maximum).then_some(result)
+    bounded_text_result(error_text(&error), Value::Object(structured), true, budget)
 }
 
 fn normalize_progress_controls(details: &mut ErrorDetails) {
@@ -857,27 +857,6 @@ fn normalize_controls(value: &str) -> String {
         .collect()
 }
 
-fn rendered_error_context(details: &ErrorDetails) -> Option<RenderedContext> {
-    let host = details.host.as_ref()?;
-    Some(RenderedContext {
-        remote: true,
-        host: host.clone(),
-        physical_root: details.physical_root.as_deref().map(normalize_controls),
-        shell: details.shell.as_ref().map(|shell| RenderedShell {
-            kind: shell.kind.clone(),
-            version: shell
-                .version
-                .as_deref()
-                .map(|version| safe_text(version, 256).0),
-            fallback: shell.fallback,
-        }),
-    })
-}
-
-fn safe_optional(value: Option<&str>) -> Option<String> {
-    value.map(|value| safe_text(value, SAFE_TEXT_BYTES).0)
-}
-
 fn safe_text(value: &str, maximum: usize) -> (String, bool) {
     let mut safe = String::with_capacity(value.len().min(maximum));
     let mut truncated = false;
@@ -907,79 +886,10 @@ fn normalize_warnings(warnings: &mut Vec<String>) -> bool {
     truncated
 }
 
-fn with_context(context: &RemoteContext, fields: Value) -> Value {
-    let mut fields = object(fields);
-    fields.insert("remote".to_owned(), Value::Bool(true));
-    fields.insert("host".to_owned(), Value::String(context.host.clone()));
-    fields.insert(
-        "physical_root".to_owned(),
-        Value::String(context.physical_root.clone()),
-    );
-    fields.insert(
-        "shell".to_owned(),
-        serde_json::to_value(present_shell(&context.shell))
-            .expect("shell metadata is serializable"),
-    );
-    if let Some(helper_mode) = context.helper_mode {
-        fields.insert(
-            "helper_mode".to_owned(),
-            Value::String(helper_mode.as_str().to_owned()),
-        );
-    }
-    Value::Object(fields)
-}
-
-fn present_shell(shell: &ShellMetadata) -> PresentedShell {
-    PresentedShell {
-        kind: shell.kind,
-        version: shell
-            .version
-            .as_deref()
-            .map(|version| safe_text(version, 256).0),
-        fallback: shell.fallback,
-    }
-}
-
-fn with_provenance(provenance: &RetentionProvenance, fields: Value) -> Value {
-    match provenance {
-        RetentionProvenance::Remote(context) => with_context(context, fields),
-        RetentionProvenance::Aggregate { kind, source_count } => {
-            let mut fields = object(fields);
-            fields.insert("remote".to_owned(), Value::Bool(true));
-            fields.insert(
-                "aggregate".to_owned(),
-                Value::String(
-                    match kind {
-                        AggregateKind::Hosts => "hosts",
-                    }
-                    .to_owned(),
-                ),
-            );
-            fields.insert("source_count".to_owned(), json!(source_count));
-            Value::Object(fields)
-        }
-    }
-}
-
 fn object(value: Value) -> Map<String, Value> {
     match value {
         Value::Object(object) => object,
         _ => Map::new(),
-    }
-}
-
-fn encode_bytes(bytes: &[u8], preferred: ValueEncoding) -> EncodedValue {
-    if preferred == ValueEncoding::Utf8
-        && let Ok(value) = std::str::from_utf8(bytes)
-    {
-        return EncodedValue {
-            encoding: ValueEncoding::Utf8,
-            value: value.to_owned(),
-        };
-    }
-    EncodedValue {
-        encoding: ValueEncoding::Base64,
-        value: base64::engine::general_purpose::STANDARD.encode(bytes),
     }
 }
 
@@ -989,43 +899,13 @@ fn total_budget(budget: WireBudget) -> usize {
         .saturating_add(budget.compact_fallback_bytes)
 }
 
-fn serialize_capped<T: Serialize>(value: &T, maximum: usize) -> Option<String> {
-    let mut output = CappedVec::new(maximum);
-    serde_json::to_writer(&mut output, value).ok()?;
-    String::from_utf8(output.bytes).ok()
+fn model_budget(budget: WireBudget) -> usize {
+    MODEL_INLINE_RESULT_BYTES.min(total_budget(budget))
 }
 
 fn serialized_at_most<T: Serialize>(value: &T, maximum: usize) -> bool {
     let mut writer = CountingWriter { count: 0, maximum };
     serde_json::to_writer(&mut writer, value).is_ok()
-}
-
-struct CappedVec {
-    bytes: Vec<u8>,
-    maximum: usize,
-}
-
-impl CappedVec {
-    fn new(maximum: usize) -> Self {
-        Self {
-            bytes: Vec::with_capacity(maximum.min(64 * 1024)),
-            maximum,
-        }
-    }
-}
-
-impl Write for CappedVec {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.bytes.len().saturating_add(bytes.len()) > self.maximum {
-            return Err(io::Error::other("MCP presentation exceeds its wire budget"));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 struct CountingWriter {
@@ -1050,171 +930,6 @@ impl Write for CountingWriter {
     }
 }
 
-trait HasRemoteContext {
-    fn remote_context(&self) -> &RemoteContext;
-}
-
-macro_rules! impl_remote_context {
-    ($($type:ty),+ $(,)?) => {$ (
-        impl HasRemoteContext for $type {
-            fn remote_context(&self) -> &RemoteContext {
-                &self.context
-            }
-        }
-    )+ };
-}
-
-impl_remote_context!(
-    ListResult,
-    StatResult,
-    SearchResult,
-    ReadResult,
-    WriteResult,
-    ApplyPatchResult,
-);
-
-#[derive(Serialize)]
-struct HostsPresentation {
-    remote: bool,
-    hosts: Vec<crate::remote::HostInfo>,
-}
-
-#[derive(Serialize)]
-struct PresentedShell {
-    kind: ShellName,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
-    fallback: bool,
-}
-
-#[derive(Serialize)]
-struct OutputReadPresentation<'a> {
-    output_ref: &'a str,
-    #[serde(flatten)]
-    provenance: PresentedProvenance<'a>,
-    output_stream: crate::output::StreamKind,
-    offset: u64,
-    next_offset: u64,
-    raw_bytes: usize,
-    eof: bool,
-    truncated: bool,
-    data: &'a EncodedValue,
-}
-
-fn present_provenance(provenance: &RetentionProvenance) -> PresentedProvenance<'_> {
-    match provenance {
-        RetentionProvenance::Remote(context) => PresentedProvenance::Remote(PresentedRemote {
-            remote: true,
-            host: &context.host,
-            physical_root: &context.physical_root,
-            shell: present_shell(&context.shell),
-        }),
-        RetentionProvenance::Aggregate { kind, source_count } => {
-            PresentedProvenance::Aggregate(PresentedAggregate {
-                remote: true,
-                aggregate: match kind {
-                    AggregateKind::Hosts => "hosts",
-                },
-                source_count: *source_count,
-            })
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum PresentedProvenance<'a> {
-    Remote(PresentedRemote<'a>),
-    Aggregate(PresentedAggregate),
-}
-
-#[derive(Serialize)]
-struct PresentedRemote<'a> {
-    remote: bool,
-    host: &'a str,
-    physical_root: &'a str,
-    shell: PresentedShell,
-}
-
-#[derive(Serialize)]
-struct PresentedAggregate {
-    remote: bool,
-    aggregate: &'static str,
-    source_count: usize,
-}
-
-#[derive(Clone, Serialize)]
-struct RenderedContext {
-    remote: bool,
-    host: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    physical_root: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    shell: Option<RenderedShell>,
-}
-
-#[derive(Clone, Serialize)]
-struct RenderedShell {
-    kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
-    fallback: bool,
-}
-
-#[derive(Serialize)]
-struct RenderedErrorCore {
-    code: ErrorCode,
-    message: String,
-    message_truncated: bool,
-    retryable: bool,
-    details: RenderedErrorDetails,
-}
-
-#[derive(Serialize)]
-struct RenderedErrorDetails {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    operation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    elapsed_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit_status: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    remote_process_may_continue: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bytes_seen: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mutation_may_have_applied: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failed_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changed_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    not_changed_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    outcome_unknown_count: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct RenderedErrorDocument<'a> {
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    context: Option<RenderedContext>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'static str>,
-    error: &'a RenderedErrorCore,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    action: Option<&'a str>,
-    action_truncated: bool,
-    #[serde(skip_serializing_if = "slice_is_empty")]
-    warnings: &'a [String],
-    warnings_truncated: bool,
-}
-
-fn slice_is_empty(values: &&[String]) -> bool {
-    values.is_empty()
-}
-
 #[derive(Serialize)]
 struct RetainedMutationErrorDetail {
     code: ErrorCode,
@@ -1223,56 +938,6 @@ struct RetainedMutationErrorDetail {
     changed_paths: Option<Vec<String>>,
     not_changed_paths: Option<Vec<String>>,
     outcome_unknown_paths: Option<Vec<String>>,
-}
-
-#[derive(Serialize)]
-struct FullErrorDocument<'a> {
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    context: Option<RenderedContext>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<&'static str>,
-    error: FullErrorCore<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    action: Option<String>,
-    action_truncated: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    warnings: Vec<String>,
-    warnings_truncated: bool,
-}
-
-#[derive(Serialize)]
-struct FullErrorCore<'a> {
-    code: ErrorCode,
-    message: String,
-    message_truncated: bool,
-    retryable: bool,
-    details: FullErrorDetails<'a>,
-}
-
-#[derive(Serialize)]
-struct FullErrorDetails<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    operation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    elapsed_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit_status: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    remote_process_may_continue: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bytes_seen: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mutation_may_have_applied: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failed_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changed_paths: Option<&'a [String]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    not_changed_paths: Option<&'a [String]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    outcome_unknown_paths: Option<&'a [String]>,
 }
 
 #[cfg(test)]
@@ -1288,7 +953,7 @@ mod tests {
     use crate::output::{OutputStore, StreamKind};
     use crate::remote::{
         EncodedOutputPreview, HostInfo, ListEntry, ReadEntry, RemoteFileKind, RemoteMetadata,
-        SearchMatch, StatEntry,
+        SearchEngine, SearchMatch, StatEntry,
     };
     use crate::ssh::{RuntimePaths, SshRunner};
 
@@ -1296,8 +961,8 @@ mod tests {
         serde_json::to_value(result).unwrap()
     }
 
-    fn text_value(result: &Value) -> Value {
-        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    fn text_value(result: &Value) -> &str {
+        result["content"][0]["text"].as_str().unwrap()
     }
 
     fn roomy_budget() -> WireBudget {
@@ -1312,6 +977,22 @@ mod tests {
             result_bytes: 0,
             compact_fallback_bytes: 8 * 1024,
         }
+    }
+
+    #[test]
+    fn model_visible_budget_accepts_exact_fit_and_rejects_one_byte_over() {
+        let structured = json!({});
+        let metadata_bytes = serde_json::to_vec(&structured).unwrap().len();
+        let exact = "x".repeat(MODEL_INLINE_RESULT_BYTES - metadata_bytes);
+        assert!(
+            complete_text_result(exact, structured.clone(), roomy_budget()).is_some(),
+            "an exact 32 KiB model-visible result must fit"
+        );
+        let over = "x".repeat(MODEL_INLINE_RESULT_BYTES - metadata_bytes + 1);
+        assert!(
+            complete_text_result(over, structured, roomy_budget()).is_none(),
+            "one byte over the model-visible limit must be retained"
+        );
     }
 
     fn bridge_fixture() -> (tempfile::TempDir, Arc<RemoteBridge>) {
@@ -1366,7 +1047,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn helper_mode_is_rendered_in_remote_run_metadata() {
+    async fn helper_mode_is_omitted_from_remote_run_metadata() {
         let (_runtime, bridge) = bridge_fixture();
         let mut remote_context = context();
         remote_context.helper_mode = Some(crate::ssh::HelperMode::Persistent);
@@ -1399,8 +1080,12 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(rendered["structuredContent"]["helper_mode"], "persistent");
-        assert!(!rendered.to_string().contains("/home/"));
+        assert_eq!(rendered["structuredContent"], json!({"exit_code":0}));
+        assert_eq!(
+            text_value(&rendered),
+            "stdout:\nok\nwarning:\nselected POSIX sh does not support Bash arrays, [[ ]], source, pipefail, or Bash substitutions; use POSIX syntax, or request Bash and ensure it is installed"
+        );
+        assert!(!rendered.to_string().contains("persistent"));
     }
 
     #[test]
@@ -1411,28 +1096,22 @@ mod tests {
         error.details.outcome_unknown_paths = Some(vec!["d".to_owned()]);
         error.details.mutation_may_have_applied = Some(true);
         let rendered = result_value(
-            render_full_error(&mut error, roomy_budget()).expect("roomy error must render inline"),
+            full_error_result(&error, true, roomy_budget())
+                .expect("roomy error must render inline"),
         );
-        let text = text_value(&rendered);
-        assert_eq!(text["error"]["details"]["changed_paths"], json!(["a"]));
+        assert_eq!(rendered["structuredContent"]["changed_paths"], json!(["a"]));
         assert_eq!(
-            text["error"]["details"]["not_changed_paths"],
+            rendered["structuredContent"]["not_changed_paths"],
             json!(["b", "c"])
         );
         assert_eq!(
-            text["error"]["details"]["outcome_unknown_paths"],
+            rendered["structuredContent"]["outcome_unknown_paths"],
             json!(["d"])
         );
-        assert!(
-            rendered["structuredContent"]["error"]["details"]
-                .get("changed_paths")
-                .is_none()
-        );
         assert_eq!(
-            rendered["structuredContent"]["error"]["details"]["changed_count"],
-            1
+            rendered["structuredContent"]["mutation_may_have_applied"],
+            true
         );
-        assert_eq!(rendered["structuredContent"]["status"], "unknown");
     }
 
     #[test]
@@ -1444,48 +1123,39 @@ mod tests {
         error.details.not_changed_paths = Some(vec!["not\nchanged".to_owned()]);
         error.details.outcome_unknown_paths = Some(vec!["unknown\rpath".to_owned()]);
 
+        normalize_progress_controls(&mut error.details);
         let rendered = result_value(
-            render_full_error(&mut error, roomy_budget()).expect("roomy error must render inline"),
+            full_error_result(&error, true, roomy_budget())
+                .expect("roomy error must render inline"),
         );
-        let text = text_value(&rendered);
-
-        assert_eq!(text["physical_root"], "/srv/?root?");
         assert_eq!(
-            text["error"]["details"]["changed_paths"],
+            rendered["structuredContent"]["changed_paths"],
             json!(["changed?path"])
         );
         assert_eq!(
-            text["error"]["details"]["not_changed_paths"],
+            rendered["structuredContent"]["not_changed_paths"],
             json!(["not?changed"])
         );
         assert_eq!(
-            text["error"]["details"]["outcome_unknown_paths"],
+            rendered["structuredContent"]["outcome_unknown_paths"],
             json!(["unknown?path"])
         );
-        assert_eq!(
-            rendered["structuredContent"]["physical_root"],
-            "/srv/?root?"
-        );
+        assert!(rendered["structuredContent"].get("physical_root").is_none());
+        assert!(rendered["structuredContent"].get("host").is_none());
     }
 
     #[test]
-    fn task8_error_action_exact_limit_and_plus_one_report_truncation() {
-        for (length, truncated) in [(SAFE_TEXT_BYTES, false), (SAFE_TEXT_BYTES + 1, true)] {
-            let mut error = BridgeError::new(ErrorCode::InvalidArgument, "bad request", false);
-            error.details.suggested_action = Some("x".repeat(length));
-
-            let rendered = result_value(render_error(error, roomy_budget()));
-            let text = text_value(&rendered);
-            assert_eq!(
-                rendered["structuredContent"]["action"]
-                    .as_str()
-                    .unwrap()
-                    .len(),
-                SAFE_TEXT_BYTES
-            );
-            assert_eq!(rendered["structuredContent"]["action_truncated"], truncated);
-            assert_eq!(text["action_truncated"], truncated);
-        }
+    fn task8_error_output_contains_facts_without_actions() {
+        let mut error = BridgeError::new(ErrorCode::RemoteCapabilityMissing, "no bash", false);
+        error.details.requested_shell = Some("bash".to_owned());
+        error.details.available_shells = Some(vec!["sh".to_owned()]);
+        let rendered = result_value(render_error(error, roomy_budget()));
+        assert_eq!(rendered["structuredContent"]["requested_shell"], "bash");
+        assert_eq!(
+            rendered["structuredContent"]["available_shells"],
+            json!(["sh"])
+        );
+        assert!(!rendered.to_string().contains("action"));
     }
 
     #[test]
@@ -1497,20 +1167,16 @@ mod tests {
         );
         error.details.host = Some("dev".to_owned());
         error.details.physical_root = Some("/srv/root".to_owned());
-        error.details.shell = Some(ErrorShellMetadata {
-            kind: "sh".to_owned(),
-            version: Some("v\0\n1".to_owned()),
-            fallback: true,
-        });
-        error.details.suggested_action = Some("try\rquoted=\"\\".to_owned());
         let rendered = result_value(render_error(error, roomy_budget()));
         let message = rendered["structuredContent"]["error"]["message"]
             .as_str()
             .unwrap();
         assert_eq!(message, "bad?line?quote=\" slash=\\ snow=雪");
-        assert_eq!(rendered["structuredContent"]["shell"]["version"], "v??1");
-        assert_eq!(rendered["structuredContent"]["action"], "try?quoted=\"\\");
-        assert!(text_value(&rendered).to_string().contains("POSIX sh"));
+        assert!(rendered["structuredContent"].get("shell").is_none());
+        assert_eq!(
+            text_value(&rendered),
+            "REMOTE_EXIT: bad?line?quote=\" slash=\\ snow=雪"
+        );
     }
 
     #[test]
@@ -1538,13 +1204,15 @@ mod tests {
                 compact_fallback_bytes: 4 * 1024,
             },
         ));
-        let text = text_value(&rendered);
-        let inline = text["data"]["value"].as_str().unwrap().len() as u64;
+        let inline = text_value(&rendered).len() as u64;
         assert!(inline > 0);
-        assert_eq!(text["next_offset"], offset + inline);
-        assert_eq!(text["raw_bytes"], inline);
-        assert_eq!(text["eof"], false);
-        assert_eq!(text["aggregate"], "hosts");
+        assert_eq!(
+            rendered["structuredContent"]["next_offset"],
+            offset + inline
+        );
+        assert_eq!(rendered["structuredContent"]["eof"], false);
+        assert_eq!(rendered["structuredContent"]["truncated"], true);
+        assert!(rendered["structuredContent"].get("aggregate").is_none());
     }
 
     #[test]
@@ -1572,14 +1240,18 @@ mod tests {
                 compact_fallback_bytes: 4 * 1024,
             },
         ));
-        let text = text_value(&rendered);
+        let text = text_value(&rendered)
+            .strip_prefix("base64:")
+            .expect("binary output is explicitly marked");
         let inline = base64::engine::general_purpose::STANDARD
-            .decode(text["data"]["value"].as_str().unwrap())
+            .decode(text)
             .unwrap();
         assert!(!inline.is_empty());
-        assert_eq!(text["next_offset"], offset + inline.len() as u64);
-        assert_eq!(text["raw_bytes"], inline.len());
-        assert_eq!(text["eof"], false);
+        assert_eq!(
+            rendered["structuredContent"]["next_offset"],
+            offset + inline.len() as u64
+        );
+        assert_eq!(rendered["structuredContent"]["eof"], false);
     }
 
     #[tokio::test]
@@ -1606,8 +1278,8 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(hosts_result["structuredContent"]["host_count"], 1);
-        assert_eq!(hosts_result["structuredContent"]["detail_retained"], true);
+        assert_eq!(hosts_result["structuredContent"], json!({}));
+        assert_eq!(text_value(&hosts_result), "dev");
 
         let list_result = result_value(
             list(
@@ -1628,10 +1300,8 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(list_result["structuredContent"]["entry_count"], 1);
-        assert_eq!(list_result["structuredContent"]["detail_retained"], false);
         assert_eq!(list_result["structuredContent"]["truncated"], true);
-        assert_eq!(list_result["structuredContent"]["source_truncated"], false);
+        assert!(list_result["structuredContent"]["output_ref"].is_string());
 
         let stat_result = result_value(
             stat(
@@ -1649,8 +1319,8 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(stat_result["structuredContent"]["entry_count"], 1);
-        assert_eq!(stat_result["structuredContent"]["detail_retained"], false);
+        assert_eq!(stat_result["structuredContent"]["truncated"], true);
+        assert!(stat_result["structuredContent"]["output_ref"].is_string());
 
         let search_result = result_value(
             search(
@@ -1672,8 +1342,8 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(search_result["structuredContent"]["match_count"], 1);
-        assert_eq!(search_result["structuredContent"]["detail_retained"], false);
+        assert_eq!(search_result["structuredContent"]["truncated"], true);
+        assert!(search_result["structuredContent"]["output_ref"].is_string());
 
         let read_result = result_value(
             read(
@@ -1697,13 +1367,8 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(read_result["structuredContent"]["file_count"], 1);
-        assert_eq!(
-            read_result["structuredContent"]["returned_raw_bytes"],
-            bulk.len()
-        );
-        assert_eq!(read_result["structuredContent"]["source_truncated"], true);
-        assert_eq!(read_result["structuredContent"]["detail_retained"], false);
+        assert_eq!(read_result["structuredContent"]["truncated"], true);
+        assert!(read_result["structuredContent"]["output_ref"].is_string());
 
         let run_result = result_value(
             run(
@@ -1734,16 +1399,8 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(run_result["structuredContent"]["exit_status"], 0);
-        assert_eq!(run_result["structuredContent"]["status"], "completed");
-        assert_eq!(
-            run_result["structuredContent"]["aggregate_bytes"],
-            bulk.len()
-        );
-        assert_eq!(run_result["structuredContent"]["detail_retained"], false);
-        assert_eq!(
-            run_result["structuredContent"]["mutation_may_have_applied"],
-            false
-        );
+        assert_eq!(run_result["structuredContent"]["exit_code"], 0);
+        assert_eq!(run_result["structuredContent"]["truncated"], true);
+        assert!(run_result["structuredContent"]["output_ref"].is_string());
     }
 }

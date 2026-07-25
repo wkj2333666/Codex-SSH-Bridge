@@ -55,7 +55,9 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_status: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub suggested_action: Option<String>,
+    pub requested_shell: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_shells: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_process_may_continue: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

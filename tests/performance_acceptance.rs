@@ -863,10 +863,8 @@ async fn output_rss_child() {
     }
     let result = worker.await.unwrap();
     assert_eq!(result["isError"], Value::Null, "{result}");
-    assert_eq!(
-        result["structuredContent"]["aggregate_bytes"],
-        SESSION_OUTPUT_BYTES
-    );
+    assert_eq!(result["structuredContent"]["exit_code"], 0);
+    assert_eq!(result["structuredContent"]["truncated"], true);
     assert!(result["structuredContent"]["output_ref"].is_string());
     black_box(&result);
     for _ in 0..20 {

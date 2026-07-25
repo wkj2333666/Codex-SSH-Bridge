@@ -778,24 +778,8 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn invalid_arguments(name: &str, _: ArgumentValidationCategory) -> CallToolResult {
-    let action = match name {
-        "remote_hosts" => "provide an empty object for remote_hosts",
-        "remote_list" => "provide a valid host and bounded remote_list options",
-        "remote_stat" => "provide a valid host and 1 to 256 remote paths",
-        "remote_search" => "provide a valid host, nonempty query, and bounded search options",
-        "remote_read" => "provide a valid host, 1 to 32 remote paths, and bounded read options",
-        "remote_output_read" => {
-            "provide a 32-character lowercase output reference, stream, and bounded page size"
-        }
-        "remote_apply_patch" => "provide a valid host and nonempty bounded patch",
-        "remote_write" => {
-            "provide a valid host, remote path, encoded content, and closed write mode"
-        }
-        "remote_run" => "provide a valid host, nonempty command, and bounded closed run options",
-        _ => "provide valid tool arguments",
-    };
-    CallToolResult::invalid_argument(action)
+fn invalid_arguments(_: &str, _: ArgumentValidationCategory) -> CallToolResult {
+    CallToolResult::invalid_argument()
 }
 
 #[cfg(test)]

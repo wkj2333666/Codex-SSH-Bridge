@@ -804,11 +804,16 @@ pub fn select_shell(
                 shell: shell.clone(),
                 fallback: false,
             }),
-            ShellKind::PosixSh | ShellKind::Login => Err(BridgeError::new(
-                ErrorCode::RemoteCapabilityMissing,
-                "Bash is not available on the remote host",
-                false,
-            )),
+            ShellKind::PosixSh | ShellKind::Login => {
+                let mut error = BridgeError::new(
+                    ErrorCode::RemoteCapabilityMissing,
+                    "Bash is not available on the remote host",
+                    false,
+                );
+                error.details.requested_shell = Some("bash".to_owned());
+                error.details.available_shells = Some(vec!["sh".to_owned()]);
+                Err(error)
+            }
         },
         ShellRequest::Sh => Ok(ShellSelection {
             shell: ShellKind::PosixSh,
