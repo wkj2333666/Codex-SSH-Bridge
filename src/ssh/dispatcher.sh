@@ -375,6 +375,7 @@ exit 0"
         run_command=$3
         run_pid_file=$4
         run_command_path=$5
+        run_login_shell=$6
         printf "%s\\n" "$$" >"$run_pid_file" || exit 74
         CDPATH= cd -P -- "$run_cwd" || exit 126
         if [ -n "$run_command_path" ]; then
@@ -387,7 +388,7 @@ exit 0"
             login) exec "$run_login_shell" -c "$run_command" ;;
             *) exit 126 ;;
         esac
-    ' codex-ssh-dispatcher "$run_cwd" "$run_shell" "$run_command" "$run_dir/pid" "$run_command_path" \
+    ' codex-ssh-dispatcher "$run_cwd" "$run_shell" "$run_command" "$run_dir/pid" "$run_command_path" "$run_login_shell" \
         <"$run_stdin_file" >"$run_stdout_fifo" 2>"$run_stderr_fifo" &
     run_job_pid=$!
     run_pid=
