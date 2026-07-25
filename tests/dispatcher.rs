@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -72,9 +73,21 @@ async fn write_frame(
 #[tokio::test]
 async fn dispatcher_executes_shell_command_and_preserves_streams_and_exit_status() {
     let temp = tempfile::TempDir::new().unwrap();
+    let watchdog_log = temp.path().join("watchdog-pids");
+    let bin = temp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let sleep = bin.join("sleep");
+    std::fs::write(
+        &sleep,
+        b"#!/bin/sh\nprintf '%s\\n' \"$$\" >>\"$WATCHDOG_LOG\"\nexec /bin/sleep \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&sleep, std::fs::Permissions::from_mode(0o755)).unwrap();
     let script = std::fs::read_to_string(dispatcher_path()).unwrap();
     let mut child = TokioCommand::new("/bin/sh")
         .args(["-c", &script, "--", "codex-ssh-dispatcher-1"])
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("WATCHDOG_LOG", &watchdog_log)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -96,7 +109,7 @@ async fn dispatcher_executes_shell_command_and_preserves_streams_and_exit_status
     let cwd = temp.path().as_os_str().as_encoded_bytes();
     let command = b"printf out; printf err >&2; exit 7";
     let metadata = format!(
-        "shell=sh\ncwd_length={}\ncommand_length={}\nstdin_length=0\ntimeout_ms=2000\nstdout_limit=1024\nstderr_limit=1024\n",
+        "shell=sh\ncwd_length={}\ncommand_length={}\nstdin_length=0\ntimeout_ms=5000\nstdout_limit=1024\nstderr_limit=1024\n",
         cwd.len(),
         command.len()
     );
@@ -127,6 +140,18 @@ async fn dispatcher_executes_shell_command_and_preserves_streams_and_exit_status
     assert_eq!(stdout_bytes, b"out");
     assert_eq!(stderr_bytes, b"err");
     assert_eq!(exit.as_deref(), Some("7\n0\n0\n0\n0\n"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let watchdog_pids = std::fs::read_to_string(&watchdog_log).unwrap();
+    for pid in watchdog_pids.lines() {
+        let status = Command::new("/bin/sh")
+            .args(["-c", "kill -0 \"$1\" 2>/dev/null", "--", pid])
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "watchdog sleep {pid} survived its request"
+        );
+    }
     write_frame(&mut stdin, "CLOSE", 0, &[]).await;
     drop(stdin);
     assert!(child.wait().await.unwrap().success());
