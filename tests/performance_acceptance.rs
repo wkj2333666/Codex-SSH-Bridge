@@ -765,7 +765,7 @@ fn report_maximum_mcp_wire() {
             .unwrap();
     let fixture = fake_fixture(&["dev"], &[]);
     let service = Arc::new(fixture.tools);
-    McpServer::new(service, codex_ssh_bridge::MAX_FRAME_BYTES, 8).unwrap();
+    McpServer::new(service, codex_ssh_bridge::MAX_FRAME_BYTES).unwrap();
     eprintln!(
         "Task11 maximum MCP wire: frame_payload_bytes={} line_bytes_with_newline={} exact_tools_list_bytes={tools_list_bytes} required_server_bytes={required_bytes}",
         codex_ssh_bridge::MAX_FRAME_BYTES,

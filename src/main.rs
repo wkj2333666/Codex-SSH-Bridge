@@ -46,9 +46,6 @@ async fn main() {
 async fn run_mcp() -> BridgeResult<()> {
     let loaded = Config::load_default()?;
     let max_frame_bytes = loaded.config.limits.max_frame_bytes;
-    // McpServer uses this remote concurrency value to derive its bounded
-    // pending-task window; runner capacity remains the execution limiter.
-    let max_inflight = loaded.config.limits.global_concurrency;
     let global_spool_quota_bytes = loaded.config.limits.global_spool_quota_bytes;
     let retention_serialization_jobs = loaded.config.limits.retention_serialization_jobs;
     let config = Arc::new(loaded.config);
@@ -61,7 +58,7 @@ async fn run_mcp() -> BridgeResult<()> {
     let runner = Arc::new(SshRunner::new(Arc::clone(&config), runtime, output_store)?);
     let bridge = Arc::new(RemoteBridge::new(runner));
     let tools = Arc::new(RemoteMcpTools::new(bridge));
-    let server = McpServer::new(tools, max_frame_bytes, max_inflight)?;
+    let server = McpServer::new(tools, max_frame_bytes)?;
     server.serve(tokio::io::stdin(), tokio::io::stdout()).await
 }
 

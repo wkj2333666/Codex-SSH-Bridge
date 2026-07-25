@@ -78,20 +78,14 @@ enum OwnerEvent {
 pub struct McpServer<S> {
     service: Arc<S>,
     max_frame_bytes: usize,
-    max_pending: usize,
     compact_fallback_result_bytes: usize,
 }
 
-const MCP_PENDING_WINDOW_EXTRA: usize = 8;
-const CONTROL_TOOL_REMOTE_HOSTS: &str = "remote_hosts";
-
-fn is_control_tool(name: &str) -> bool {
-    name == CONTROL_TOOL_REMOTE_HOSTS
-}
+const MCP_WRITER_CHANNEL_CAPACITY: usize = 16;
 
 impl<S: ToolService> McpServer<S> {
     #[allow(clippy::result_large_err)]
-    pub fn new(service: Arc<S>, max_frame_bytes: usize, max_inflight: usize) -> BridgeResult<Self> {
+    pub fn new(service: Arc<S>, max_frame_bytes: usize) -> BridgeResult<Self> {
         let compact_fallback_result_bytes = render::maximum_compact_fallback_result_bytes();
         let synthetic_id = RequestId::synthetic_max_wire();
         let required = required_mcp_frame_bytes(
@@ -103,18 +97,9 @@ impl<S: ToolService> McpServer<S> {
         if max_frame_bytes < required || max_frame_bytes > crate::MAX_FRAME_BYTES {
             return Err(BridgeError::invalid_argument("MCP frame bound is invalid"));
         }
-        if max_inflight == 0 || max_inflight > 32 {
-            return Err(BridgeError::invalid_argument(
-                "MCP in-flight bound is invalid",
-            ));
-        }
-        let max_pending = max_inflight
-            .checked_add(MCP_PENDING_WINDOW_EXTRA)
-            .ok_or_else(|| BridgeError::invalid_argument("MCP pending bound is invalid"))?;
         Ok(Self {
             service,
             max_frame_bytes,
-            max_pending,
             compact_fallback_result_bytes,
         })
     }
@@ -124,8 +109,7 @@ impl<S: ToolService> McpServer<S> {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let channel_capacity = self.max_pending + MCP_PENDING_WINDOW_EXTRA;
-        let (sender, receiver) = mpsc::channel(channel_capacity);
+        let (sender, receiver) = mpsc::channel(MCP_WRITER_CHANNEL_CAPACITY);
         let suppress_call_responses = Arc::new(AtomicBool::new(false));
         let writer_suppression = Arc::clone(&suppress_call_responses);
         let max_frame_bytes = self.max_frame_bytes;
@@ -449,9 +433,6 @@ impl<S: ToolService> McpServer<S> {
                     .any(|definition| definition.name == name)
                 {
                     return Some(invalid_params_response(id));
-                }
-                if !is_control_tool(name) && active.len() >= self.max_pending {
-                    return Some(server_busy_response(id));
                 }
                 let Some(wire_budget) = WireBudget::for_response(
                     self.max_frame_bytes,

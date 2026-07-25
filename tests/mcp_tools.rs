@@ -399,12 +399,12 @@ impl ProtocolSession {
     async fn start_with_limits(
         tools: RemoteMcpTools,
         max_frame_bytes: usize,
-        concurrency: usize,
+        _concurrency: usize,
     ) -> Self {
         let (client, server_io) = tokio::io::duplex(16 * 1024 * 1024);
         let (client_output, client_input) = tokio::io::split(client);
         let (server_input, server_output) = tokio::io::split(server_io);
-        let server = McpServer::new(Arc::new(tools), max_frame_bytes, concurrency).unwrap();
+        let server = McpServer::new(Arc::new(tools), max_frame_bytes).unwrap();
         let server = tokio::spawn(server.serve(server_input, server_output));
         let mut session = Self {
             input: client_input,
@@ -835,7 +835,6 @@ fn task8_binary_bootstrap_preserves_exact_limits_and_ownership_chain() {
     for required in [
         "Config::load_default()",
         "loaded.config.limits.max_frame_bytes",
-        "loaded.config.limits.global_concurrency",
         "loaded.config.limits.global_spool_quota_bytes",
         "loaded.config.limits.retention_serialization_jobs",
         "OutputStore::with_limits(",
@@ -845,7 +844,7 @@ fn task8_binary_bootstrap_preserves_exact_limits_and_ownership_chain() {
         "SshRunner::new(Arc::clone(&config), runtime, output_store)",
         "RemoteBridge::new(runner)",
         "RemoteMcpTools::new(bridge)",
-        "McpServer::new(tools, max_frame_bytes, max_inflight)",
+        "McpServer::new(tools, max_frame_bytes)",
     ] {
         assert!(
             source.contains(required),
@@ -876,7 +875,7 @@ async fn task8_binary_remote_tools_constructor_accepts_exact_minimum_only() {
     let fallback = codex_ssh_bridge::mcp::maximum_compact_fallback_result_bytes();
     let required = required_mcp_frame_bytes(tool_definitions(), fallback, &id).unwrap();
     assert_eq!(required, 1_048_576.max(exact_tools));
-    assert!(McpServer::new(Arc::new(tools.clone()), required - 1, 1).is_err());
+    assert!(McpServer::new(Arc::new(tools.clone()), required - 1).is_err());
 
     let mut session = ProtocolSession::start_with_frame(tools, required).await;
     let maximum_id = "x".repeat(254);
@@ -997,10 +996,10 @@ fn task8_registry_full_tools_list_is_an_undegradable_service_minimum() {
         exact_tools_list_response_bytes(&tool_definitions()[..8], &id).unwrap() < exact,
         "the test must prove that silently dropping a tool would shrink the frame"
     );
-    assert!(McpServer::new(Arc::new(RegistryService), required, 1).is_ok());
+    assert!(McpServer::new(Arc::new(RegistryService), required).is_ok());
     // Construction uses the complete immutable registry. It must reject a
     // smaller frame instead of silently degrading the advertised surface.
-    assert!(McpServer::new(Arc::new(RegistryService), required - 1, 1).is_err());
+    assert!(McpServer::new(Arc::new(RegistryService), required - 1).is_err());
 }
 
 fn assert_string_bounds(schema: &Value, maximum: u64) {

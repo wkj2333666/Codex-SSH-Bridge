@@ -239,10 +239,6 @@ pub fn request_too_large_response() -> Value {
     null_id_error_response(-32001, "Request too large")
 }
 
-pub fn server_busy_response(id: RequestId) -> Value {
-    id_error_response(id, -32000, "MCP task queue full")
-}
-
 fn null_id_error_response(code: i64, message: &'static str) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
