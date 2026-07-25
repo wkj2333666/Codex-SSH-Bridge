@@ -439,7 +439,12 @@ exit 0"
     run_timeout_marker=$run_dir/timed-out
     case "$run_timeout_ms" in ''|*[!0-9]*) run_timeout_ms=0 ;; esac
     if [ "$run_timeout_ms" -gt 0 ]; then
-        run_timeout_seconds=$(( (run_timeout_ms + 999) / 1000 ))
+        run_timeout_seconds=$((run_timeout_ms / 1000))
+        run_timeout_remainder=$((run_timeout_ms % 1000))
+        run_timeout_delay=$run_timeout_seconds
+        if [ "$run_timeout_remainder" -gt 0 ]; then
+            run_timeout_delay=$(printf '%s.%03d' "$run_timeout_seconds" "$run_timeout_remainder")
+        fi
         setsid sh -c '
             printf "%s\n" "$$" >"$4" || exit 74
             sleep "$1"
@@ -449,7 +454,7 @@ exit 0"
                 sleep 1
                 kill -KILL -"$2" 2>/dev/null || true
             fi
-        ' codex-ssh-watchdog "$run_timeout_seconds" "$run_pid" "$run_timeout_marker" \
+        ' codex-ssh-watchdog "$run_timeout_delay" "$run_pid" "$run_timeout_marker" \
             "$run_watchdog_pid_file" &
         run_watchdog_launcher=$!
         run_watchdog_wait=0
