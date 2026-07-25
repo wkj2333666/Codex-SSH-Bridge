@@ -1,6 +1,6 @@
 {
   "name": "codex-ssh-bridge",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Operate SSH aliases from the local OpenSSH configuration through a native bridge without installing or authenticating Codex remotely.",
   "author": {
     "name": "Local developer"
