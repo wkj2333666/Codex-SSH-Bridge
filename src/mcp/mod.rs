@@ -142,8 +142,8 @@ impl<S: ToolService> McpServer<S> {
                 OwnerEvent::Input(Ok(FrameEvent::Eof)) => break,
                 OwnerEvent::Input(Ok(FrameEvent::PartialEof)) => {
                     partial_eof = true;
-                    if sender
-                        .try_send(WriterMessage::Control(parse_error_response()))
+                    if send_writer_message(&sender, WriterMessage::Control(parse_error_response()))
+                        .await
                         .is_err()
                     {
                         transport_failed = true;
@@ -151,9 +151,12 @@ impl<S: ToolService> McpServer<S> {
                     break;
                 }
                 OwnerEvent::Input(Ok(FrameEvent::Oversized)) => {
-                    if sender
-                        .try_send(WriterMessage::Control(request_too_large_response()))
-                        .is_err()
+                    if send_writer_message(
+                        &sender,
+                        WriterMessage::Control(request_too_large_response()),
+                    )
+                    .await
+                    .is_err()
                     {
                         transport_failed = true;
                         break;
@@ -165,6 +168,7 @@ impl<S: ToolService> McpServer<S> {
                         &sender,
                         self.max_frame_bytes,
                     )
+                    .await
                     .is_err()
                     {
                         transport_failed = true;
@@ -182,7 +186,10 @@ impl<S: ToolService> McpServer<S> {
                         &mut join_set,
                         &mut initialize_transition,
                     ) {
-                        if sender.try_send(WriterMessage::Control(response)).is_err() {
+                        if send_writer_message(&sender, WriterMessage::Control(response))
+                            .await
+                            .is_err()
+                        {
                             transport_failed = true;
                             break;
                         }
@@ -198,6 +205,7 @@ impl<S: ToolService> McpServer<S> {
                         &sender,
                         self.max_frame_bytes,
                     )
+                    .await
                     .is_err()
                     {
                         transport_failed = true;
@@ -212,6 +220,7 @@ impl<S: ToolService> McpServer<S> {
                         &sender,
                         self.max_frame_bytes,
                     )
+                    .await
                     .is_err()
                     {
                         transport_failed = true;
@@ -516,7 +525,7 @@ async fn next_owner_event<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
-fn process_completion(
+async fn process_completion(
     completion: Result<(Id, CompletedCall), JoinError>,
     active: &mut HashMap<RequestId, InFlight>,
     task_ids: &mut HashMap<Id, RequestId>,
@@ -551,9 +560,7 @@ fn process_completion(
                     result: &completed.outcome,
                 };
                 let prepared = PreparedJsonLine::serialize(&response, max_frame_bytes)?;
-                sender
-                    .try_send(WriterMessage::CallResponse(prepared))
-                    .map_err(|_| ())?;
+                send_writer_message(sender, WriterMessage::CallResponse(prepared)).await?;
             }
             Ok(())
         }
@@ -568,16 +575,14 @@ fn process_completion(
             if !inflight.cancelled_by_client && !error.is_cancelled() {
                 let response = internal_error_response(id);
                 let prepared = PreparedJsonLine::serialize(&response, max_frame_bytes)?;
-                sender
-                    .try_send(WriterMessage::CallResponse(prepared))
-                    .map_err(|_| ())?;
+                send_writer_message(sender, WriterMessage::CallResponse(prepared)).await?;
             }
             Ok(())
         }
     }
 }
 
-fn try_reap_one_completion(
+async fn try_reap_one_completion(
     join_set: &mut JoinSet<CompletedCall>,
     active: &mut HashMap<RequestId, InFlight>,
     task_ids: &mut HashMap<Id, RequestId>,
@@ -587,9 +592,16 @@ fn try_reap_one_completion(
     if !join_set.is_empty()
         && let Some(completion) = join_set.try_join_next_with_id()
     {
-        process_completion(completion, active, task_ids, sender, max_frame_bytes)?;
+        process_completion(completion, active, task_ids, sender, max_frame_bytes).await?;
     }
     Ok(())
+}
+
+async fn send_writer_message(
+    sender: &mpsc::Sender<WriterMessage>,
+    message: WriterMessage,
+) -> Result<(), ()> {
+    sender.send(message).await.map_err(|_| ())
 }
 
 fn remove_completion(

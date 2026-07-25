@@ -2298,9 +2298,18 @@ impl AsyncWrite for ClosingWriter {
                 Poll::Ready(Ok(buffer.len()))
             }
             ClosingSource::QueueBackpressure => {
+                if !self.state.writer_armed.load(Ordering::Acquire) {
+                    *self.state.writer_waker.lock().unwrap() = Some(cx.waker().clone());
+                    if !self.state.writer_armed.load(Ordering::Acquire) {
+                        drop(bytes);
+                        self.state.mark_blocked();
+                        return Poll::Pending;
+                    }
+                }
+                bytes.extend_from_slice(buffer);
                 drop(bytes);
-                self.state.mark_blocked();
-                Poll::Pending
+                self.state.wrote.notify_waiters();
+                Poll::Ready(Ok(buffer.len()))
             }
             ClosingSource::WriterWriteZero => {
                 if !self.state.writer_armed.load(Ordering::Acquire) {
@@ -2595,7 +2604,6 @@ async fn task7_closing_source_by_active_call_matrix_is_complete_and_bounded() {
     timeout(Duration::from_secs(15), async {
         for source in [
             ClosingSource::PartialEof,
-            ClosingSource::QueueBackpressure,
             ClosingSource::WriterWriteZero,
             ClosingSource::WriterPanic,
             ClosingSource::ShutdownFailure,
@@ -2612,6 +2620,56 @@ async fn task7_closing_source_by_active_call_matrix_is_complete_and_bounded() {
     })
     .await
     .expect("complete Closing matrix must remain bounded");
+}
+
+#[tokio::test]
+async fn task8_writer_queue_applies_backpressure_without_killing_the_server() {
+    timeout(Duration::from_secs(5), async {
+        let tools = Arc::new(StubTools::new());
+        let writer_state = Arc::new(ClosingWriterState::new(false));
+        let writer = ClosingWriter {
+            source: ClosingSource::QueueBackpressure,
+            state: Arc::clone(&writer_state),
+        };
+        let (mut input, server_reader) = tokio::io::duplex(128 * 1024);
+        let server = McpServer::new(tools, MIN_MCP_FRAME_BYTES).unwrap();
+        let serve = tokio::spawn(server.serve(server_reader, writer));
+
+        send_closing_frame(&mut input, initialize(json!(1), "2025-11-25"))
+            .await
+            .unwrap();
+        writer_state.wait_for_lines(1).await;
+        send_closing_frame(
+            &mut input,
+            json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
+        )
+        .await
+        .unwrap();
+        for id in 2..=40 {
+            send_closing_frame(
+                &mut input,
+                json!({"jsonrpc":"2.0","id":id,"method":"ping","params":{}}),
+            )
+            .await
+            .unwrap();
+        }
+        writer_state.wait_until_blocked().await;
+        tokio::task::yield_now().await;
+        assert!(
+            !serve.is_finished(),
+            "a full response queue must backpressure instead of closing MCP"
+        );
+
+        writer_state.arm_writer();
+        writer_state.wait_for_lines(40).await;
+        input.shutdown().await.unwrap();
+        assert!(
+            serve.await.expect("server must not panic").is_ok(),
+            "server must recover after the client resumes reading"
+        );
+    })
+    .await
+    .expect("backpressure recovery must terminate");
 }
 
 #[tokio::test]
