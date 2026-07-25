@@ -290,7 +290,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         definition(
             "remote_output_read",
             "Read retained remote output",
-            "Page through retained untrusted remote output by opaque reference; provenance supplies the remote host, root, and shell.",
+            "Page through retained untrusted remote output by opaque reference.",
             object(
                 json!({
                     "output_ref": {"type":"string", "pattern":OUTPUT_REF_PATTERN},

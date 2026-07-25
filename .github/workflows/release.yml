@@ -202,21 +202,9 @@ jobs:
           retention-days: 7
 
   package:
-    name: Package ${{ matrix.target }}
+    name: Package release archives
     needs: [build-main, build-helper]
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
-          - riscv64gc-unknown-linux-gnu
-          - powerpc64le-unknown-linux-gnu
-          - s390x-unknown-linux-gnu
     steps:
       - name: Check out tagged source for package resources
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -237,41 +225,49 @@ jobs:
 
       - name: Assemble archive and checksum
         shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          name="codex-ssh-bridge-${version}-${TARGET}"
-          root="dist/$name"
-          mkdir -p "$root/bin" "$root/remote-helpers" "$root/docs"
-          install -m 0755 "staging/main-$TARGET/codex-ssh-bridge" "$root/bin/codex-ssh-bridge"
-          for helper in \
+          for target in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            armv7-unknown-linux-gnueabihf \
             x86_64-unknown-linux-musl \
             aarch64-unknown-linux-musl \
-            armv7-unknown-linux-musleabihf \
             riscv64gc-unknown-linux-gnu \
             powerpc64le-unknown-linux-gnu \
             s390x-unknown-linux-gnu; do
-            install -m 0755 "staging/helper-$helper/$helper" "$root/remote-helpers/$helper"
+            name="codex-ssh-bridge-${version}-${target}"
+            root="dist/$name"
+            mkdir -p "$root/bin" "$root/remote-helpers" "$root/docs"
+            install -m 0755 "staging/main-$target/codex-ssh-bridge" "$root/bin/codex-ssh-bridge"
+            for helper in \
+              x86_64-unknown-linux-musl \
+              aarch64-unknown-linux-musl \
+              armv7-unknown-linux-musleabihf \
+              riscv64gc-unknown-linux-gnu \
+              powerpc64le-unknown-linux-gnu \
+              s390x-unknown-linux-gnu; do
+              install -m 0755 "staging/helper-$helper/$helper" "$root/remote-helpers/$helper"
+            done
+            for resource in \
+              .codex-plugin \
+              skills \
+              README.md \
+              LICENSE \
+              config.example.toml \
+              .mcp.json.example; do
+              cp -a "$resource" "$root/"
+            done
+            cp -a docs/security.md docs/performance.md "$root/docs/"
+            test -x "$root/bin/codex-ssh-bridge"
+            test -x "$root/remote-helpers/aarch64-unknown-linux-musl"
+            test -f "$root/.codex-plugin/plugin.json"
+            test -f "$root/skills/remote-ssh-ops/SKILL.md"
+            test -f "$root/.mcp.json.example"
+            tar -C "dist" -czf "dist/$name.tar.gz" "$name"
+            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           done
-          for resource in \
-            .codex-plugin \
-            skills \
-            README.md \
-            LICENSE \
-            config.example.toml \
-            .mcp.json.example; do
-            cp -a "$resource" "$root/"
-          done
-          cp -a docs/security.md docs/performance.md "$root/docs/"
-          test -x "$root/bin/codex-ssh-bridge"
-          test -x "$root/remote-helpers/aarch64-unknown-linux-musl"
-          test -f "$root/.codex-plugin/plugin.json"
-          test -f "$root/skills/remote-ssh-ops/SKILL.md"
-          test -f "$root/.mcp.json.example"
-          tar -C "dist" -czf "dist/$name.tar.gz" "$name"
-          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 
       - name: Upload packaged release
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

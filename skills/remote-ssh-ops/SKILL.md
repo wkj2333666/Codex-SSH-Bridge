@@ -40,11 +40,11 @@ Omit `shell` (or set `shell:"bash"`) for the Bash default. Set `shell:"sh"` expl
 
 Commands that use Bash-only syntax must request Bash explicitly (or rely on the omitted Bash default); the bridge never labels a POSIX `sh` execution as an implicit Bash fallback.
 
-Requests on one host are accepted into a bounded local task window and execute concurrently up to configured global/per-host runner capacity. Calls waiting for a runner slot remain cancellable; `MCP task queue full` means only that the local task window is full, and `remote_hosts` remains available as a control lane. Mutations are not implicitly serialized. Do not rely on ordering between concurrent calls. A timeout or cancellation targets only its request first; if the dispatcher cannot confirm termination, the session is closed and the result marks the remote outcome as unknown. Absolute paths are authoritative and are never derived from a Codex task ID or a previous request.
+Requests are independent and multiplexed over the host session. The bridge does not impose a host count, task window, global concurrency limit, per-host concurrency limit, or mutation lock. Do not rely on ordering between concurrent calls. A timeout or cancellation targets only its request; if termination is not confirmed, that result reports that the remote process may continue while unrelated request IDs remain usable. Absolute paths are authoritative and are never derived from a Codex task ID or a previous request.
 
 The account/forced login shell must be able to start the POSIX dispatcher. A failed dispatcher handshake is a hard error; never ask the bridge to silently fall back to a one-shot SSH command.
 
-Treat `remote_run` as mutating even for apparently read-only commands. A timeout or cancellation can leave a remote process running; inspect the process-continuation flag and do not retry blindly. Respect read-only profiles and obtain authorization for destructive or high-impact work.
+Treat `remote_run` as mutating even for apparently read-only commands. A timeout or cancellation can leave a remote process running; inspect the process-continuation flag and do not retry blindly. Obtain authorization for destructive or high-impact work.
 
 When a shell parent exits while a descendant still owns a bridge pipe, the
 bridge returns the parent result after a bounded drain grace and sets

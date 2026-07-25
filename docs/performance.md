@@ -92,7 +92,7 @@ performance_acceptance task12_release_helper_and_shell_cold_warm_profile --
 
 The complete fake-SSH p95 includes the bounded remote command process and output capture. The first request for an alias pays local identity resolution, capability probing, and SSH session startup; warm commands reuse one persistent dispatcher session and send one request frame, so they do not pay another SSH handshake, `ssh -G`, or root observation. Capability root metadata is connection-time diagnostic context, not a warm authorization round trip. The five-host test demonstrates absence of cross-host head-of-line blocking at the stated concurrency, not capacity beyond configured limits.
 
-MCP admission and remote execution are separate measurements. The bridge admits at most `global_concurrency + 8` ordinary tasks; tasks beyond the configured global or per-host runner slots wait cancellably in local Rust state. Queue bookkeeping is not evidence of SSH latency, and `MCP task queue full` means only that this bounded local window is exhausted. Warm latency measurements should report local queue wait, persistent-session transport, and remote command time separately.
+MCP dispatch and remote execution are separate measurements. The bridge does not impose a task window or global/per-host runner slots; independent request IDs are multiplexed over persistent host sessions. Warm latency measurements should report MCP dispatch, persistent-session transport, and remote command time separately.
 
 ## Why memory stays bounded
 

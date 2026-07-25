@@ -128,8 +128,8 @@ Future aliases are discovered automatically from `~/.ssh/config` and its
 supported `Include` files. `hosts add` remains available for compatibility
 profiles, but MCP operations do not use a configured root to infer paths. The default local config is
 `~/.config/codex-ssh-bridge/config.toml`; [config.example.toml](config.example.toml)
-documents limits. It accepts exactly configuration `version = 1` and contains
-optional compatibility profiles and limits—never credentials.
+documents limits. It accepts configuration `version = 2` and contains only
+global transport and bounded-I/O limits—never credentials.
 
 On first use, the bridge validates the local SSH configuration and probes the
 remote shell and utility capabilities. It reuses the connection for later
@@ -194,8 +194,9 @@ Errors report factual codes and relevant state without prescribing an action.
 
 All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` headers must use absolute paths (or `/dev/null` for create/delete). `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Bash is never silently changed to sh: if Bash is unavailable, the capability error records that Bash was requested and which shells are available, leaving the next decision to the model. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
-Operational requests use one persistent SSH session per alias and are bounded
-by the configured concurrency and output limits. Requests are cancellable;
+Operational requests use one persistent SSH session per alias and are
+multiplexed without bridge-defined host or concurrency admission limits.
+Requests remain bounded by frame, read, write, output, and spool limits and are cancellable;
 mutations report conflicts or unknown outcomes and are never blindly retried.
 The internally selected helper transport does not change command shell
 selection (`bash` remains the default unless the caller explicitly requests
@@ -207,7 +208,7 @@ The direct CLI accepts argv and handles shell-word encoding inside the bridge:
 
 ```bash
 ./target/release/codex-ssh-bridge hosts list
-./target/release/codex-ssh-bridge run devbox --cwd . --shell bash -- git status --short
+./target/release/codex-ssh-bridge run devbox --cwd /absolute/remote/project --shell bash -- git status --short
 ```
 
 This is convenient for a person or a diagnostic. Model-driven work should use MCP so results remain structured and approvals follow tool annotations.
@@ -223,7 +224,7 @@ mkdir -p /absolute/local/mountpoint
 ./target/release/codex-ssh-bridge unmount /absolute/local/mountpoint
 ```
 
-The CLI requires a real absolute current-user-owned mountpoint, refuses nonempty directories without `--allow-nonempty`, forces `ro` for read-only profiles, and never enables `allow_other`. It prints that the mount is remote and not a local workspace.
+The CLI requires a real absolute current-user-owned mountpoint, refuses nonempty directories without `--allow-nonempty`, and never enables `allow_other`. It prints that the mount is remote and not a local workspace.
 
 Use SSHFS for browsing or narrow human editing. Keep builds, Git, tests, containers, and services on the server through `remote_run`. SFTP/FUSE workloads add a round trip to many metadata operations; caching, permissions, hardlinks, rename behavior, and broken-connection recovery also differ from a native filesystem. See the [SSHFS documentation](https://github.com/libfuse/sshfs).
 

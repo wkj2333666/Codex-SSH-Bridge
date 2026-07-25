@@ -65,9 +65,9 @@ The SSH account's login shell must be able to launch the POSIX dispatcher comman
 
 Use the Bash default normally. Select `sh` only for a POSIX-compatible command; its result includes a syntax warning. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
-Requests are independent and accepted into the bridge's bounded local task window. They execute concurrently up to global/per-host runner limits; runner contention queues cancellably rather than returning an MCP capacity error. Only an exhausted local window returns `MCP task queue full`, and `remote_hosts` remains available as a control call. There is no mutation lock and no ordering guarantee for simultaneous writes to the same path. Atomic replace and expected-hash checks remain the protection for individual mutations.
+Requests are independent and multiplexed over each host session. The bridge has no host count, task window, global concurrency, per-host concurrency, or mutation lock. There is no ordering guarantee for simultaneous writes to the same path. Atomic replace and expected-hash checks remain the protection for individual mutations.
 
-Timeout and cancellation send a request-level `CANCEL` first. If the dispatcher does not produce an exit result within the grace period, the bridge terminates the whole session and reports `remote_process_may_continue: true`; never retry a mutation with unknown outcome.
+Timeout and cancellation send a request-level `CANCEL`. If the dispatcher does not produce an exit result within the grace period, that request reports `remote_process_may_continue: true`; unrelated request IDs remain usable. Never retry a mutation with unknown outcome.
 
 ## Retained output
 
@@ -99,7 +99,7 @@ The human CLI accepts argv after `--` and performs the shell-word encoding insid
 ./target/release/codex-ssh-bridge hosts show devbox
 ./target/release/codex-ssh-bridge doctor devbox
 ./target/release/codex-ssh-bridge doctor devbox --verbose-ssh
-./target/release/codex-ssh-bridge run devbox --cwd . --shell bash -- git status --short
+./target/release/codex-ssh-bridge run devbox --cwd /absolute/remote/project --shell bash -- git status --short
 ```
 
 The JSON result reports the physical remote root, actual shell, exit status, warnings, duration, output limits, and any retained output reference. Verbose SSH diagnostics are bounded and redact identity paths, agent sockets, commands, and credential-like values.

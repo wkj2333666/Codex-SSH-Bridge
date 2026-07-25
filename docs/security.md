@@ -62,7 +62,7 @@ Every operational SSH call forces separate `-o` arguments for:
 | `ServerAliveCountMax=3` | Stop after three unanswered encrypted keepalives |
 | `ControlPath=<private hashed path>` | Avoid public/predictable sockets and cross-profile masters |
 
-Connection setup also applies the configured `ConnectTimeout`. Ordinary SSH and SSHFS both inherit the two server-alive options exactly once; SSHFS additionally applies `reconnect`, never enables `allow_other`, and forces `ro` for a read-only profile.
+Connection setup also applies the configured `ConnectTimeout`. Ordinary SSH and SSHFS both inherit the two server-alive options exactly once; SSHFS additionally applies `reconnect` and never enables `allow_other`.
 
 The first operation for an alias runs bounded `ssh -G` with the security-critical options and hashes the resulting configuration. That digest and the derived policy are cached for the bridge process; warm requests do not repeat `ssh -G`. A mismatch discovered during initial setup is non-retryable `INVALID_CONFIG`; restart the bridge only after reviewing an intentional local alias change. Pattern-only aliases are not added to the bridge config. Host aliases are passed after `--`, and the MCP surface accepts no arbitrary SSH option.
 
@@ -78,9 +78,9 @@ MCP paths, queries, globs, patch bodies, file content, stdin, and absolute comma
 
 Local `LC_ALL=C` is forced only for bridge protocol and SSH-diagnostic phases. Raw `remote_run` does not add that override, so the bridge does not itself cause an `LC_*` `SendEnv` rule to change the user's command locale.
 
-Session note: the dispatcher is always POSIX sh and never parses a user command as its own control language. A timeout or cancellation sends a request-level cancel first; if termination is not confirmed, the persistent session is closed and pending mutations are reported unknown rather than retried.
+Session note: the dispatcher is always POSIX sh and never parses a user command as its own control language. A timeout or cancellation is request-scoped. If termination is not confirmed, that result reports that the remote process may continue; unrelated request IDs remain usable and mutations are not retried.
 
-All command tools are treated as mutating. A local timeout sends a request-level cancel, then terminates the entire persistent SSH process group when the dispatcher cannot confirm completion. A detached or ambiguous remote child can survive, so results expose process-continuation and mutation uncertainty instead of claiming rollback.
+All command tools are treated as mutating. A detached or ambiguous remote child can survive cancellation, so results expose process-continuation and mutation uncertainty instead of claiming rollback.
 
 ## Files, output, and protocol limits
 
@@ -95,8 +95,6 @@ All command tools are treated as mutating. A local timeout sends a request-level
 ## Mutation semantics
 
 `remote_write` provides create or conditional replace. `remote_apply_patch` snapshots every base before the first mutation and executes files in patch order. Results separate confirmed changed paths, confirmed unchanged paths, and outcome-unknown paths. Never automatically retry an unknown outcome.
-
-Read-only host profiles reject `remote_apply_patch`, `remote_write`, and `remote_run` before launching their command child. MCP annotations support approval UX but are not the enforcement boundary; server-side policy is.
 
 ## Local installation transaction
 
