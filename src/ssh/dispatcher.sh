@@ -276,7 +276,13 @@ run_request() {
                         fi
                         ;;
                     orphan-streams)
-                        run_command="(
+                        if [ -n "${FAKE_SSH_ORPHAN_ONCE_MARKER-}" ] &&
+                           [ -e "$FAKE_SSH_ORPHAN_ONCE_MARKER" ]; then
+                            :
+                        else
+                            [ -z "${FAKE_SSH_ORPHAN_ONCE_MARKER-}" ] ||
+                                : >"$FAKE_SSH_ORPHAN_ONCE_MARKER"
+                            run_command="(
     trap '' TERM HUP
     sleep \"\${FAKE_SSH_SLEEP_SECONDS-10}\"
 ) &
@@ -284,6 +290,7 @@ orphan_pid=\$!
 if [ -n \"\${FAKE_SSH_CHILD_PID_FILE-}\" ]; then printf \"%s\\\\n\" \"\$orphan_pid\" >\"\$FAKE_SSH_CHILD_PID_FILE\"; fi
 if [ -n \"\${FAKE_SSH_PARENT_EXIT_FILE-}\" ]; then printf \"%s\\\\n\" exited >\"\$FAKE_SSH_PARENT_EXIT_FILE\"; fi
 exit 0"
+                        fi
                         ;;
                     orphan-stdin)
                         run_command="exec 3<&0
