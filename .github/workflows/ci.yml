@@ -73,12 +73,6 @@ jobs:
       - name: Run Clippy
         run: cargo +"$RUST_TOOLCHAIN" clippy --all-targets --all-features --locked -- -D warnings
 
-      - name: Diagnose dispatcher session
-        run: >-
-          cargo +"$RUST_TOOLCHAIN" test --lib --locked
-          ssh::session::tests::dispatcher_chunks_streams_to_the_configured_frame_limit
-          -- --exact --nocapture
-
       - name: Run tests
         env:
           CODEX_SSH_BRIDGE_PERSISTENT_HELPER_INTEGRATION: "1"

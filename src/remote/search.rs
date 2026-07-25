@@ -169,10 +169,13 @@ fi
 wait "$producer" 2>/dev/null
 wait_status=$?
 producer_status=$(cat "$status" 2>/dev/null || :)
+engine_status=$(cat "$engine_error" 2>/dev/null || :)
 if [ "$head_status" -ne 0 ]; then exit 2; fi
 if [ "$capped" -eq 0 ]; then
-    if [ -s "$engine_error" ] || [ "$wait_status" -ne 0 ] ||
+    if [ -n "$engine_status" ] || [ "$wait_status" -ne 0 ] ||
        [ "$producer_status" != 0 ]; then exit 2; fi
+else
+    case "$engine_status" in ''|141|143) ;; *) exit 2 ;; esac
 fi
 cat "$data"
 if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
@@ -246,10 +249,13 @@ fi
 wait "$producer" 2>/dev/null
 wait_status=$?
 producer_status=$(cat "$status" 2>/dev/null || :)
+engine_status=$(cat "$engine_error" 2>/dev/null || :)
 if [ "$head_status" -ne 0 ]; then exit 2; fi
 if [ "$capped" -eq 0 ]; then
-    if [ -s "$engine_error" ] || [ "$wait_status" -ne 0 ] ||
+    if [ -n "$engine_status" ] || [ "$wait_status" -ne 0 ] ||
        [ "$producer_status" != 0 ]; then exit 2; fi
+else
+    case "$engine_status" in ''|141|143) ;; *) exit 2 ;; esac
 fi
 cat "$data"
 if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
