@@ -285,7 +285,7 @@ pub(super) async fn search(
                 host: request.host.clone(),
                 script: CANDIDATE_SCRIPT,
                 args: vec![
-                    request.path.absolute().to_owned(),
+                    request.path.as_str().to_owned(),
                     (limits.max_frame_bytes + 1).to_string(),
                 ],
                 stdin: None,
@@ -336,7 +336,7 @@ pub(super) async fn search(
         .host(&request.host)
         .map_err(&attach_candidates)?;
     let path_is_within_configured_root =
-        RemotePath::resolve(&configured.profile.root, request.path.absolute()).is_ok();
+        RemotePath::resolve(&configured.profile.root, request.path.as_str()).is_ok();
     let operation_root = if request.absolute_path && !path_is_within_configured_root {
         crate::REMOTE_OPERATION_ROOT
     } else {
@@ -348,7 +348,7 @@ pub(super) async fn search(
     let display_root = if path_is_within_configured_root {
         configured.profile.root.as_bytes()
     } else {
-        request.path.absolute().as_bytes()
+        request.path.as_str().as_bytes()
     };
     let mut candidates = Vec::with_capacity(10_001);
     let mut candidate_count = 0usize;

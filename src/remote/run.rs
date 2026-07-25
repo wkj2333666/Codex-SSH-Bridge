@@ -49,7 +49,7 @@ pub(super) async fn run(
             crate::ssh::RunRequest {
                 host: host_name.clone(),
                 command: request.command,
-                cwd: cwd.absolute().to_owned(),
+                cwd: cwd.as_str().to_owned(),
                 shell: map_shell(request.shell),
                 stdin,
                 timeout: Duration::from_millis(timeout_ms),

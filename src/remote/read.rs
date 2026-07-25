@@ -108,7 +108,7 @@ pub(super) async fn read(
                     host: request.host.clone(),
                     script: READ_SCRIPT,
                     args: vec![
-                        path.absolute().to_owned(),
+                        path.as_str().to_owned(),
                         request.start_line.to_string(),
                         request.max_lines.to_string(),
                         remaining.to_string(),
@@ -141,7 +141,7 @@ pub(super) async fn read(
             .await
             .map_err(&attach)?;
         let fields = nul_fields(&stderr).map_err(&attach)?;
-        let actual_path = encode_bytes(path.absolute().as_bytes());
+        let actual_path = encode_bytes(path.as_str().as_bytes());
         let relative_path = encode_bytes(path.relative().as_bytes());
         if fields.first() != Some(&b"OK".as_slice()) {
             if fields.len() != 1 {

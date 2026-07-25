@@ -1033,7 +1033,7 @@ pub(super) async fn execute_preflighted_write_at_root(
                 &result.shell,
                 result.helper_mode,
             ),
-            actual_path: encode_bytes(resolved.path.absolute().as_bytes()),
+            actual_path: encode_bytes(resolved.path.as_str().as_bytes()),
             relative_path: encode_bytes(resolved.path.relative().as_bytes()),
             operation,
             raw_bytes: size,
@@ -1112,7 +1112,7 @@ pub(super) async fn execute_preflighted_delete_at_root(
     match protocol {
         DeleteProtocol::Success { sha256 } => Ok((
             GuardedDeleteResult {
-                actual_path: encode_bytes(resolved.path.absolute().as_bytes()),
+                actual_path: encode_bytes(resolved.path.as_str().as_bytes()),
                 relative_path: encode_bytes(resolved.path.relative().as_bytes()),
                 deleted_sha256: sha256,
                 absence_confirmed: true,
@@ -1316,7 +1316,7 @@ fn prepare_mutation_path(
     validate_write_path(requested)?;
     let path = super::resolve_path(&resolved_host.profile.root, requested)?;
     let configured_root = RemotePath::resolve(&resolved_host.profile.root, ".")?;
-    if path.absolute() == configured_root.absolute() {
+    if path.as_str() == configured_root.as_str() {
         let message = match target {
             MutationTarget::Write => "write target must not be the configured root",
             MutationTarget::Delete => "delete target must not be the configured root",
@@ -1324,7 +1324,7 @@ fn prepare_mutation_path(
         };
         return Err(BridgeError::invalid_argument(message));
     }
-    let (parent, basename) = split_parent_basename(path.absolute())?;
+    let (parent, basename) = split_parent_basename(path.as_str())?;
     Ok(PreparedMutationPath {
         host,
         path,

@@ -156,7 +156,7 @@ pub(super) async fn list(
                 host: request.host.clone(),
                 script: LIST_SCRIPT,
                 args: vec![
-                    request.path.absolute().to_owned(),
+                    request.path.as_str().to_owned(),
                     request.depth.to_string(),
                     if request.include_hidden { "1" } else { "0" }.to_owned(),
                     request.max_entries.to_string(),
@@ -190,7 +190,7 @@ pub(super) async fn list(
         };
         return Err(attach(error));
     }
-    let root = request.path.absolute().as_bytes();
+    let root = request.path.as_str().as_bytes();
     let mut cursor = SpoolCursor::new(
         &result.output,
         StreamKind::Stdout,
@@ -301,7 +301,7 @@ pub(super) async fn stat(
     let limits = runner.config().host(&request.host)?.limits;
     let mut stdin = Vec::new();
     for path in &request.paths {
-        stdin.extend_from_slice(path.absolute().as_bytes());
+        stdin.extend_from_slice(path.as_str().as_bytes());
         stdin.push(0);
     }
     let owner = InternalSpoolOwner::new();
@@ -353,7 +353,7 @@ pub(super) async fn stat(
         if actual != observed_actual {
             return Err(attach(protocol_error("stat response order is invalid")));
         }
-        let actual_path = encode_bytes(requested.absolute().as_bytes());
+        let actual_path = encode_bytes(requested.as_str().as_bytes());
         let relative_path = encode_bytes(requested.relative().as_bytes());
         if status == b"OK" {
             let mode = cursor

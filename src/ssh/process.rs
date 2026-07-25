@@ -1713,7 +1713,7 @@ fn pin_fixed_inputs(
                 false,
             )
         })?;
-        *argument = root_relative_one(configured.absolute(), argument)?;
+        *argument = root_relative_one(configured.as_str(), argument)?;
     }
     if rooted.stdin_nul_paths {
         let stdin = stdin.ok_or_else(|| {
@@ -1732,10 +1732,8 @@ fn pin_fixed_inputs(
         }
         let mut rewritten = Vec::with_capacity(stdin.len());
         for field in stdin[..stdin.len() - 1].split(|byte| *byte == 0) {
-            rewritten.extend_from_slice(&root_relative_bytes(
-                configured.absolute().as_bytes(),
-                field,
-            )?);
+            rewritten
+                .extend_from_slice(&root_relative_bytes(configured.as_str().as_bytes(), field)?);
             rewritten.push(0);
         }
         *stdin = rewritten;

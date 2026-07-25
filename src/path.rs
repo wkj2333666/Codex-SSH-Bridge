@@ -1,6 +1,6 @@
 #![allow(
     clippy::result_large_err,
-    reason = "Task 1 requires RemotePath::resolve to return the exact BridgeResult shape"
+    reason = "remote path validation returns the shared BridgeResult shape"
 )]
 
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
@@ -12,6 +12,22 @@ pub struct RemotePath {
 }
 
 impl RemotePath {
+    pub fn absolute(requested: &str) -> BridgeResult<Self> {
+        if requested.as_bytes().contains(&0) {
+            return Err(BridgeError::invalid_argument(
+                "NUL is not valid in a remote path",
+            ));
+        }
+        if !requested.starts_with('/') {
+            return Err(BridgeError::new(
+                ErrorCode::RemoteAbsolutePathRequired,
+                "remote paths must be absolute",
+                false,
+            ));
+        }
+        Self::resolve("/", requested)
+    }
+
     pub fn resolve(root: &str, requested: &str) -> BridgeResult<Self> {
         if root.as_bytes().contains(&0) || requested.as_bytes().contains(&0) {
             return Err(BridgeError::invalid_argument(
@@ -45,7 +61,7 @@ impl RemotePath {
         Ok(Self { absolute, relative })
     }
 
-    pub fn absolute(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.absolute
     }
 

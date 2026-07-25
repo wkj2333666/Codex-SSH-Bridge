@@ -451,7 +451,7 @@ fn resolve_list(config: &Config, request: ListRequest) -> BridgeResult<ResolvedL
             "list max_entries must be between 1 and 10000",
         ));
     }
-    validate_frame(host.limits, [path.absolute().len()])?;
+    validate_frame(host.limits, [path.as_str().len()])?;
     Ok(ResolvedList {
         host: request.host,
         path,
@@ -471,7 +471,7 @@ fn resolve_stat(config: &Config, request: StatRequest) -> BridgeResult<ResolvedS
     let paths = resolve_paths(&host.profile.root, &request.paths)?;
     validate_frame(
         host.limits,
-        paths.iter().map(|path| path.absolute().len() + 1),
+        paths.iter().map(|path| path.as_str().len() + 1),
     )?;
     Ok(ResolvedStat {
         host: request.host,
@@ -510,7 +510,7 @@ fn resolve_read(config: &Config, request: ReadRequest) -> BridgeResult<ResolvedR
     }
     validate_frame(
         host.limits,
-        paths.iter().map(|path| path.absolute().len() + 1),
+        paths.iter().map(|path| path.as_str().len() + 1),
     )?;
     Ok(ResolvedRead {
         host: request.host,
@@ -554,7 +554,7 @@ fn resolve_search(config: &Config, request: SearchRequest) -> BridgeResult<Resol
     validate_frame(
         host.limits,
         std::iter::once(request.query.len())
-            .chain(std::iter::once(path.absolute().len()))
+            .chain(std::iter::once(path.as_str().len()))
             .chain(request.globs.iter().map(|glob| glob.len() + 1)),
     )?;
     Ok(ResolvedSearch {

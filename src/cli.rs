@@ -402,7 +402,7 @@ pub async fn mount_sshfs_with_executable(
     let argv = build_sshfs_argv(
         &policy,
         host,
-        remote.absolute(),
+        remote.as_str(),
         mountpoint.path(),
         arguments.allow_nonempty,
     )?;
@@ -427,7 +427,7 @@ pub async fn mount_sshfs_with_executable(
     Ok(json!({
         "remote": true,
         "host": arguments.host,
-        "configured_remote_path": remote.absolute(),
+        "configured_remote_path": remote.as_str(),
         "physical_root": capability.physical_root,
         "mountpoint": mountpoint.path(),
         "read_only": host.profile.read_only,

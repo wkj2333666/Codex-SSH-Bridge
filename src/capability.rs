@@ -862,7 +862,7 @@ pub fn parse_probe_output(
     if required(&records, "CODEX_SSH_PROBE")? != "1" {
         return Err(protocol_error("unsupported capability protocol version"));
     }
-    if required(&records, "REQUESTED_ROOT")? != expected_requested_root.absolute() {
+    if required(&records, "REQUESTED_ROOT")? != expected_requested_root.as_str() {
         return Err(protocol_error(
             "capability output does not match the requested root",
         ));
@@ -879,7 +879,7 @@ pub fn parse_probe_output(
     }
     let normalized = RemotePath::resolve("/", physical_root)
         .map_err(|_| protocol_error("physical root is invalid"))?;
-    if normalized.absolute() != physical_root {
+    if normalized.as_str() != physical_root {
         return Err(protocol_error("physical root is not normalized"));
     }
     let root_device = parse_root_identity_number(required(&records, "ROOT_DEVICE")?)?;

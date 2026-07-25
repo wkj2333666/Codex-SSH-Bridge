@@ -482,7 +482,7 @@ fn runtime_paths_reject_a_world_writable_intermediate_ancestor() {
 fn parser_accepts_bash_sh_and_newlines_without_conflating_requested_and_physical_roots() {
     let expected_bash = RemotePath::resolve("/srv/requested\nroot", ".").unwrap();
     let bash = parse_probe_output(
-        &bash_probe(expected_bash.absolute(), "/srv/physical\nroot"),
+        &bash_probe(expected_bash.as_str(), "/srv/physical\nroot"),
         &expected_bash,
     )
     .unwrap();
@@ -509,7 +509,7 @@ fn parser_accepts_bash_sh_and_newlines_without_conflating_requested_and_physical
 #[test]
 fn parser_accepts_optional_linux_architecture_records_and_keeps_old_fixtures_compatible() {
     let expected = RemotePath::resolve("/srv/project", ".").unwrap();
-    let mut output = String::from_utf8(sh_probe(expected.absolute(), "/srv/project")).unwrap();
+    let mut output = String::from_utf8(sh_probe(expected.as_str(), "/srv/project")).unwrap();
     output = output.replace(
         "ROOT_INODE=2\0",
         "ROOT_INODE=2\0KERNEL_NAME=Linux\0MACHINE_ARCH=x86_64\0",
@@ -519,7 +519,7 @@ fn parser_accepts_optional_linux_architecture_records_and_keeps_old_fixtures_com
     assert_eq!(capability.machine_arch.as_deref(), Some("x86_64"));
 
     let legacy =
-        parse_probe_output(&sh_probe(expected.absolute(), "/srv/project"), &expected).unwrap();
+        parse_probe_output(&sh_probe(expected.as_str(), "/srv/project"), &expected).unwrap();
     assert_eq!(legacy.kernel_name, None);
     assert_eq!(legacy.machine_arch, None);
 }
@@ -527,7 +527,7 @@ fn parser_accepts_optional_linux_architecture_records_and_keeps_old_fixtures_com
 #[test]
 fn parser_rejects_invalid_optional_platform_records() {
     let expected = RemotePath::resolve("/srv/project", ".").unwrap();
-    let base = String::from_utf8(sh_probe(expected.absolute(), "/srv/project")).unwrap();
+    let base = String::from_utf8(sh_probe(expected.as_str(), "/srv/project")).unwrap();
     let suffixes = vec![
         "KERNEL_NAME=Linux\nother\0".to_owned(),
         format!("MACHINE_ARCH={}\0", "x".repeat(65)),
@@ -544,13 +544,13 @@ fn parser_rejects_invalid_optional_platform_records() {
 fn login_shell_probe_field_is_closed_bounded_and_optional() {
     let expected = RemotePath::resolve("/srv/project", ".").unwrap();
     let missing = parse_probe_output(
-        &sh_probe_with_login(expected.absolute(), "/srv/project", ""),
+        &sh_probe_with_login(expected.as_str(), "/srv/project", ""),
         &expected,
     )
     .unwrap();
     assert_eq!(missing.login_shell, None);
 
-    let valid = String::from_utf8(sh_probe(expected.absolute(), "/srv/project")).unwrap();
+    let valid = String::from_utf8(sh_probe(expected.as_str(), "/srv/project")).unwrap();
     for malformed in [
         valid.replace("LOGIN_SHELL=/bin/sh\0", ""),
         valid.replace(
@@ -568,7 +568,7 @@ fn login_shell_probe_field_is_closed_bounded_and_optional() {
         format!("/{}", "x".repeat(4096)),
     ] {
         let error = parse_probe_output(
-            &sh_probe_with_login(expected.absolute(), "/srv/project", &invalid),
+            &sh_probe_with_login(expected.as_str(), "/srv/project", &invalid),
             &expected,
         )
         .unwrap_err();
@@ -654,13 +654,12 @@ fn task78_physical_root_byte_bound_ascii_and_utf8_are_enforced_before_context() 
     ] {
         assert_eq!(exact.len(), 65_536);
         let capability =
-            parse_probe_output(&sh_probe(expected.absolute(), &exact), &expected).unwrap();
+            parse_probe_output(&sh_probe(expected.as_str(), &exact), &expected).unwrap();
         assert_eq!(capability.physical_root, exact);
 
         let over = format!("{exact}a");
         assert_eq!(over.len(), 65_537);
-        let error =
-            parse_probe_output(&sh_probe(expected.absolute(), &over), &expected).unwrap_err();
+        let error = parse_probe_output(&sh_probe(expected.as_str(), &over), &expected).unwrap_err();
         assert_eq!(error.code, ErrorCode::ProtocolError);
         assert_eq!(error.details.physical_root, None);
     }
@@ -672,7 +671,7 @@ fn task78_physical_root_byte_bound_bash_version_and_spoofed_values_are_enforced(
     for exact in ["v".repeat(256), format!("{}aa", "é".repeat(127))] {
         assert_eq!(exact.len(), 256);
         let capability = parse_probe_output(
-            &bash_probe_with_version(expected.absolute(), "/srv/project", &exact),
+            &bash_probe_with_version(expected.as_str(), "/srv/project", &exact),
             &expected,
         )
         .unwrap();
@@ -687,7 +686,7 @@ fn task78_physical_root_byte_bound_bash_version_and_spoofed_values_are_enforced(
         let over = format!("{exact}a");
         assert_eq!(over.len(), 257);
         let error = parse_probe_output(
-            &bash_probe_with_version(expected.absolute(), "/srv/project", &over),
+            &bash_probe_with_version(expected.as_str(), "/srv/project", &over),
             &expected,
         )
         .unwrap_err();
@@ -697,7 +696,7 @@ fn task78_physical_root_byte_bound_bash_version_and_spoofed_values_are_enforced(
 
     let spoofed = "$(touch /tmp/codex-ssh-bridge-must-not-run)";
     let capability = parse_probe_output(
-        &bash_probe_with_version(expected.absolute(), "/srv/project", spoofed),
+        &bash_probe_with_version(expected.as_str(), "/srv/project", spoofed),
         &expected,
     )
     .unwrap();
