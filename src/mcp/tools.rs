@@ -50,7 +50,7 @@ impl ToolService for RemoteMcpTools {
                         .list(
                             ListRequest {
                                 host: arguments.host,
-                                path: arguments.path,
+                                path: Some(arguments.path),
                                 depth: arguments.depth,
                                 include_hidden: arguments.include_hidden,
                                 max_entries: arguments.max_entries,
@@ -78,7 +78,7 @@ impl ToolService for RemoteMcpTools {
                             SearchRequest {
                                 host: arguments.host,
                                 query: arguments.query,
-                                path: arguments.path,
+                                path: Some(arguments.path),
                                 globs: arguments.globs,
                                 max_results: arguments.max_results,
                                 binary: arguments.binary,
@@ -151,7 +151,7 @@ impl ToolService for RemoteMcpTools {
                             RemoteRunRequest {
                                 host: arguments.host,
                                 command: arguments.command,
-                                cwd: arguments.cwd,
+                                cwd: Some(arguments.cwd),
                                 shell: map_run_shell(arguments.shell),
                                 timeout_ms: arguments.timeout_ms,
                                 stdin: arguments.stdin.map(|stdin| RunStdin {
@@ -440,9 +440,7 @@ struct HostsArgs {}
 #[serde(deny_unknown_fields)]
 struct ListArgs {
     host: String,
-    // Kept optional for direct callers compiled against the pre-absolute-path
-    // Rust API; the published MCP schema requires this field.
-    path: Option<String>,
+    path: String,
     depth: Option<u32>,
     include_hidden: Option<bool>,
     max_entries: Option<usize>,
@@ -462,9 +460,7 @@ struct StatArgs {
 struct SearchArgs {
     host: String,
     query: String,
-    // See ListArgs::path. The remote resolver rejects relative paths for
-    // aliases discovered without a compatibility profile.
-    path: Option<String>,
+    path: String,
     #[serde(default)]
     globs: Vec<String>,
     max_results: Option<usize>,
@@ -518,8 +514,7 @@ struct WriteArgs {
 struct RunArgs {
     host: String,
     command: String,
-    // See ListArgs::path. The published MCP schema requires an absolute cwd.
-    cwd: Option<String>,
+    cwd: String,
     #[serde(default)]
     shell: ToolRunShell,
     timeout_ms: Option<u64>,
@@ -626,7 +621,7 @@ fn validate_parsed_arguments(
         ParsedToolArguments::Hosts(_) => Ok(()),
         ParsedToolArguments::List(arguments) => {
             validate_host(&arguments.host)?;
-            validate_optional_path(arguments.path.as_deref())?;
+            validate_path(&arguments.path)?;
             validate_optional_range(arguments.depth, 1, 32)?;
             validate_optional_range(arguments.max_entries, 1, 10_000)
         }
@@ -637,7 +632,7 @@ fn validate_parsed_arguments(
         ParsedToolArguments::Search(arguments) => {
             validate_host(&arguments.host)?;
             validate_chars(&arguments.query, 1, 65_536)?;
-            validate_optional_path(arguments.path.as_deref())?;
+            validate_path(&arguments.path)?;
             if arguments.globs.len() > 128 {
                 return Err(Constraint);
             }
@@ -684,7 +679,7 @@ fn validate_parsed_arguments(
         ParsedToolArguments::Run(arguments) => {
             validate_host(&arguments.host)?;
             validate_chars(&arguments.command, 1, 8_388_608)?;
-            validate_optional_path(arguments.cwd.as_deref())?;
+            validate_path(&arguments.cwd)?;
             validate_optional_range(arguments.timeout_ms, 1, 3_600_000)?;
             if let Some(stdin) = &arguments.stdin {
                 validate_chars(&stdin.value, 0, 5_592_408)?;
@@ -718,12 +713,13 @@ fn validate_paths(paths: &[String], maximum: usize) -> Result<(), ArgumentValida
     paths.iter().try_for_each(|path| validate_path(path))
 }
 
-fn validate_optional_path(path: Option<&str>) -> Result<(), ArgumentValidationCategory> {
-    path.map_or(Ok(()), validate_path)
-}
-
 fn validate_path(path: &str) -> Result<(), ArgumentValidationCategory> {
-    validate_chars(path, 1, 65_536)
+    validate_chars(path, 1, 65_536)?;
+    if path.starts_with('/') {
+        Ok(())
+    } else {
+        Err(ArgumentValidationCategory::Constraint)
+    }
 }
 
 fn validate_chars(
@@ -805,10 +801,13 @@ mod tests {
     fn task8_arguments_accept_one_valid_closed_object_per_tool() {
         let valid = [
             ("remote_hosts", json!({})),
-            ("remote_list", json!({"host":"dev"})),
-            ("remote_stat", json!({"host":"dev", "paths":["a"]})),
-            ("remote_search", json!({"host":"dev", "query":"needle"})),
-            ("remote_read", json!({"host":"dev", "paths":["a"]})),
+            ("remote_list", json!({"host":"dev", "path":"/"})),
+            ("remote_stat", json!({"host":"dev", "paths":["/a"]})),
+            (
+                "remote_search",
+                json!({"host":"dev", "query":"needle", "path":"/"}),
+            ),
+            ("remote_read", json!({"host":"dev", "paths":["/a"]})),
             (
                 "remote_output_read",
                 json!({"output_ref":"a".repeat(32), "stream":"stdout"}),
@@ -820,11 +819,14 @@ mod tests {
             (
                 "remote_write",
                 json!({
-                    "host":"dev", "path":"a", "content":"", "encoding":"utf8",
+                    "host":"dev", "path":"/a", "content":"", "encoding":"utf8",
                     "mode":{"kind":"create"}
                 }),
             ),
-            ("remote_run", json!({"host":"dev", "command":"true"})),
+            (
+                "remote_run",
+                json!({"host":"dev", "command":"true", "cwd":"/"}),
+            ),
         ];
         for (name, arguments) in valid {
             assert_valid(name, arguments);
@@ -832,7 +834,7 @@ mod tests {
 
         let replace = json!({
             "host":"dev",
-            "path":"a",
+            "path":"/a",
             "content":"eA==",
             "encoding":"base64",
             "mode":{"kind":"replace","expected_sha256":"0".repeat(64)}
@@ -871,9 +873,9 @@ mod tests {
             ),
             (
                 "remote_write",
-                json!({"host":"dev", "path":"a"}),
+                json!({"host":"dev", "path":"/a"}),
                 json!({
-                    "host":"dev", "path":"a", "content":"", "encoding":1,
+                    "host":"dev", "path":"/a", "content":"", "encoding":1,
                     "mode":{"kind":"create"}
                 }),
             ),
@@ -893,10 +895,13 @@ mod tests {
     fn task8_arguments_reject_unknown_root_and_nested_fields() {
         let valid = [
             ("remote_hosts", json!({})),
-            ("remote_list", json!({"host":"dev"})),
-            ("remote_stat", json!({"host":"dev", "paths":["a"]})),
-            ("remote_search", json!({"host":"dev", "query":"needle"})),
-            ("remote_read", json!({"host":"dev", "paths":["a"]})),
+            ("remote_list", json!({"host":"dev", "path":"/"})),
+            ("remote_stat", json!({"host":"dev", "paths":["/a"]})),
+            (
+                "remote_search",
+                json!({"host":"dev", "query":"needle", "path":"/"}),
+            ),
+            ("remote_read", json!({"host":"dev", "paths":["/a"]})),
             (
                 "remote_output_read",
                 json!({"output_ref":"a".repeat(32), "stream":"stdout"}),
@@ -905,11 +910,14 @@ mod tests {
             (
                 "remote_write",
                 json!({
-                    "host":"dev", "path":"a", "content":"", "encoding":"utf8",
+                    "host":"dev", "path":"/a", "content":"", "encoding":"utf8",
                     "mode":{"kind":"create"}
                 }),
             ),
-            ("remote_run", json!({"host":"dev", "command":"true"})),
+            (
+                "remote_run",
+                json!({"host":"dev", "command":"true", "cwd":"/"}),
+            ),
         ];
         for (name, mut arguments) in valid {
             arguments["extra"] = json!(true);
@@ -919,13 +927,13 @@ mod tests {
         assert_invalid(
             "remote_write",
             json!({
-                "host":"dev", "path":"a", "content":"", "encoding":"utf8",
+                "host":"dev", "path":"/a", "content":"", "encoding":"utf8",
                 "mode":{"kind":"create", "extra":true}
             }),
         );
         let bad_nested = json!({
             "host":"dev",
-            "command":"true",
+            "command":"true", "cwd":"/",
             "stdin":{"encoding":"utf8","value":"","extra":true}
         });
         assert_invalid("remote_run", bad_nested);
@@ -939,9 +947,9 @@ mod tests {
             "dev!".to_owned(),
             "a".repeat(129),
         ] {
-            assert_invalid("remote_list", json!({"host":host}));
+            assert_invalid("remote_list", json!({"host":host, "path":"/"}));
         }
-        assert_valid("remote_list", json!({"host":"a".repeat(128)}));
+        assert_valid("remote_list", json!({"host":"a".repeat(128), "path":"/"}));
 
         for arguments in [
             json!({"host":"dev", "path":""}),
