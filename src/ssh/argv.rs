@@ -5,7 +5,6 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::config::ResolvedHost;
 use crate::error::{BridgeError, BridgeResult};
 
 use super::SshPolicy;
@@ -23,7 +22,7 @@ pub fn build_ssh_argv(policy: &SshPolicy, host: &str, remote_command: &str) -> V
 
 pub fn build_sshfs_argv(
     policy: &SshPolicy,
-    host: ResolvedHost<'_>,
+    host: &str,
     remote_path: &str,
     mountpoint: &Path,
     allow_nonempty: bool,
@@ -40,14 +39,11 @@ pub fn build_sshfs_argv(
     }
 
     let mut argv = Vec::with_capacity(policy.options.len() + 24);
-    argv.push(OsString::from(format!("{}:{remote_path}", host.alias)));
+    argv.push(OsString::from(format!("{host}:{remote_path}")));
     argv.push(mountpoint.as_os_str().to_owned());
     push_option(&mut argv, "ssh_command=/usr/bin/ssh");
     argv.extend(policy.options.iter().cloned());
     push_option(&mut argv, "reconnect");
-    if host.profile.read_only {
-        push_option(&mut argv, "ro");
-    }
     if allow_nonempty {
         push_option(&mut argv, "nonempty");
     }

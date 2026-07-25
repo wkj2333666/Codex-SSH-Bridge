@@ -139,14 +139,14 @@ fn option_count(argv: &[std::ffi::OsString], expected: &str) -> usize {
 }
 
 #[test]
-fn task9_sshfs_argv_has_exact_hardening_reconnect_and_forced_read_only() {
+fn task9_sshfs_argv_has_exact_hardening_without_bridge_owned_read_only_policy() {
     let private = tempfile::TempDir::new().unwrap();
     let (config, runtime) = sshfs_policy(&private, true);
-    let host = config.host("future-box").unwrap();
-    let policy = SshPolicy::for_host(&config, host, &runtime, "resolved identity").unwrap();
+    let policy =
+        SshPolicy::for_host("future-box", config.limits(), &runtime, "resolved identity").unwrap();
     let argv = build_sshfs_argv(
         &policy,
-        host,
+        "future-box",
         "/srv/project/path with spaces",
         std::path::Path::new("/mnt/remote project"),
         true,
@@ -168,7 +168,6 @@ fn task9_sshfs_argv_has_exact_hardening_reconnect_and_forced_read_only() {
         "ControlMaster=auto",
         "ControlPersist=300",
         "reconnect",
-        "ro",
         "nonempty",
     ] {
         assert!(
@@ -176,6 +175,7 @@ fn task9_sshfs_argv_has_exact_hardening_reconnect_and_forced_read_only() {
             "missing {option:?}: {argv:?}"
         );
     }
+    assert!(!option_is_distinct(&argv, "ro"));
     for option in ["ServerAliveInterval=15", "ServerAliveCountMax=3"] {
         assert_eq!(
             option_count(&argv, option),
@@ -198,11 +198,11 @@ fn task9_sshfs_argv_has_exact_hardening_reconnect_and_forced_read_only() {
 fn task9_sshfs_argv_does_not_add_ro_or_nonempty_for_normal_read_write_mount() {
     let private = tempfile::TempDir::new().unwrap();
     let (config, runtime) = sshfs_policy(&private, false);
-    let host = config.host("future-box").unwrap();
-    let policy = SshPolicy::for_host(&config, host, &runtime, "resolved identity").unwrap();
+    let policy =
+        SshPolicy::for_host("future-box", config.limits(), &runtime, "resolved identity").unwrap();
     let argv = build_sshfs_argv(
         &policy,
-        host,
+        "future-box",
         "/srv/project",
         std::path::Path::new("/mnt/project"),
         false,
@@ -523,21 +523,8 @@ safe-control:\x1b[31m\n";
 #[test]
 fn verbose_doctor_ssh_g_argv_uses_effective_timeout_and_exact_hardening_once() {
     let mut config = Config::default();
-    config.hosts.insert(
-        "dev".to_owned(),
-        HostProfile {
-            root: "/srv/project".to_owned(),
-            description: None,
-            read_only: false,
-            limits: HostLimitOverrides {
-                connect_timeout_ms: Some(2_501),
-                ..HostLimitOverrides::default()
-            },
-        },
-    );
-    let host = config.host("dev").unwrap();
-    assert_eq!(host.limits.connect_timeout_ms, 2_501);
-    let argv = build_verbose_ssh_diagnostic_argv(host);
+    config.limits.connect_timeout_ms = 2_501;
+    let argv = build_verbose_ssh_diagnostic_argv("dev", config.limits().connect_timeout_ms);
 
     assert_eq!(argv.first(), Some(&OsString::from("-vvv")));
     assert_eq!(argv.iter().filter(|argument| *argument == "-G").count(), 1);

@@ -59,7 +59,7 @@ fn policy(
     paths: &RuntimePaths,
     identity: &str,
 ) -> SshPolicy {
-    SshPolicy::for_host(config, config.host("dev-box").unwrap(), paths, identity).unwrap()
+    SshPolicy::for_host("dev-box", config.limits(), paths, identity).unwrap()
 }
 
 fn bash_probe(requested: &str, physical: &str) -> Vec<u8> {
@@ -301,8 +301,8 @@ fn control_path_accepts_107_bytes_and_rejects_108_bytes() {
     let rejected_base = base_for_control_path_bytes(&rejected_container, 108);
     let rejected_paths = RuntimePaths::ensure_from_base(&rejected_base).unwrap();
     let error = SshPolicy::for_host(
-        &config,
-        config.host("dev-box").unwrap(),
+        "dev-box",
+        config.limits(),
         &rejected_paths,
         "stable identity",
     )

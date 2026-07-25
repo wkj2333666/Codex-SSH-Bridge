@@ -2079,21 +2079,12 @@ fn task4_request_and_result_shapes_are_closed_and_serializable() {
 
     let hosts = HostsResult {
         hosts: vec![HostInfo {
-            remote: true,
             host: "dev".to_owned(),
-            configured_root: "/root".to_owned(),
-            description: None,
-            read_only: true,
-            physical_root: None,
-            shell: None,
         }],
     };
     assert_eq!(
         serde_json::to_value(hosts).unwrap(),
-        serde_json::json!({"hosts":[{
-            "remote":true,"host":"dev","configured_root":"/root","description":null,
-            "read_only":true,"physical_root":null,"shell":null
-        }]})
+        serde_json::json!({"hosts":[{"host":"dev"}]})
     );
 
     let list = ListResult {

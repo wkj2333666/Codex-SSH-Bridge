@@ -87,7 +87,7 @@ pub(super) async fn read(
     cancel: CancellationToken,
 ) -> BridgeResult<ReadResult> {
     let runner = &bridge.runner;
-    let limits = runner.config().host(&request.host)?.limits;
+    let limits = runner.config().limits();
     let mut remaining = request.max_bytes;
     let mut files = Vec::with_capacity(request.paths.len());
     let mut returned_raw_bytes = 0u64;

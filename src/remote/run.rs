@@ -17,26 +17,29 @@ pub(super) async fn run(
     request: RemoteRunRequest,
     cancel: CancellationToken,
 ) -> BridgeResult<RemoteRunResult> {
-    let host = bridge.runner.config().host(&request.host)?;
-    if host.profile.read_only {
-        return Err(BridgeError::new(
-            ErrorCode::ReadOnlyHost,
-            "remote host is configured read-only",
-            false,
-        ));
-    }
+    bridge
+        .runner
+        .config()
+        .require_discovered_alias(&request.host)?;
+    let limits = bridge.runner.config().limits();
     if request.command.is_empty() || request.command.as_bytes().contains(&0) {
         return Err(BridgeError::invalid_argument(
             "remote command must be nonempty and contain no NUL",
         ));
     }
 
-    let requested_cwd = request.cwd.as_deref().unwrap_or(".");
+    let requested_cwd = request.cwd.as_deref().ok_or_else(|| {
+        BridgeError::new(
+            ErrorCode::RemoteAbsolutePathRequired,
+            "remote cwd must be provided as an absolute path",
+            false,
+        )
+    })?;
     super::validate_path(requested_cwd)?;
-    let cwd = super::resolve_path(host.profile.root.as_str(), requested_cwd)?;
-    let stdin = decode_stdin(request.stdin, host.limits.max_write_bytes)?;
-    let timeout_ms = request.timeout_ms.unwrap_or(host.limits.command_timeout_ms);
-    if timeout_ms == 0 || timeout_ms > host.limits.command_timeout_ms {
+    let cwd = super::resolve_path(requested_cwd)?;
+    let stdin = decode_stdin(request.stdin, limits.max_write_bytes)?;
+    let timeout_ms = request.timeout_ms.unwrap_or(limits.command_timeout_ms);
+    if timeout_ms == 0 || timeout_ms > limits.command_timeout_ms {
         return Err(BridgeError::invalid_argument(
             "command timeout exceeds the configured limit",
         ));

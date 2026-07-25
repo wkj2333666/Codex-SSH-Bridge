@@ -994,7 +994,7 @@ pub(super) async fn execute_preflighted_write_at_root(
     mut resolved: ResolvedWrite,
     cancel: CancellationToken,
 ) -> BridgeResult<WriteResult> {
-    let limits = bridge.runner.config().host(&resolved.host)?.limits;
+    let limits = bridge.runner.config().limits();
     let args = fixed_args(&resolved);
     let stdin = std::mem::take(&mut resolved.content);
     let owner = InternalSpoolOwner::new();
@@ -1085,7 +1085,7 @@ pub(super) async fn execute_preflighted_delete_at_root(
     resolved: ResolvedDelete,
     cancel: CancellationToken,
 ) -> BridgeResult<(GuardedDeleteResult, super::RemoteContext)> {
-    let limits = bridge.runner.config().host(&resolved.host)?.limits;
+    let limits = bridge.runner.config().limits();
     let owner = InternalSpoolOwner::new();
     let request = FixedRunRequest {
         kind: FixedOperationKind::Mutation,
@@ -1187,7 +1187,7 @@ pub(super) fn preflight_write_resolved(
     encoding: WriteEncoding,
     mode: WriteMode,
 ) -> BridgeResult<ResolvedWrite> {
-    let limits = bridge.runner.config().host(&prepared.host)?.limits;
+    let limits = bridge.runner.config().limits();
     let (operation, expected_sha256) = match mode {
         WriteMode::Create => (WriteOperation::Create, None),
         WriteMode::Replace { expected_sha256 } => {
@@ -1305,22 +1305,14 @@ fn prepare_mutation_path(
     requested: &str,
     target: MutationTarget,
 ) -> BridgeResult<PreparedMutationPath> {
-    let resolved_host = bridge.runner.config().host(&host)?;
-    if resolved_host.profile.read_only {
-        return Err(BridgeError::new(
-            ErrorCode::ReadOnlyHost,
-            "remote host is configured read-only",
-            false,
-        ));
-    }
+    bridge.runner.config().require_discovered_alias(&host)?;
     validate_write_path(requested)?;
-    let path = super::resolve_path(&resolved_host.profile.root, requested)?;
-    let configured_root = RemotePath::resolve(&resolved_host.profile.root, ".")?;
-    if path.as_str() == configured_root.as_str() {
+    let path = super::resolve_path(requested)?;
+    if path.as_str() == "/" {
         let message = match target {
-            MutationTarget::Write => "write target must not be the configured root",
-            MutationTarget::Delete => "delete target must not be the configured root",
-            MutationTarget::Patch => "patch target must not be the configured root",
+            MutationTarget::Write => "write target must not be the remote filesystem root",
+            MutationTarget::Delete => "delete target must not be the remote filesystem root",
+            MutationTarget::Patch => "patch target must not be the remote filesystem root",
         };
         return Err(BridgeError::invalid_argument(message));
     }

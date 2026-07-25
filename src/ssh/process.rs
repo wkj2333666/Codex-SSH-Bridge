@@ -208,9 +208,9 @@ impl SshRunner {
             elapsed_us: 0,
             bytes: None,
         });
-        let host = self.config.host(&request.host)?;
-        let root = operation_root_for_path(&host.profile.root, &request.cwd);
-        let limits = host.limits;
+        self.config.require_discovered_alias(&request.host)?;
+        let root = crate::REMOTE_OPERATION_ROOT.to_owned();
+        let limits = self.config.limits();
         validate_request(&request, limits)?;
 
         let initializer = self.initializer(&request.host).await;
@@ -571,9 +571,9 @@ impl SshRunner {
         host: &str,
         cancel: &CancellationToken,
     ) -> BridgeResult<(SshPolicy, Arc<Capability>)> {
-        let resolved = self.config.host(host)?;
-        let root = resolved.profile.root.clone();
-        let limits = resolved.limits;
+        self.config.require_discovered_alias(host)?;
+        let root = crate::REMOTE_OPERATION_ROOT.to_owned();
+        let limits = self.config.limits();
         let initializer = self.initializer(host).await;
         let initialize_guard = tokio::select! {
             biased;
@@ -633,10 +633,9 @@ impl SshRunner {
         mut request: FixedRunRequest,
         cancel: CancellationToken,
     ) -> BridgeResult<FixedRunResult> {
-        let host = self.config.host(&request.host)?;
-        let limits = host.limits;
-        let absolute_paths = fixed_request_uses_absolute_paths(&request, &host.profile.root);
-        let root = operation_root(&host.profile.root, absolute_paths);
+        self.config.require_discovered_alias(&request.host)?;
+        let limits = self.config.limits();
+        let root = crate::REMOTE_OPERATION_ROOT.to_owned();
         if request.timeout.is_zero()
             || request.timeout > Duration::from_millis(limits.command_timeout_ms)
         {
@@ -878,12 +877,8 @@ impl SshRunner {
                         }
                     }
                 };
-                let policy = SshPolicy::for_host(
-                    &self.config,
-                    self.config.host(host)?,
-                    &self.runtime,
-                    &identity,
-                )?;
+                let policy =
+                    SshPolicy::for_host(host, self.config.limits(), &self.runtime, &identity)?;
                 self.policies
                     .lock()
                     .await
@@ -1747,53 +1742,6 @@ fn root_relative_one(configured_root: &str, path: &str) -> BridgeResult<String> 
         path.as_bytes(),
     )?)
     .map_err(|_| rooted_path_error())
-}
-
-fn operation_root(configured_root: &str, absolute_paths: bool) -> String {
-    if absolute_paths {
-        crate::REMOTE_OPERATION_ROOT.to_owned()
-    } else {
-        configured_root.to_owned()
-    }
-}
-
-fn operation_root_for_path(configured_root: &str, requested: &str) -> String {
-    if requested.starts_with('/') && RemotePath::resolve(configured_root, requested).is_err() {
-        crate::REMOTE_OPERATION_ROOT.to_owned()
-    } else {
-        configured_root.to_owned()
-    }
-}
-
-fn fixed_request_uses_absolute_paths(request: &FixedRunRequest, configured_root: &str) -> bool {
-    let mut saw_absolute = false;
-    for index in request.rooted_paths.argument_indices {
-        if let Some(path) = request
-            .args
-            .get(*index)
-            .filter(|path| path.starts_with('/'))
-        {
-            saw_absolute = true;
-            if RemotePath::resolve(configured_root, path).is_err() {
-                return true;
-            }
-        }
-    }
-    if let Some(stdin) = request.stdin.as_deref() {
-        for path in stdin
-            .split(|byte| *byte == 0)
-            .filter(|path| path.starts_with(b"/"))
-        {
-            saw_absolute = true;
-            if std::str::from_utf8(path)
-                .ok()
-                .is_none_or(|path| RemotePath::resolve(configured_root, path).is_err())
-            {
-                return true;
-            }
-        }
-    }
-    saw_absolute && configured_root == crate::REMOTE_OPERATION_ROOT
 }
 
 fn root_relative_bytes(configured_root: &[u8], path: &[u8]) -> BridgeResult<Vec<u8>> {

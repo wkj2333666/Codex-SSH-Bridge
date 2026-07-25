@@ -147,7 +147,7 @@ pub(super) async fn list(
     cancel: CancellationToken,
 ) -> BridgeResult<ListResult> {
     let runner = &bridge.runner;
-    let limits = runner.config().host(&request.host)?.limits;
+    let limits = runner.config().limits();
     let owner = InternalSpoolOwner::new();
     let result = bridge
         .execute_readonly_fixed(
@@ -298,7 +298,7 @@ pub(super) async fn stat(
     cancel: CancellationToken,
 ) -> BridgeResult<StatResult> {
     let runner = &bridge.runner;
-    let limits = runner.config().host(&request.host)?.limits;
+    let limits = runner.config().limits();
     let mut stdin = Vec::new();
     for path in &request.paths {
         stdin.extend_from_slice(path.as_str().as_bytes());

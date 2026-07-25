@@ -1287,13 +1287,7 @@ mod tests {
                 Arc::clone(&bridge),
                 Ok(HostsResult {
                     hosts: vec![HostInfo {
-                        remote: true,
                         host: "dev".to_owned(),
-                        configured_root: "/srv/root".to_owned(),
-                        description: Some(bulk.clone()),
-                        read_only: false,
-                        physical_root: None,
-                        shell: None,
                     }],
                 }),
                 compact_budget(),

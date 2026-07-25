@@ -140,23 +140,13 @@ impl RemoteBridge {
     }
 
     pub async fn hosts(&self) -> BridgeResult<HostsResult> {
-        let mut hosts = Vec::with_capacity(self.runner.config().hosts.len());
-        for (alias, profile) in &self.runner.config().hosts {
-            let cached = self.runner.cached_capability(alias).await;
-            hosts.push(HostInfo {
-                remote: true,
-                host: alias.clone(),
-                configured_root: profile.root.clone(),
-                description: profile.description.clone(),
-                read_only: profile.read_only,
-                physical_root: cached
-                    .as_ref()
-                    .map(|capability| capability.physical_root.clone()),
-                shell: cached
-                    .as_ref()
-                    .map(|capability| protocol::shell_metadata(&capability.shell, false)),
-            });
-        }
+        let hosts = self
+            .runner
+            .config()
+            .discover_hosts()
+            .into_iter()
+            .map(|host| HostInfo { host: host.alias })
+            .collect();
         Ok(HostsResult { hosts })
     }
 
@@ -428,17 +418,17 @@ struct ResolvedSearch {
     host: String,
     query: String,
     path: RemotePath,
-    absolute_path: bool,
     globs: Vec<String>,
     max_results: usize,
     binary: bool,
 }
 
 fn resolve_list(config: &Config, request: ListRequest) -> BridgeResult<ResolvedList> {
-    let host = config.host(&request.host)?;
-    let requested = request.path.as_deref().unwrap_or(".");
+    config.require_discovered_alias(&request.host)?;
+    let limits = config.limits();
+    let requested = request.path.as_deref().ok_or_else(absolute_path_required)?;
     validate_path(requested)?;
-    let path = resolve_path(host.profile.root.as_str(), requested)?;
+    let path = resolve_path(requested)?;
     let depth = request.depth.unwrap_or(DEFAULT_LIST_DEPTH);
     if !(1..=MAX_LIST_DEPTH).contains(&depth) {
         return Err(BridgeError::invalid_argument(
@@ -451,7 +441,7 @@ fn resolve_list(config: &Config, request: ListRequest) -> BridgeResult<ResolvedL
             "list max_entries must be between 1 and 10000",
         ));
     }
-    validate_frame(host.limits, [path.as_str().len()])?;
+    validate_frame(limits, [path.as_str().len()])?;
     Ok(ResolvedList {
         host: request.host,
         path,
@@ -462,17 +452,15 @@ fn resolve_list(config: &Config, request: ListRequest) -> BridgeResult<ResolvedL
 }
 
 fn resolve_stat(config: &Config, request: StatRequest) -> BridgeResult<ResolvedStat> {
-    let host = config.host(&request.host)?;
+    config.require_discovered_alias(&request.host)?;
+    let limits = config.limits();
     if request.paths.is_empty() || request.paths.len() > MAX_STAT_PATHS {
         return Err(BridgeError::invalid_argument(
             "stat paths must contain between 1 and 256 items",
         ));
     }
-    let paths = resolve_paths(&host.profile.root, &request.paths)?;
-    validate_frame(
-        host.limits,
-        paths.iter().map(|path| path.as_str().len() + 1),
-    )?;
+    let paths = resolve_paths(&request.paths)?;
+    validate_frame(limits, paths.iter().map(|path| path.as_str().len() + 1))?;
     Ok(ResolvedStat {
         host: request.host,
         paths,
@@ -480,13 +468,14 @@ fn resolve_stat(config: &Config, request: StatRequest) -> BridgeResult<ResolvedS
 }
 
 fn resolve_read(config: &Config, request: ReadRequest) -> BridgeResult<ResolvedRead> {
-    let host = config.host(&request.host)?;
+    config.require_discovered_alias(&request.host)?;
+    let limits = config.limits();
     if request.paths.is_empty() || request.paths.len() > MAX_READ_PATHS {
         return Err(BridgeError::invalid_argument(
             "read paths must contain between 1 and 32 items",
         ));
     }
-    let paths = resolve_paths(&host.profile.root, &request.paths)?;
+    let paths = resolve_paths(&request.paths)?;
     let start_line = request.start_line.unwrap_or(DEFAULT_START_LINE);
     let max_lines = request.max_lines.unwrap_or(DEFAULT_MAX_LINES);
     if start_line == 0 {
@@ -502,16 +491,13 @@ fn resolve_read(config: &Config, request: ReadRequest) -> BridgeResult<ResolvedR
     start_line
         .checked_add(max_lines - 1)
         .ok_or_else(|| BridgeError::invalid_argument("read line range overflows"))?;
-    let max_bytes = request.max_bytes.unwrap_or(host.limits.read_chunk_bytes);
-    if max_bytes == 0 || max_bytes > host.limits.max_read_bytes {
+    let max_bytes = request.max_bytes.unwrap_or(limits.read_chunk_bytes);
+    if max_bytes == 0 || max_bytes > limits.max_read_bytes {
         return Err(BridgeError::invalid_argument(
             "read max_bytes exceeds the configured limit",
         ));
     }
-    validate_frame(
-        host.limits,
-        paths.iter().map(|path| path.as_str().len() + 1),
-    )?;
+    validate_frame(limits, paths.iter().map(|path| path.as_str().len() + 1))?;
     Ok(ResolvedRead {
         host: request.host,
         paths,
@@ -522,7 +508,8 @@ fn resolve_read(config: &Config, request: ReadRequest) -> BridgeResult<ResolvedR
 }
 
 fn resolve_search(config: &Config, request: SearchRequest) -> BridgeResult<ResolvedSearch> {
-    let host = config.host(&request.host)?;
+    config.require_discovered_alias(&request.host)?;
+    let limits = config.limits();
     if request.query.is_empty()
         || request.query.as_bytes().contains(&0)
         || request.query.contains(['\r', '\n'])
@@ -542,9 +529,9 @@ fn resolve_search(config: &Config, request: SearchRequest) -> BridgeResult<Resol
     for glob in &request.globs {
         validate_glob(glob)?;
     }
-    let requested = request.path.as_deref().unwrap_or(".");
+    let requested = request.path.as_deref().ok_or_else(absolute_path_required)?;
     validate_path(requested)?;
-    let path = resolve_path(host.profile.root.as_str(), requested)?;
+    let path = resolve_path(requested)?;
     let max_results = request.max_results.unwrap_or(DEFAULT_SEARCH_RESULTS);
     if !(1..=MAX_SEARCH_RESULTS).contains(&max_results) {
         return Err(BridgeError::invalid_argument(
@@ -552,7 +539,7 @@ fn resolve_search(config: &Config, request: SearchRequest) -> BridgeResult<Resol
         ));
     }
     validate_frame(
-        host.limits,
+        limits,
         std::iter::once(request.query.len())
             .chain(std::iter::once(path.as_str().len()))
             .chain(request.globs.iter().map(|glob| glob.len() + 1)),
@@ -561,46 +548,32 @@ fn resolve_search(config: &Config, request: SearchRequest) -> BridgeResult<Resol
         host: request.host,
         query: request.query,
         path,
-        absolute_path: requested.starts_with('/'),
         globs: request.globs,
         max_results,
         binary: request.binary.unwrap_or(false),
     })
 }
 
-fn resolve_paths(root: &str, values: &[String]) -> BridgeResult<Vec<RemotePath>> {
+fn resolve_paths(values: &[String]) -> BridgeResult<Vec<RemotePath>> {
     values
         .iter()
         .map(|value| {
             validate_path(value)?;
-            resolve_path(root, value)
+            resolve_path(value)
         })
         .collect()
 }
 
-fn resolve_path(configured_root: &str, requested: &str) -> BridgeResult<RemotePath> {
-    if requested.starts_with('/') {
-        // Absolute MCP paths are authoritative.  They are deliberately
-        // resolved against the transport root rather than a hidden per-host
-        // workspace, so a task never inherits another task's path context.
-        RemotePath::resolve(crate::REMOTE_OPERATION_ROOT, requested)
-    } else {
-        // A missing path defaults to the configured root.  Keep that
-        // compatibility behavior even for the transport-root profile; an
-        // explicitly supplied relative path still requires an absolute MCP
-        // path in that profile.
-        if configured_root == crate::REMOTE_OPERATION_ROOT && requested != "." {
-            return Err(BridgeError::new(
-                ErrorCode::RemoteAbsolutePathRequired,
-                "remote MCP paths must be absolute; provide an absolute path or cwd",
-                false,
-            ));
-        }
-        // Keep the direct Rust/CLI API backwards compatible for now.  The MCP
-        // schemas require absolute paths; this branch is only a compatibility
-        // path for existing human callers and fixtures.
-        RemotePath::resolve(configured_root, requested)
-    }
+fn resolve_path(requested: &str) -> BridgeResult<RemotePath> {
+    RemotePath::absolute(requested)
+}
+
+fn absolute_path_required() -> BridgeError {
+    BridgeError::new(
+        ErrorCode::RemoteAbsolutePathRequired,
+        "remote path or cwd must be provided as an absolute path",
+        false,
+    )
 }
 
 fn validate_path(path: &str) -> BridgeResult<()> {
@@ -806,13 +779,7 @@ pub enum ShellName {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HostInfo {
-    pub remote: bool,
     pub host: String,
-    pub configured_root: String,
-    pub description: Option<String>,
-    pub read_only: bool,
-    pub physical_root: Option<String>,
-    pub shell: Option<ShellMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

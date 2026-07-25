@@ -21,7 +21,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::config::{Config, ResolvedHost};
+use crate::config::EffectiveLimits;
 use crate::error::{BridgeError, BridgeResult};
 
 pub(crate) use argv::ValidatedMountpoint;
@@ -273,21 +273,14 @@ pub struct SshPolicy {
 
 impl SshPolicy {
     pub fn for_host(
-        config: &Config,
-        host: ResolvedHost<'_>,
+        alias: &str,
+        limits: EffectiveLimits,
         runtime_paths: &RuntimePaths,
         resolved_connection_identity: &str,
     ) -> BridgeResult<Self> {
-        let configured = config.host(host.alias)?;
-        if configured.profile != host.profile || configured.limits != host.limits {
-            return Err(BridgeError::invalid_config(
-                "resolved host does not belong to this configuration",
-            ));
-        }
-
         let control_path = runtime_paths
             .directory
-            .join(control_filename(host.alias, resolved_connection_identity));
+            .join(control_filename(alias, resolved_connection_identity));
         let control_option = encoded_control_path_option(&control_path)?;
 
         let mut options = Vec::new();
@@ -310,9 +303,7 @@ impl SshPolicy {
             options.push(option);
         }
         options.push(OsString::from("-o"));
-        options.push(openssh_connect_timeout_option(
-            host.limits.connect_timeout_ms,
-        ));
+        options.push(openssh_connect_timeout_option(limits.connect_timeout_ms));
         options.push(OsString::from("-o"));
         options.push(control_option);
 

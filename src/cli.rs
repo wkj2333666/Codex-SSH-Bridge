@@ -18,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, ResolvedHost};
+use crate::config::Config;
 use crate::error::{BridgeError, BridgeResult};
 use crate::output::OutputStore;
 use crate::path::RemotePath;
@@ -385,13 +385,12 @@ pub async fn mount_sshfs_with_executable(
     executable: PathBuf,
     arguments: MountArgs,
 ) -> BridgeResult<serde_json::Value> {
-    let host = runner.config().host(&arguments.host)?;
-    let remote = RemotePath::resolve(&host.profile.root, &arguments.remote_path)?;
+    runner.config().require_discovered_alias(&arguments.host)?;
+    let remote = RemotePath::absolute(&arguments.remote_path)?;
     let mountpoint = ValidatedMountpoint::open(&arguments.mountpoint, arguments.allow_nonempty)?;
-    let timeout_ms = host.limits.connect_timeout_ms;
+    let timeout_ms = runner.config().limits().connect_timeout_ms;
     let cancel = CancellationToken::new();
-    let (policy, capability) = runner.prepare_host(host.alias, &cancel).await?;
-    let host = runner.config().host(&arguments.host)?;
+    let (policy, _capability) = runner.prepare_host(&arguments.host, &cancel).await?;
     // Keep the helper operand as the real path. libfuse resolves only its
     // parent before applying final-component checks, and fusermount3 uses
     // UMOUNT_NOFOLLOW. A reproducible compatibility probe is:
@@ -401,7 +400,7 @@ pub async fn mount_sshfs_with_executable(
     // strongest compatible boundary.
     let argv = build_sshfs_argv(
         &policy,
-        host,
+        &arguments.host,
         remote.as_str(),
         mountpoint.path(),
         arguments.allow_nonempty,
@@ -428,9 +427,7 @@ pub async fn mount_sshfs_with_executable(
         "remote": true,
         "host": arguments.host,
         "configured_remote_path": remote.as_str(),
-        "physical_root": capability.physical_root,
         "mountpoint": mountpoint.path(),
-        "read_only": host.profile.read_only,
         "warning": "Files remain remote; this FUSE mount is not an Agent workspace. Run builds, tests, Git, and services through remote_run or this CLI run command.",
     }))
 }
@@ -742,7 +739,9 @@ async fn run_doctor(path: PathBuf, arguments: DoctorArgs) -> BridgeResult<()> {
         let host = arguments.host.as_deref().ok_or_else(|| {
             BridgeError::invalid_argument("--verbose-ssh requires an explicit host alias")
         })?;
-        let diagnostic = run_verbose_ssh_diagnostic(runner.config().host(host)?).await?;
+        runner.config().require_discovered_alias(host)?;
+        let diagnostic =
+            run_verbose_ssh_diagnostic(host, runner.config().limits().connect_timeout_ms).await?;
         let object = value
             .as_object_mut()
             .ok_or_else(|| BridgeError::io("doctor result is not an object"))?;
@@ -754,14 +753,14 @@ async fn run_doctor(path: PathBuf, arguments: DoctorArgs) -> BridgeResult<()> {
     print_json(&value)
 }
 
-pub fn build_verbose_ssh_diagnostic_argv(host: ResolvedHost<'_>) -> Vec<OsString> {
-    let mut arguments = build_ssh_g_argv(host.alias, host.limits.connect_timeout_ms);
+pub fn build_verbose_ssh_diagnostic_argv(host: &str, connect_timeout_ms: u64) -> Vec<OsString> {
+    let mut arguments = build_ssh_g_argv(host, connect_timeout_ms);
     arguments.insert(0, OsString::from("-vvv"));
     arguments
 }
 
-async fn run_verbose_ssh_diagnostic(host: ResolvedHost<'_>) -> BridgeResult<String> {
-    let arguments = build_verbose_ssh_diagnostic_argv(host);
+async fn run_verbose_ssh_diagnostic(host: &str, connect_timeout_ms: u64) -> BridgeResult<String> {
+    let arguments = build_verbose_ssh_diagnostic_argv(host, connect_timeout_ms);
     let output = run_local_command(LocalCommandSpec {
         executable: PathBuf::from("/usr/bin/ssh"),
         arguments,

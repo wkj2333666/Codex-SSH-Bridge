@@ -1077,7 +1077,7 @@ async fn snapshot_file(
     maximum_bytes: usize,
     cancel: CancellationToken,
 ) -> BridgeResult<(FileSnapshot, RemoteContext)> {
-    let limits = bridge.runner.config().host(host)?.limits;
+    let limits = bridge.runner.config().limits();
     let desired_stdout_limit = u64::try_from(maximum_bytes)
         .ok()
         .and_then(|maximum| maximum.checked_add(1))
@@ -1320,15 +1320,8 @@ pub(super) async fn apply_patch(
     cancel: CancellationToken,
 ) -> BridgeResult<ApplyPatchResult> {
     let ApplyPatchRequest { host, patch } = request;
-    let configured = bridge.runner.config().host(&host)?;
-    if configured.profile.read_only {
-        return Err(BridgeError::new(
-            ErrorCode::ReadOnlyHost,
-            "remote host is configured read-only",
-            false,
-        ));
-    }
-    let maximum_bytes = configured.limits.max_write_bytes;
+    bridge.runner.config().require_discovered_alias(&host)?;
+    let maximum_bytes = bridge.runner.config().limits().max_write_bytes;
     if patch.len() > maximum_bytes {
         return Err(patch_too_large(
             "patch exceeds the effective host write limit",

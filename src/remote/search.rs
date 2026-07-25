@@ -9,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
 use crate::output::{InternalSpoolOwner, StreamKind};
-use crate::path::RemotePath;
 use crate::ssh::{FixedOperationKind, FixedRunRequest, RootedPathInputs};
 
 use super::protocol::{SpoolCursor, context, encode_bytes, protocol_error, read_small_stream};
@@ -276,7 +275,7 @@ pub(super) async fn search(
     cancel: CancellationToken,
 ) -> BridgeResult<SearchResult> {
     let runner = &bridge.runner;
-    let limits = runner.config().host(&request.host)?.limits;
+    let limits = runner.config().limits();
     let owner = InternalSpoolOwner::new();
     let candidates_result = bridge
         .execute_readonly_fixed(
@@ -331,25 +330,8 @@ pub(super) async fn search(
         .build()
         .map_err(|_| BridgeError::invalid_argument("search glob is invalid"))
         .map_err(&attach_candidates)?;
-    let configured = runner
-        .config()
-        .host(&request.host)
-        .map_err(&attach_candidates)?;
-    let path_is_within_configured_root =
-        RemotePath::resolve(&configured.profile.root, request.path.as_str()).is_ok();
-    let operation_root = if request.absolute_path && !path_is_within_configured_root {
-        crate::REMOTE_OPERATION_ROOT
-    } else {
-        configured.profile.root.as_str()
-    };
-    // Keep the long-standing relative-path contract when an absolute search
-    // path is still beneath the configured root.  If it is outside that
-    // legacy root, use the requested directory as the display boundary.
-    let display_root = if path_is_within_configured_root {
-        configured.profile.root.as_bytes()
-    } else {
-        request.path.as_str().as_bytes()
-    };
+    let operation_root = crate::REMOTE_OPERATION_ROOT;
+    let display_root = request.path.as_str().as_bytes();
     let mut candidates = Vec::with_capacity(10_001);
     let mut candidate_count = 0usize;
     loop {
