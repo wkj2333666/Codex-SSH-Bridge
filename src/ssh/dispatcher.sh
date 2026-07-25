@@ -433,12 +433,15 @@ exit 0"
         esac
     fi
     send_text READY "$run_id" started
-    run_watchdog=
+    run_watchdog_launcher=
+    run_watchdog_pid=
+    run_watchdog_pid_file=$run_dir/watchdog-pid
     run_timeout_marker=$run_dir/timed-out
     case "$run_timeout_ms" in ''|*[!0-9]*) run_timeout_ms=0 ;; esac
     if [ "$run_timeout_ms" -gt 0 ]; then
         run_timeout_seconds=$(( (run_timeout_ms + 999) / 1000 ))
         setsid sh -c '
+            printf "%s\n" "$$" >"$4" || exit 74
             sleep "$1"
             if kill -0 "$2" 2>/dev/null; then
                 : >"$3"
@@ -446,13 +449,26 @@ exit 0"
                 sleep 1
                 kill -KILL -"$2" 2>/dev/null || true
             fi
-        ' codex-ssh-watchdog "$run_timeout_seconds" "$run_pid" "$run_timeout_marker" &
-        run_watchdog=$!
+        ' codex-ssh-watchdog "$run_timeout_seconds" "$run_pid" "$run_timeout_marker" \
+            "$run_watchdog_pid_file" &
+        run_watchdog_launcher=$!
+        run_watchdog_wait=0
+        while :; do
+            run_watchdog_pid=$(cat "$run_watchdog_pid_file" 2>/dev/null || true)
+            case "$run_watchdog_pid" in
+                ''|*[!0-9]*)
+                    run_watchdog_wait=$((run_watchdog_wait + 1))
+                    [ "$run_watchdog_wait" -lt 10000 ] || exit 74
+                    sleep 0
+                    ;;
+                *) break ;;
+            esac
+        done
     fi
     if wait "$run_job_pid"; then run_status=$?; else run_status=$?; fi
-    if [ -n "$run_watchdog" ]; then
-        kill -TERM -"$run_watchdog" 2>/dev/null || true
-        wait "$run_watchdog" 2>/dev/null || true
+    if [ -n "$run_watchdog_pid" ]; then
+        kill -TERM -"$run_watchdog_pid" 2>/dev/null || true
+        wait "$run_watchdog_launcher" 2>/dev/null || true
     fi
     # A shell can exit while a long-lived child (for example an HTTP server)
     # still owns the request FIFOs.  Waiting indefinitely for those collectors
