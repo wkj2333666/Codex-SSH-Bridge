@@ -163,7 +163,7 @@ fn release_workflow_builds_and_packages_all_common_targets() {
     assert!(workflow.contains("Check out tagged source for package resources"));
     assert!(workflow.contains("mkdir -p \"$root/bin\" \"$root/remote-helpers\" \"$root/docs\""));
     assert!(workflow.contains(
-        "install -m 0755 \"staging/main-$TARGET/codex-ssh-bridge\" \"$root/bin/codex-ssh-bridge\""
+        "install -m 0755 \"staging/main-$target/codex-ssh-bridge\" \"$root/bin/codex-ssh-bridge\""
     ));
     for resource in [
         ".codex-plugin",
@@ -194,16 +194,18 @@ fn release_workflow_builds_and_packages_all_common_targets() {
 
 #[test]
 fn ci_and_release_workflows_use_split_caches() {
-    const CACHE_ACTION: &str = "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830";
+    const CACHE_ACTION: &str = "actions/cache@caa296126883cff596d87d8935842f9db880ef25";
 
     let ci = read_text(".github/workflows/ci.yml");
-    assert_eq!(ci.matches(CACHE_ACTION).count(), 6);
+    assert_eq!(ci.matches(CACHE_ACTION).count(), 7);
     assert_eq!(ci.matches("Restore pinned Rust toolchain cache").count(), 2);
     assert_eq!(
         ci.matches("Restore shared Cargo dependency cache").count(),
         2
     );
-    assert_eq!(ci.matches("Restore CI target cache").count(), 2);
+    assert_eq!(ci.matches("Restore diagnostics target cache").count(), 1);
+    assert_eq!(ci.matches("Restore ripgrep tool cache").count(), 2);
+    assert!(!ci.contains("Restore CI target cache"));
     assert!(ci.contains("~/.rustup/toolchains/${{ env.RUST_TOOLCHAIN }}-*"));
     assert!(ci.contains("~/.cargo/registry"));
     assert!(ci.contains("~/.cargo/git"));

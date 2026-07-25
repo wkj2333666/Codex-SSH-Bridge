@@ -151,6 +151,15 @@ jobs:
             >diagnostics/profile.stdout \
             2>diagnostics/profile.jsonl
 
+      - name: Prepare release diagnostic binaries
+        run: |
+          cargo +"$RUST_TOOLCHAIN" test --release --locked --no-run \
+            --lib \
+            --test mcp_tools \
+            --test performance_acceptance \
+            --test mcp_protocol \
+            --test remote_ops
+
       - name: Collect release RSS diagnostics
         shell: bash
         run: |

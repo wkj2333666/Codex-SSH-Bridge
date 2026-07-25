@@ -7187,10 +7187,7 @@ async fn five_hosts_successfully_stream_forty_mib_below_rss_bound() {
             OsString::from("FAKE_SSH_MODE"),
             OsString::from("large-candidates"),
         ),
-        (
-            OsString::from("FAKE_SSH_ROOT"),
-            remote.path().as_os_str().to_owned(),
-        ),
+        (OsString::from("FAKE_SSH_ROOT"), OsString::from("/")),
         (
             OsString::from("FAKE_SSH_FIXED_SLEEP_SECONDS"),
             OsString::from("0.3"),
@@ -7239,14 +7236,16 @@ async fn five_hosts_successfully_stream_forty_mib_below_rss_bound() {
     };
     let started = std::time::Instant::now();
     let mut tasks = tokio::task::JoinSet::new();
+    let search_path = remote.path().to_string_lossy().into_owned();
     for index in 0..5 {
         let bridge = Arc::clone(&bridge);
+        let search_path = search_path.clone();
         tasks.spawn(async move {
             bridge
                 .search(
                     SearchRequest {
                         host: format!("h{index}"),
-                        path: None,
+                        path: Some(search_path),
                         query: "needle".into(),
                         globs: vec!["accept/**".into()],
                         max_results: None,
