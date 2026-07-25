@@ -30,6 +30,18 @@ fn session_runner(base: &TempDir, log: &std::path::Path) -> Arc<SshRunner> {
         ),
         (OsString::from("FAKE_SSH_ROOT"), OsString::from("/tmp")),
         (OsString::from("FAKE_SSH_SHELL"), OsString::from("sh")),
+        (
+            OsString::from("FAKE_SSH_LOCAL_FIXED_PROBE"),
+            OsString::from("1"),
+        ),
+        (
+            OsString::from("FAKE_SSH_KERNEL_NAME"),
+            OsString::from("Darwin"),
+        ),
+        (
+            OsString::from("FAKE_SSH_MACHINE_ARCH"),
+            OsString::from("x86_64"),
+        ),
         (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
     ]);
     Arc::new(
@@ -62,6 +74,10 @@ fn persistent_session_runner(
         ),
         (OsString::from("FAKE_SSH_ROOT"), OsString::from("/tmp")),
         (OsString::from("FAKE_SSH_SHELL"), OsString::from("sh")),
+        (
+            OsString::from("FAKE_SSH_LOCAL_FIXED_PROBE"),
+            OsString::from("1"),
+        ),
         (
             OsString::from("FAKE_SSH_KERNEL_NAME"),
             OsString::from("Linux"),

@@ -151,7 +151,8 @@ fi
 case "$remote_command" in
 	*CODEX_SSH_PROBE*)
 		log_call P "$@"
-		if [ "${FAKE_SSH_MODE:-echo-argv}" = local-fixed ]; then
+		if [ "${FAKE_SSH_MODE:-echo-argv}" = local-fixed ] &&
+		   [ "${FAKE_SSH_LOCAL_FIXED_PROBE:-0}" != 1 ]; then
 			exec "${FAKE_SSH_ACCOUNT_SHELL:-/bin/sh}" -c "$remote_command"
 		fi
 		if [ -n "${FAKE_SSH_PROBE_ERROR:-}" ]; then
