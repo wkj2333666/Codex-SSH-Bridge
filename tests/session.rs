@@ -160,6 +160,8 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
         .unwrap()
         .parent()
         .unwrap()
+        .parent()
+        .unwrap()
         .to_owned();
     let helper_directory = helper_parent.join("remote-helpers");
     fs::create_dir_all(&helper_directory).unwrap();
@@ -294,6 +296,8 @@ async fn persistent_startup_failure_falls_back_to_temporary_helper() {
         }
     };
     let helper_directory = std::env::current_exe()
+        .unwrap()
+        .parent()
         .unwrap()
         .parent()
         .unwrap()
