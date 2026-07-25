@@ -73,15 +73,20 @@ head_status=$?
 bytes=$(wc -c <"$data")
 capped=0
 if [ "$bytes" -eq "$limit" ]; then capped=1; fi
-exec 3<&-
+drain=
 if [ "$capped" -eq 1 ]; then
+    cat <&3 >/dev/null &
+    drain=$!
     cap_wait=0
     while [ ! -e "$status" ] && [ "$cap_wait" -lt 100 ]; do
         sleep 0
         cap_wait=$((cap_wait + 1))
     done
     kill "$producer" 2>/dev/null || true
+    kill "$drain" 2>/dev/null || true
+    wait "$drain" 2>/dev/null || true
 fi
+exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
 producer_status=$(cat "$status" 2>/dev/null || :)
@@ -167,15 +172,20 @@ head_status=$?
 bytes=$(wc -c <"$data")
 capped=0
 if [ "$bytes" -eq "$limit" ]; then capped=1; fi
-exec 3<&-
+drain=
 if [ "$capped" -eq 1 ]; then
+    cat <&3 >/dev/null &
+    drain=$!
     cap_wait=0
     while [ ! -e "$status" ] && [ "$cap_wait" -lt 100 ]; do
         sleep 0
         cap_wait=$((cap_wait + 1))
     done
     kill "$producer" 2>/dev/null || true
+    kill "$drain" 2>/dev/null || true
+    wait "$drain" 2>/dev/null || true
 fi
+exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
 producer_status=$(cat "$status" 2>/dev/null || :)
@@ -252,15 +262,20 @@ head_status=$?
 bytes=$(wc -c <"$data")
 capped=0
 if [ "$bytes" -eq "$limit" ]; then capped=1; fi
-exec 3<&-
+drain=
 if [ "$capped" -eq 1 ]; then
+    cat <&3 >/dev/null &
+    drain=$!
     cap_wait=0
     while [ ! -e "$status" ] && [ "$cap_wait" -lt 100 ]; do
         sleep 0
         cap_wait=$((cap_wait + 1))
     done
     kill "$producer" 2>/dev/null || true
+    kill "$drain" 2>/dev/null || true
+    wait "$drain" 2>/dev/null || true
 fi
+exec 3<&-
 wait "$producer" 2>/dev/null
 wait_status=$?
 producer_status=$(cat "$status" 2>/dev/null || :)
