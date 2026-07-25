@@ -559,13 +559,8 @@ where
             payload,
         },
     );
-    if !pipes_closed {
-        // Dropping a JoinHandle detaches the blocked reader without retaining
-        // the request worker, so later requests are not serialized behind a
-        // server that intentionally outlives this command.
-        drop(stdout_thread);
-        drop(stderr_thread);
-    }
+    // On the continuation path the unjoined handles are dropped automatically,
+    // detaching the blocked readers without retaining the request worker.
     control.process_group.store(0, Ordering::Release);
     Ok(())
 }
