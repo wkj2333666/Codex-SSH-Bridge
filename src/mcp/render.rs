@@ -1324,7 +1324,7 @@ mod tests {
             .await,
         );
         assert_eq!(list_result["structuredContent"]["truncated"], true);
-        assert!(list_result["structuredContent"]["output_ref"].is_string());
+        assert!(list_result["structuredContent"].get("output_ref").is_none());
 
         let stat_result = result_value(
             stat(
@@ -1343,7 +1343,7 @@ mod tests {
             .await,
         );
         assert_eq!(stat_result["structuredContent"]["truncated"], true);
-        assert!(stat_result["structuredContent"]["output_ref"].is_string());
+        assert!(stat_result["structuredContent"].get("output_ref").is_none());
 
         let search_result = result_value(
             search(
@@ -1366,7 +1366,11 @@ mod tests {
             .await,
         );
         assert_eq!(search_result["structuredContent"]["truncated"], true);
-        assert!(search_result["structuredContent"]["output_ref"].is_string());
+        assert!(
+            search_result["structuredContent"]
+                .get("output_ref")
+                .is_none()
+        );
 
         let read_result = result_value(
             read(
@@ -1391,7 +1395,7 @@ mod tests {
             .await,
         );
         assert_eq!(read_result["structuredContent"]["truncated"], true);
-        assert!(read_result["structuredContent"]["output_ref"].is_string());
+        assert!(read_result["structuredContent"].get("output_ref").is_none());
 
         let run_result = result_value(
             run(
@@ -1424,6 +1428,6 @@ mod tests {
         );
         assert_eq!(run_result["structuredContent"]["exit_code"], 0);
         assert_eq!(run_result["structuredContent"]["truncated"], true);
-        assert!(run_result["structuredContent"]["output_ref"].is_string());
+        assert!(run_result["structuredContent"].get("output_ref").is_none());
     }
 }

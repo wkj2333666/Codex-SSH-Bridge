@@ -1066,6 +1066,7 @@ mod tests {
         let serialized = serde_json::to_string(&error).unwrap();
         assert!(!serialized.contains(secret));
         assert!(!serialized.contains("unknown field"));
-        assert!(serialized.contains("provide a valid host"));
+        assert!(serialized.contains("invalid tool arguments"));
+        assert!(!serialized.contains("action"));
     }
 }
