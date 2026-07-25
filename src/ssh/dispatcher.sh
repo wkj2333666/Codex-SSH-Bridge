@@ -438,16 +438,22 @@ exit 0"
     case "$run_timeout_ms" in ''|*[!0-9]*) run_timeout_ms=0 ;; esac
     if [ "$run_timeout_ms" -gt 0 ]; then
         run_timeout_seconds=$(( (run_timeout_ms + 999) / 1000 ))
-        ( sleep "$run_timeout_seconds"; if kill -0 "$run_pid" 2>/dev/null; then
-            : >"$run_timeout_marker"
-            kill -TERM -"$run_pid" 2>/dev/null || true
-            sleep 1
-            kill -KILL -"$run_pid" 2>/dev/null || true
-        fi ) &
+        setsid sh -c '
+            sleep "$1"
+            if kill -0 "$2" 2>/dev/null; then
+                : >"$3"
+                kill -TERM -"$2" 2>/dev/null || true
+                sleep 1
+                kill -KILL -"$2" 2>/dev/null || true
+            fi
+        ' codex-ssh-watchdog "$run_timeout_seconds" "$run_pid" "$run_timeout_marker" &
         run_watchdog=$!
     fi
     if wait "$run_job_pid"; then run_status=$?; else run_status=$?; fi
-    if [ -n "$run_watchdog" ]; then kill "$run_watchdog" 2>/dev/null || true; fi
+    if [ -n "$run_watchdog" ]; then
+        kill -TERM -"$run_watchdog" 2>/dev/null || true
+        wait "$run_watchdog" 2>/dev/null || true
+    fi
     # A shell can exit while a long-lived child (for example an HTTP server)
     # still owns the request FIFOs.  Waiting indefinitely for those collectors
     # would withhold EXIT and consume a host request slot forever.  Give normal
