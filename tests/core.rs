@@ -232,43 +232,24 @@ fn fixed_command_quotes_only_its_arguments() {
 }
 
 #[test]
-fn remote_paths_normalize_without_escaping_the_root() {
-    let path = RemotePath::resolve("/srv/./bridge/root", "projects/demo/../src//main.rs").unwrap();
-    assert_eq!(path.absolute(), "/srv/bridge/root/projects/src/main.rs");
-    assert_eq!(path.relative(), "projects/src/main.rs");
-
-    let root = RemotePath::resolve("/srv/bridge/root/", ".").unwrap();
-    assert_eq!(root.absolute(), "/srv/bridge/root");
-    assert_eq!(root.relative(), "");
-}
-
-#[test]
-fn remote_paths_accept_only_absolute_paths_within_the_root_boundary() {
-    let inside = RemotePath::resolve("/srv/bridge/root", "/srv/bridge/root/a/../b").unwrap();
-    assert_eq!(inside.absolute(), "/srv/bridge/root/b");
-    assert_eq!(inside.relative(), "b");
-
-    for requested in [
-        "../escape",
-        "child/../../escape",
-        "/srv/bridge/rooted/file",
-        "/srv/bridge/root/../../escape",
-    ] {
-        let error = RemotePath::resolve("/srv/bridge/root", requested).unwrap_err();
-        assert_eq!(error.code, ErrorCode::PathOutsideRoot, "{requested}");
+fn remote_path_requires_and_normalizes_absolute_input() {
+    assert_eq!(
+        RemotePath::absolute("/a/./b/../c").unwrap().as_str(),
+        "/a/c"
+    );
+    assert_eq!(RemotePath::absolute("/../../").unwrap().as_str(), "/");
+    for invalid in ["", ".", "relative/path", "../escape"] {
+        let error = RemotePath::absolute(invalid).unwrap_err();
+        assert_eq!(
+            error.code,
+            ErrorCode::RemoteAbsolutePathRequired,
+            "{invalid}"
+        );
     }
-}
-
-#[test]
-fn remote_paths_reject_nul_and_non_absolute_roots() {
-    for (root, requested) in [
-        ("relative/root", "file"),
-        ("/safe\0root", "file"),
-        ("/safe/root", "bad\0file"),
-    ] {
-        let error = RemotePath::resolve(root, requested).unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidArgument);
-    }
+    assert_eq!(
+        RemotePath::absolute("/ok\0bad").unwrap_err().code,
+        ErrorCode::InvalidArgument
+    );
 }
 
 #[test]
