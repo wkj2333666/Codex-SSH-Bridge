@@ -1763,10 +1763,18 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
             .await;
         assert_eq!(result["isError"], Value::Null, "value={value:?}: {result}");
         let text = text_content(&result);
-        assert!(
-            text.contains(value),
-            "command output was not preserved exactly: {text}"
-        );
+        if value.contains('\0') {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(value.as_bytes());
+            assert!(
+                text.contains(&format!("base64:{encoded}")),
+                "binary command output was not preserved reversibly: {text}"
+            );
+        } else {
+            assert!(
+                text.contains(value),
+                "command output was not preserved exactly: {text}"
+            );
+        }
         let shape = normalized_remote_run_shape(&log);
         if let Some(expected) = &output_shape {
             assert_eq!(
