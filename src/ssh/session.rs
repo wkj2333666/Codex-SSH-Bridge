@@ -58,6 +58,7 @@ pub(crate) struct SessionResult {
     pub(crate) stderr_truncated: bool,
     pub(crate) elapsed_ms: u64,
     pub(crate) remote_process_may_continue: bool,
+    pub(crate) timed_out: bool,
 }
 
 #[derive(Clone)]
@@ -892,9 +893,14 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
             } else {
                 None
             };
-            let (status, stdout_truncated, stderr_truncated, remote_process_may_continue) =
-                parse_exit(&frame.payload)
-                    .map_err(|message| protocol_error(&inner.host, &message))?;
+            let (
+                status,
+                stdout_truncated,
+                stderr_truncated,
+                remote_process_may_continue,
+                timed_out,
+            ) = parse_exit(&frame.payload)
+                .map_err(|message| protocol_error(&inner.host, &message))?;
             let request = inner
                 .pending
                 .lock()
@@ -915,6 +921,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 stderr_truncated: request.stderr_truncated || stderr_truncated,
                 elapsed_ms: elapsed_ms(request.started.elapsed()),
                 remote_process_may_continue,
+                timed_out,
             };
             let _ = request.sender.send(Ok(result));
             Ok(())
@@ -1040,7 +1047,7 @@ fn build_request_frames(
     Ok(frames)
 }
 
-fn parse_exit(payload: &[u8]) -> Result<(i32, bool, bool, bool), String> {
+fn parse_exit(payload: &[u8]) -> Result<(i32, bool, bool, bool, bool), String> {
     let text = std::str::from_utf8(payload).map_err(|_| "dispatcher EXIT payload is not UTF-8")?;
     let mut lines = text.lines();
     let status = lines
@@ -1062,10 +1069,14 @@ fn parse_exit(payload: &[u8]) -> Result<(i32, bool, bool, bool), String> {
         None => false,
         Some(value) => parse_bool(value)?,
     };
+    let timed_out = match lines.next() {
+        None => false,
+        Some(value) => parse_bool(value)?,
+    };
     if lines.next().is_some() {
         return Err("dispatcher EXIT payload has extra fields".to_owned());
     }
-    Ok((status, stdout, stderr, may_continue))
+    Ok((status, stdout, stderr, may_continue, timed_out))
 }
 
 fn parse_bool(value: &str) -> Result<bool, String> {
@@ -1180,8 +1191,15 @@ mod tests {
 
     #[test]
     fn exit_payload_is_strictly_bounded() {
-        assert_eq!(parse_exit(b"7\n0\n1\n"), Ok((7, false, true, false)));
-        assert_eq!(parse_exit(b"7\n0\n1\n1\n"), Ok((7, false, true, true)));
+        assert_eq!(parse_exit(b"7\n0\n1\n"), Ok((7, false, true, false, false)));
+        assert_eq!(
+            parse_exit(b"7\n0\n1\n1\n"),
+            Ok((7, false, true, true, false))
+        );
+        assert_eq!(
+            parse_exit(b"7\n0\n1\n0\n1\n"),
+            Ok((7, false, true, false, true))
+        );
         assert!(parse_exit(b"7\n0\n").is_err());
         assert!(parse_exit(b"7\n0\n1\nextra\n").is_err());
     }

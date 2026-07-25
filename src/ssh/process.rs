@@ -346,6 +346,22 @@ impl SshRunner {
         };
         let capture_ms = elapsed_ms(capture_started.elapsed());
         let remote_process_may_continue = session_result.remote_process_may_continue;
+        if session_result.timed_out {
+            let mut error =
+                BridgeError::new(ErrorCode::CommandTimeout, "remote command timed out", false);
+            error.details.host = Some(request.host.clone());
+            error.details.elapsed_ms = Some(elapsed_ms(operation_started.elapsed()));
+            error.details.exit_status = Some(session_result.status);
+            error.details.bytes_seen = Some(output.aggregate_bytes);
+            error.details.remote_process_may_continue = Some(remote_process_may_continue);
+            self.output_store.discard(&output).await;
+            return Err(attach_selected_context(
+                error,
+                &request.host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
         if session_result.stdout_truncated || session_result.stderr_truncated {
             let mut error = BridgeError::new(
                 ErrorCode::OutputLimit,

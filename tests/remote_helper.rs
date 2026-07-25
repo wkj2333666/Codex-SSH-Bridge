@@ -151,7 +151,7 @@ fn helper_preserves_streams_and_exit_status() {
     }
     assert_eq!(stdout, b"out");
     assert_eq!(stderr, b"err");
-    assert_eq!(exit.as_deref(), Some(b"7\n0\n0\n0\n".as_slice()));
+    assert_eq!(exit.as_deref(), Some(b"7\n0\n0\n0\n0\n".as_slice()));
     send_frame(
         &mut input,
         Frame {
@@ -184,7 +184,7 @@ fn helper_completes_parent_before_pipe_inheriting_child_exits() {
             break frame.payload;
         }
     };
-    assert_eq!(exit, b"0\n0\n0\n1\n");
+    assert_eq!(exit, b"0\n0\n0\n1\n0\n");
     // The completed request must release the helper worker even though its
     // descendant still owns the old pipes.
     send_request(&mut input, 2, cwd, b"printf follow-up");
@@ -195,7 +195,7 @@ fn helper_completes_parent_before_pipe_inheriting_child_exits() {
             break frame.payload;
         }
     };
-    assert_eq!(follow_up, b"0\n0\n0\n0\n");
+    assert_eq!(follow_up, b"0\n0\n0\n0\n0\n");
     send_frame(
         &mut input,
         Frame {

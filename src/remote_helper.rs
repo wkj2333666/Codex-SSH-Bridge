@@ -483,12 +483,14 @@ where
         thread::spawn(move || write_stdin(stdin, &input))
     });
     let watchdog_done = Arc::new((Mutex::new(false), Condvar::new()));
+    let timed_out = Arc::new(AtomicBool::new(false));
     let timeout = spec.timeout;
     let watchdog = if timeout.is_zero() {
         None
     } else {
         let watchdog_done = Arc::clone(&watchdog_done);
         let watchdog_control = Arc::clone(control);
+        let watchdog_timed_out = Arc::clone(&timed_out);
         Some(thread::spawn(move || {
             let (done_lock, done_signal) = &*watchdog_done;
             let done = done_lock
@@ -498,6 +500,7 @@ where
                 .wait_timeout_while(done, timeout, |done| !*done)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !*done {
+                watchdog_timed_out.store(true, Ordering::Release);
                 watchdog_control.cancel();
             }
         }))
@@ -551,10 +554,11 @@ where
         stop_sending.store(true, Ordering::Release);
     }
     let payload = format!(
-        "{status_code}\n{}\n{}\n{}\n",
+        "{status_code}\n{}\n{}\n{}\n{}\n",
         u8::from(stdout_state.truncated.load(Ordering::Acquire)),
         u8::from(stderr_state.truncated.load(Ordering::Acquire)),
-        u8::from(remote_process_may_continue)
+        u8::from(remote_process_may_continue),
+        u8::from(timed_out.load(Ordering::Acquire))
     )
     .into_bytes();
     let _ = send_frame(
