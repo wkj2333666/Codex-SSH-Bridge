@@ -54,21 +54,23 @@ fn fake_fixture(hosts: &[&str], environment: &[(&str, OsString)]) -> FakeFixture
     let runtime_base = TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
-    let mut config = Config::default();
-    config.hosts = hosts
-        .iter()
-        .map(|host| {
-            (
-                (*host).to_owned(),
-                HostProfile {
-                    root: "/srv/project".to_owned(),
-                    description: None,
-                    read_only: false,
-                    limits: HostLimitOverrides::default(),
-                },
-            )
-        })
-        .collect();
+    let config = Config {
+        hosts: hosts
+            .iter()
+            .map(|host| {
+                (
+                    (*host).to_owned(),
+                    HostProfile {
+                        root: "/srv/project".to_owned(),
+                        description: None,
+                        read_only: false,
+                        limits: HostLimitOverrides::default(),
+                    },
+                )
+            })
+            .collect(),
+        ..Config::default()
+    };
     let log = runtime_base.path().join("ssh.log");
     let mut fixed_environment =
         BTreeMap::from([(OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned())]);
