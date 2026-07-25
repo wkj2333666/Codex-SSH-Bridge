@@ -318,7 +318,7 @@ async fn task9_doctor_uses_shared_probe_and_reports_remote_root_and_actual_shell
     let result = doctor_host(&bridge, "dev").await.unwrap();
     assert_eq!(result["remote"], true);
     assert_eq!(result["host"], "dev");
-    assert_eq!(result["physical_root"], remote.path().to_str().unwrap());
+    assert_eq!(result["physical_root"], "/");
     assert_eq!(result["shell"]["kind"], "sh");
     assert_eq!(result["shell"]["version"], serde_json::Value::Null);
     assert_eq!(result["shell"]["fallback"], false);
@@ -334,7 +334,7 @@ async fn task9_direct_run_quotes_each_argv_word_and_reports_shell() {
         &bridge,
         RunArgs {
             host: "dev".to_owned(),
-            cwd: ".".to_owned(),
+            cwd: remote.path().to_str().unwrap().to_owned(),
             shell: ShellArg::Bash,
             timeout_ms: Some(5_000),
             argv: vec!["printf".to_owned(), "%s".to_owned(), hostile.to_owned()],
@@ -394,7 +394,7 @@ async fn task9_bash_run_fails_when_bash_is_unavailable() {
         &bridge,
         RunArgs {
             host: "dev".to_owned(),
-            cwd: ".".to_owned(),
+            cwd: remote.path().to_str().unwrap().to_owned(),
             shell: ShellArg::Bash,
             timeout_ms: Some(5_000),
             argv: vec!["printf".to_owned(), "%s".to_owned(), "ok".to_owned()],
@@ -580,7 +580,7 @@ fn task9_mount_status_parser_decodes_mountinfo_and_distinguishes_other_fuse() {
 }
 
 #[tokio::test]
-async fn task9_mount_executes_hardened_sshfs_and_forces_profile_read_only() {
+async fn task9_mount_executes_hardened_sshfs_without_host_policy_options() {
     let private = tempfile::TempDir::new().unwrap();
     let remote = tempfile::TempDir::new().unwrap();
     let mountpoint = private.path().join("mountpoint");
@@ -595,7 +595,7 @@ async fn task9_mount_executes_hardened_sshfs_and_forces_profile_read_only() {
         codex_ssh_bridge::cli::MountArgs {
             host: "dev".to_owned(),
             mountpoint: mountpoint.clone(),
-            remote_path: ".".to_owned(),
+            remote_path: remote.path().to_str().unwrap().to_owned(),
             allow_nonempty: false,
         },
     )
@@ -616,10 +616,10 @@ async fn task9_mount_executes_hardened_sshfs_and_forces_profile_read_only() {
         "ForwardAgent=no",
         "ClearAllForwardings=yes",
         "reconnect",
-        "ro",
     ] {
         assert!(logged.lines().any(|line| line == option), "{logged}");
     }
+    assert!(!logged.lines().any(|line| line == "ro"), "{logged}");
     assert_eq!(logged.lines().nth(1), mountpoint.to_str());
 }
 

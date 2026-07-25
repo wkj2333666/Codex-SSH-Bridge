@@ -170,7 +170,7 @@ pub async fn doctor_host(bridge: &RemoteBridge, host: &str) -> BridgeResult<serd
         .stat(
             StatRequest {
                 host: host.to_owned(),
-                paths: vec![".".to_owned()],
+                paths: vec!["/".to_owned()],
             },
             CancellationToken::new(),
         )
