@@ -309,7 +309,11 @@ pub(super) async fn search(
                     stdin_nul_paths: false,
                 },
                 required_capabilities: &["find_nul", "search_bound"],
-                stdout_limit: candidate_limit as u64,
+                // The static script enforces the smaller candidate budget.
+                // Keep the protocol capture bound at the normal frame limit
+                // so a hostile or test remote that ignores the script cap is
+                // still classified using the existing bounded-output path.
+                stdout_limit: (limits.max_frame_bytes + 1) as u64,
                 stderr_limit: 1024,
                 timeout: search_timeout,
                 cleanup: owner.registration(),
@@ -335,7 +339,7 @@ pub(super) async fn search(
     let mut cursor = SpoolCursor::new(
         &candidates_result.output,
         StreamKind::Stdout,
-        candidate_limit,
+        limits.max_frame_bytes + 1,
     )
     .map_err(&attach_candidates)?;
     let mut builder = GlobSetBuilder::new();
