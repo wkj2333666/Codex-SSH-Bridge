@@ -11,15 +11,15 @@ Keep Codex, credentials, approvals, and the bridge on the local machine. Every p
 
 Use only aliases returned by `remote_hosts`. Never construct raw SSH commands or invent a hostname. The bridge owns host resolution, transport quoting, capability probes, limits, and shell selection.
 
-The bridge keeps one local-owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities. On a supported Linux host it verifies or installs a private mode-0700 helper under the remote account's `~/.local/share/codex-ssh-bridge/helpers/<bridge-version>/<target>/helper`; the helper process ends with the SSH session, while the verified file is reused after a bridge restart. Warm requests send one framed command with no per-request `ssh -G`, root observation, installation probe, hash, lock, or upload. Unsupported hosts and pre-request helper failures use the ordered temporary-helper then POSIX-dispatcher fallback. Results expose `helper_mode` as `persistent`, `temporary`, or `shell`. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
+The bridge keeps one local-owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities. On a supported Linux host it verifies or installs a private mode-0700 helper under the remote account's `~/.local/share/codex-ssh-bridge/helpers/<bridge-version>/<target>/helper`; the helper process ends with the SSH session, while the verified file is reused after a bridge restart. Warm requests send one framed command with no per-request `ssh -G`, root observation, installation probe, hash, lock, or upload. Unsupported hosts and pre-request helper failures use the ordered temporary-helper then POSIX-dispatcher fallback. Transport mode remains internal diagnostic data. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
 
 ## Default workflow
 
 1. Call `remote_hosts` with `{}` and select one exact returned alias.
 2. Discover narrowly with `remote_search`, then inspect the relevant files with `remote_read`. Use `remote_list` when the project location is unknown.
 3. Make the smallest justified change with `remote_apply_patch`. Inspect partial-progress fields before retrying any failed mutation.
-4. Verify with `remote_run`. Check status, exit status, warnings, truncation, mutation uncertainty, and the actual shell in every result.
-5. When `detail_retained` is true, page the opaque `output_ref` with `remote_output_read`; do not rerun a command merely to recover omitted output.
+4. Verify with `remote_run`. Check `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
+5. When `truncated` is true and `output_ref` is present, page it with `remote_output_read`; do not rerun a command merely to recover omitted output.
 
 ## Tool contract
 
@@ -36,7 +36,7 @@ All schemas are closed. Follow the live schema if it differs from this quick ref
 
 ## Shell and mutation safety
 
-Prefer POSIX command syntax. Omit `shell` (or set `shell:"bash"`) for Bash; set `shell:"sh"` explicitly for POSIX sh, and use `shell:"login"` only when the account login environment is required. There is no `auto` value and no silent Bash-to-sh fallback: if Bash is unavailable, the result is a capability error and the model may explicitly retry with `shell:"sh"`.
+Omit `shell` (or set `shell:"bash"`) for the Bash default. Set `shell:"sh"` explicitly only when POSIX sh is intended, and use `shell:"login"` only when the account login environment is required. There is no `auto` value and no silent Bash-to-sh fallback: if Bash is unavailable, the factual capability error reports `requested_shell` and `available_shells`; decide whether the command is POSIX-compatible before retrying with `shell:"sh"`.
 
 Commands that use Bash-only syntax must request Bash explicitly (or rely on the omitted Bash default); the bridge never labels a POSIX `sh` execution as an implicit Bash fallback.
 

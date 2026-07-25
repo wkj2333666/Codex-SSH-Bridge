@@ -30,7 +30,7 @@ binary, API key, plugin, daemon, or service is installed remotely.
 | SSHFS | Convenient human browsing | Makes remote files look local while commands still run locally; adds FUSE/SFTP latency and reconnect semantics | Explicit optional CLI only |
 | Native local MCP | Closed schemas, local SSH aliases, bounded I/O, shared policy, explicit Bash/sh choice | Non-interactive by design | Default Agent interface |
 
-The bridge is Rust rather than a Bash program because strict MCP framing, bounded parsing, async concurrency, process-group cancellation, and spool quotas need one auditable state machine. Bash and POSIX sh remain supported as the *remote command shells*; the result always reports which shell actually ran.
+The bridge is Rust rather than a Bash program because strict MCP framing, bounded parsing, async concurrency, process-group cancellation, and spool quotas need one auditable state machine. Bash and POSIX sh remain supported as the *remote command shells*; Bash is the default and sh is always an explicit choice.
 
 SSHFS is intentionally absent from the MCP tool list. This prevents an Agent from silently treating a FUSE path as a local workspace.
 
@@ -90,10 +90,10 @@ the fallback order is temporary helper, then POSIX dispatcher. For local
 development or a custom package, set `CODEX_SSH_BRIDGE_HELPERS_DIR` to a
 private directory containing files named by their Rust target triple.
 
-The selected transport is returned as `helper_mode: "persistent"`,
-`"temporary"`, or `"shell"` in remote structured results. To remove all
-installed helper versions for one verified SSH account, run this explicitly
-(it is not an automatic operation):
+The selected transport remains available to bridge diagnostics and profiling,
+but is omitted from normal model-visible MCP results. To remove all installed
+helper versions for one verified SSH account, run this explicitly (it is not
+an automatic operation):
 
 ```bash
 ssh ALIAS -- 'find ~/.local/share/codex-ssh-bridge/helpers -mindepth 1 -maxdepth 1 -type d -exec rm -rf -- {} +'
@@ -133,7 +133,7 @@ optional compatibility profiles and limits—never credentials.
 
 On first use, the bridge validates the local SSH configuration and probes the
 remote shell and utility capabilities. It reuses the connection for later
-requests and reports the selected shell, fallback flag, and helper mode.
+requests without repeating transport diagnostics in ordinary MCP output.
 Writes and patches use expected hashes, no-follow checks, atomic replacement,
 and explicit conflict or unknown-outcome reporting.
 
@@ -182,16 +182,23 @@ The nine MCP tools are:
 |---|---|
 | `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read` | `remote_apply_patch`, `remote_write`, `remote_run` |
 
-The default flow is bounded search/read → unified patch → remote verification. Calls are synchronous. Oversized detail is retained under an opaque `output_ref` and paged with `remote_output_read`, so the Agent never needs to reconstruct transport logic.
+The default flow is bounded search/read → unified patch → remote verification.
+Calls are synchronous. Normal results mirror familiar local tools: listings,
+search matches, file bodies, and stdout/stderr appear once as concise text,
+while structured fields contain only state such as `exit_code`, truncation, or
+uncertain outcomes. Model-visible inline data is capped at 32 KiB; oversized
+detail is retained under an opaque `output_ref` and paged with
+`remote_output_read`, so the Agent never needs to reconstruct transport logic.
+Errors report factual codes and relevant state without prescribing an action.
 
-All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` headers must use absolute paths (or `/dev/null` for create/delete). `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Prefer POSIX syntax. Bash is never silently changed to sh: if Bash is unavailable, the model receives a capability error and may explicitly retry with `shell:"sh"`. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Always inspect the returned actual shell, fallback flag, warnings, exit status, truncation, and process-continuation uncertainty.
+All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` headers must use absolute paths (or `/dev/null` for create/delete). `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Bash is never silently changed to sh: if Bash is unavailable, the capability error records that Bash was requested and which shells are available, leaving the next decision to the model. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
 Operational requests use one persistent SSH session per alias and are bounded
 by the configured concurrency and output limits. Requests are cancellable;
 mutations report conflicts or unknown outcomes and are never blindly retried.
-`helper_mode` describes only the transport selected during cold setup; it does
-not change command shell selection (`bash` remains the default unless the
-caller explicitly requests `sh` or `login`).
+The internally selected helper transport does not change command shell
+selection (`bash` remains the default unless the caller explicitly requests
+`sh` or `login`).
 
 ## Human direct CLI
 

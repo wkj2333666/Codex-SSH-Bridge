@@ -40,8 +40,8 @@ full` means that local window is full, not that the remote host failed.
 first accepted request falls back once through the ordered temporary-helper and
 shell-dispatcher paths; after acceptance, helper transport failure is an
 unknown outcome and is never silently retried through sh. A shell dispatcher
-startup failure is terminal for that request. Successful structured results
-expose `helper_mode` as `persistent`, `temporary`, or `shell`.
+startup failure is terminal for that request. Helper mode remains internal
+diagnostic/profile data and is omitted from normal model-visible results.
 
 ## OpenSSH policy
 
@@ -74,7 +74,7 @@ The public shell contract is explicit: omitted `remote_run.shell` means Bash, `s
 
 MCP paths, queries, globs, patch bodies, file content, stdin, and absolute command cwd values are transported as data. Fixed remote programs use static scripts plus positional parameters. The direct human CLI converts each argv word with the bridge's bounded shell encoder.
 
-`remote_run` intentionally accepts a shell command string. The bridge safely binds the whole string into the selected remote shell, but syntax inside it still has that shell's meaning. Omitted shell and explicit `bash` both require Bash; an unavailable Bash is a capability error that the caller may explicitly retry with `sh`. Explicit `login` obtains the account shell from a strict, unique `getent passwd UID` record, or from one unique `/etc/passwd` record only when `getent` is absent. It rejects malformed, relative, oversized, non-regular, or non-executable paths, treats an empty passwd shell as `/bin/sh` like OpenSSH, and never trusts `$SHELL`. Absolute cwd values are bound as positional data before the resolved shell receives the command payload. Results and errors preserve the actual shell metadata.
+`remote_run` intentionally accepts a shell command string. The bridge safely binds the whole string into the selected remote shell, but syntax inside it still has that shell's meaning. Omitted shell and explicit `bash` both require Bash; an unavailable Bash is a capability error that records the requested and available shells without silently retrying or prescribing an action. Explicit `login` obtains the account shell from a strict, unique `getent passwd UID` record, or from one unique `/etc/passwd` record only when `getent` is absent. It rejects malformed, relative, oversized, non-regular, or non-executable paths, treats an empty passwd shell as `/bin/sh` like OpenSSH, and never trusts `$SHELL`. Absolute cwd values are bound as positional data before the resolved shell receives the command payload. Full shell and transport metadata remain internal diagnostics; ordinary MCP success output contains only model-relevant command results.
 
 Local `LC_ALL=C` is forced only for bridge protocol and SSH-diagnostic phases. Raw `remote_run` does not add that override, so the bridge does not itself cause an `LC_*` `SendEnv` rule to change the user's command locale.
 

@@ -29,7 +29,7 @@ ssh devbox
 
 Add future servers to local OpenSSH config the same way. The bridge accepts concrete aliases and stores no credentials. The default bridge config is `~/.config/codex-ssh-bridge/config.toml`; set `CODEX_SSH_BRIDGE_CONFIG` only as trusted local execution-authority input.
 
-The first operation performs local SSH identity checks and a bounded capability probe. User commands and fixed read/write operations then reuse one persistent SSH session per alias; warm requests send one framed request without another `ssh -G` or root observation. The remote dispatcher is streamed over that SSH connection and is never installed on disk. No remote bridge helper or Codex installation is used. The bridge does not bind a task to a hidden remote workspace: every MCP path and command cwd is absolute and supplied by the caller.
+The first operation performs local SSH identity checks and a bounded capability probe. User commands and fixed read/write operations then reuse one persistent SSH session per alias; warm requests send one framed request without another `ssh -G` or root observation. On supported Linux targets a verified helper file persists under the remote account for reuse; its process and the POSIX dispatcher remain session-scoped. No Codex installation or credential is placed remotely. The bridge does not bind a task to a hidden remote workspace: every MCP path and command cwd is absolute and supplied by the caller.
 
 ## MCP tool shapes
 
@@ -59,11 +59,11 @@ Search queries are case-sensitive fixed strings, not regular expressions. Unifie
 - `sh`: explicitly use POSIX sh; this is the model-visible fallback after a Bash capability error.
 - `login`: use the remote account's login shell.
 
-There is no `auto` value and the bridge never silently changes Bash into sh. The result or error carries the selected shell and fallback flag. The remote dispatcher itself is POSIX sh and is separate from the user shell; it never interprets the command payload as dispatcher code.
+There is no `auto` value and the bridge never silently changes Bash into sh. A missing-Bash error reports the requested and available shells without prescribing a retry. The remote dispatcher itself is POSIX sh and is separate from the user shell; it never interprets the command payload as dispatcher code.
 
 The SSH account's login shell must be able to launch the POSIX dispatcher command. If the dispatcher handshake fails (including a non-POSIX forced/login shell), the bridge returns a hard transport/capability error and does not retry through a one-shot command path.
 
-Prefer POSIX syntax. Request Bash for arrays, `[[ ... ]]`, `source`, `pipefail`, or Bash substitutions. Always inspect result `shell.kind`, `shell.fallback`, and `warnings`.
+Use the Bash default normally. Select `sh` only for a POSIX-compatible command; its result includes a syntax warning. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
 Requests are independent and accepted into the bridge's bounded local task window. They execute concurrently up to global/per-host runner limits; runner contention queues cancellably rather than returning an MCP capacity error. Only an exhausted local window returns `MCP task queue full`, and `remote_hosts` remains available as a control call. There is no mutation lock and no ordering guarantee for simultaneous writes to the same path. Atomic replace and expected-hash checks remain the protection for individual mutations.
 
@@ -78,9 +78,9 @@ owns a pipe, the bridge completes after a bounded drain grace and reports
 `remote_process_may_continue: true`; keep the service PID/log path for explicit
 remote management. The stdout/stderr preview is a bounded snapshot and may not
 include output produced after the synchronous request boundary. There is not
-yet a persistent background-job ID. When a result is too large for one MCP
-response, `detail_retained` is true and `output_ref` is a 32-character opaque
-reference.
+yet a persistent background-job ID. Model-visible inline output is capped at
+32 KiB. When a result is too large, `truncated` is true and `output_ref` is a
+32-character opaque reference.
 
 Page it with:
 
