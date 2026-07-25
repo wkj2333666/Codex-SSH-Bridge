@@ -48,6 +48,22 @@ struct RequestControl {
     cancelled: AtomicBool,
 }
 
+struct StreamDrainState {
+    pipe_closed: AtomicBool,
+    truncated: AtomicBool,
+    stop_sending: Arc<AtomicBool>,
+}
+
+impl StreamDrainState {
+    fn new(stop_sending: Arc<AtomicBool>) -> Self {
+        Self {
+            pipe_closed: AtomicBool::new(false),
+            truncated: AtomicBool::new(false),
+            stop_sending,
+        }
+    }
+}
+
 impl RequestControl {
     fn new() -> Self {
         Self {
@@ -433,12 +449,9 @@ where
     let stderr_limit = spec.stderr_limit;
     let stdout_shared = Arc::clone(shared);
     let stdout_control = Arc::clone(control);
-    let stdout_pipe_closed = Arc::new(AtomicBool::new(false));
-    let stdout_truncated = Arc::new(AtomicBool::new(false));
     let stop_sending = Arc::new(AtomicBool::new(false));
-    let stdout_pipe_closed_thread = Arc::clone(&stdout_pipe_closed);
-    let stdout_truncated_thread = Arc::clone(&stdout_truncated);
-    let stop_sending_thread = Arc::clone(&stop_sending);
+    let stdout_state = Arc::new(StreamDrainState::new(Arc::clone(&stop_sending)));
+    let stdout_state_thread = Arc::clone(&stdout_state);
     let stdout_thread = thread::spawn(move || {
         drain_stream(
             stdout_shared,
@@ -447,18 +460,13 @@ where
             stdout,
             stdout_limit,
             stdout_control,
-            stdout_pipe_closed_thread,
-            stdout_truncated_thread,
-            stop_sending_thread,
+            stdout_state_thread,
         )
     });
     let stderr_shared = Arc::clone(shared);
     let stderr_control = Arc::clone(control);
-    let stderr_pipe_closed = Arc::new(AtomicBool::new(false));
-    let stderr_truncated = Arc::new(AtomicBool::new(false));
-    let stderr_pipe_closed_thread = Arc::clone(&stderr_pipe_closed);
-    let stderr_truncated_thread = Arc::clone(&stderr_truncated);
-    let stop_sending_thread = Arc::clone(&stop_sending);
+    let stderr_state = Arc::new(StreamDrainState::new(Arc::clone(&stop_sending)));
+    let stderr_state_thread = Arc::clone(&stderr_state);
     let stderr_thread = thread::spawn(move || {
         drain_stream(
             stderr_shared,
@@ -467,9 +475,7 @@ where
             stderr,
             stderr_limit,
             stderr_control,
-            stderr_pipe_closed_thread,
-            stderr_truncated_thread,
-            stop_sending_thread,
+            stderr_state_thread,
         )
     });
     let stdin_thread = child.stdin.take().map(|stdin| {
@@ -517,21 +523,21 @@ where
     let process_group_alive = process_group_exists(control.process_group.load(Ordering::Acquire));
     if process_group_alive {
         let drain_deadline = Instant::now() + Duration::from_millis(120);
-        while !(stdout_pipe_closed.load(Ordering::Acquire)
-            && stderr_pipe_closed.load(Ordering::Acquire))
+        while !(stdout_state.pipe_closed.load(Ordering::Acquire)
+            && stderr_state.pipe_closed.load(Ordering::Acquire))
             && Instant::now() < drain_deadline
         {
             thread::sleep(Duration::from_millis(5));
         }
     } else {
-        while !(stdout_pipe_closed.load(Ordering::Acquire)
-            && stderr_pipe_closed.load(Ordering::Acquire))
+        while !(stdout_state.pipe_closed.load(Ordering::Acquire)
+            && stderr_state.pipe_closed.load(Ordering::Acquire))
         {
             thread::sleep(Duration::from_millis(5));
         }
     }
-    let pipes_closed =
-        stdout_pipe_closed.load(Ordering::Acquire) && stderr_pipe_closed.load(Ordering::Acquire);
+    let pipes_closed = stdout_state.pipe_closed.load(Ordering::Acquire)
+        && stderr_state.pipe_closed.load(Ordering::Acquire);
     let remote_process_may_continue = process_group_alive || !pipes_closed;
     let status_code = exit_status(status);
     if pipes_closed {
@@ -546,8 +552,8 @@ where
     }
     let payload = format!(
         "{status_code}\n{}\n{}\n{}\n",
-        u8::from(stdout_truncated.load(Ordering::Acquire)),
-        u8::from(stderr_truncated.load(Ordering::Acquire)),
+        u8::from(stdout_state.truncated.load(Ordering::Acquire)),
+        u8::from(stderr_state.truncated.load(Ordering::Acquire)),
         u8::from(remote_process_may_continue)
     )
     .into_bytes();
@@ -576,9 +582,7 @@ fn drain_stream<W, R>(
     mut reader: R,
     limit: u64,
     control: Arc<RequestControl>,
-    pipe_closed: Arc<AtomicBool>,
-    truncated_state: Arc<AtomicBool>,
-    stop_sending: Arc<AtomicBool>,
+    state: Arc<StreamDrainState>,
 ) -> bool
 where
     W: Write + Send + 'static,
@@ -591,7 +595,7 @@ where
     loop {
         let read = match reader.read(&mut buffer) {
             Ok(0) | Err(_) => {
-                pipe_closed.store(true, Ordering::Release);
+                state.pipe_closed.store(true, Ordering::Release);
                 break;
             }
             Ok(read) => read,
@@ -600,10 +604,10 @@ where
         let allowed = remaining.min(read as u64) as usize;
         if allowed < read {
             truncated = true;
-            truncated_state.store(true, Ordering::Release);
+            state.truncated.store(true, Ordering::Release);
         }
         if allowed > 0
-            && !stop_sending.load(Ordering::Acquire)
+            && !state.stop_sending.load(Ordering::Acquire)
             && send_stream_frame(
                 &shared,
                 Frame {
@@ -611,7 +615,7 @@ where
                     request_id,
                     payload: buffer[..allowed].to_vec(),
                 },
-                &stop_sending,
+                &state.stop_sending,
             )
             .is_err()
         {
@@ -624,7 +628,7 @@ where
             continue;
         }
     }
-    pipe_closed.store(true, Ordering::Release);
+    state.pipe_closed.store(true, Ordering::Release);
     truncated
 }
 

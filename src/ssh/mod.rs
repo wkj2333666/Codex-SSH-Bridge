@@ -40,16 +40,6 @@ pub enum HelperMode {
     Shell,
 }
 
-impl HelperMode {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Persistent => "persistent",
-            Self::Temporary => "temporary",
-            Self::Shell => "shell",
-        }
-    }
-}
-
 const RUNTIME_DIRECTORY: &str = "codex-ssh-bridge";
 const CONTROL_FILENAME_BYTES: usize = 3 + 32;
 const UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;

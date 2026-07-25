@@ -84,12 +84,14 @@ pub async fn hosts(
                 .join("\n");
             render_text_retained(
                 bridge,
-                text,
-                json!({}),
-                result,
-                provenance,
-                None,
-                false,
+                RetainedPresentation {
+                    text,
+                    structured_content: json!({}),
+                    detail: result,
+                    provenance,
+                    output_ref: None,
+                    truncated: false,
+                },
                 budget,
                 cancel,
             )
@@ -112,12 +114,14 @@ pub async fn list(
             let provenance = RetentionProvenance::Remote(result.context.clone());
             render_text_retained(
                 bridge,
-                text,
-                json!({}),
-                result,
-                provenance,
-                None,
-                truncated,
+                RetainedPresentation {
+                    text,
+                    structured_content: json!({}),
+                    detail: result,
+                    provenance,
+                    output_ref: None,
+                    truncated,
+                },
                 budget,
                 cancel,
             )
@@ -139,12 +143,14 @@ pub async fn stat(
             let provenance = RetentionProvenance::Remote(result.context.clone());
             render_text_retained(
                 bridge,
-                text,
-                json!({}),
-                result,
-                provenance,
-                None,
-                false,
+                RetainedPresentation {
+                    text,
+                    structured_content: json!({}),
+                    detail: result,
+                    provenance,
+                    output_ref: None,
+                    truncated: false,
+                },
                 budget,
                 cancel,
             )
@@ -167,12 +173,14 @@ pub async fn search(
             let provenance = RetentionProvenance::Remote(result.context.clone());
             render_text_retained(
                 bridge,
-                text,
-                json!({}),
-                result,
-                provenance,
-                None,
-                truncated,
+                RetainedPresentation {
+                    text,
+                    structured_content: json!({}),
+                    detail: result,
+                    provenance,
+                    output_ref: None,
+                    truncated,
+                },
                 budget,
                 cancel,
             )
@@ -203,12 +211,14 @@ pub async fn read(
             let provenance = RetentionProvenance::Remote(result.context.clone());
             render_text_retained(
                 bridge,
-                text,
-                json!({}),
-                result,
-                provenance,
-                None,
-                truncated,
+                RetainedPresentation {
+                    text,
+                    structured_content: json!({}),
+                    detail: result,
+                    provenance,
+                    output_ref: None,
+                    truncated,
+                },
                 budget,
                 cancel,
             )
@@ -294,12 +304,14 @@ pub async fn write(
             let provenance = RetentionProvenance::Remote(result.context.clone());
             render_text_retained(
                 bridge,
-                text,
-                json!({}),
-                result,
-                provenance,
-                None,
-                false,
+                RetainedPresentation {
+                    text,
+                    structured_content: json!({}),
+                    detail: result,
+                    provenance,
+                    output_ref: None,
+                    truncated: false,
+                },
                 budget,
                 cancel,
             )
@@ -320,12 +332,14 @@ pub async fn apply_patch(
             let provenance = RetentionProvenance::Remote(result.context.clone());
             render_text_retained(
                 bridge,
-                "Done!".to_owned(),
-                json!({}),
-                result,
-                provenance,
-                None,
-                false,
+                RetainedPresentation {
+                    text: "Done!".to_owned(),
+                    structured_content: json!({}),
+                    detail: result,
+                    provenance,
+                    output_ref: None,
+                    truncated: false,
+                },
                 budget,
                 cancel,
             )
@@ -364,12 +378,14 @@ pub async fn run(
             let existing_ref = result.output_ref.clone();
             render_text_retained(
                 bridge,
-                text,
-                metadata,
-                result,
-                provenance,
-                existing_ref,
-                source_truncated,
+                RetainedPresentation {
+                    text,
+                    structured_content: metadata,
+                    detail: result,
+                    provenance,
+                    output_ref: existing_ref,
+                    truncated: source_truncated,
+                },
                 budget,
                 cancel,
             )
@@ -379,38 +395,45 @@ pub async fn run(
     }
 }
 
-async fn render_text_retained<T: Serialize + Send + 'static>(
-    bridge: Arc<RemoteBridge>,
+struct RetainedPresentation<T> {
     text: String,
     structured_content: Value,
-    retained_detail: T,
+    detail: T,
     provenance: RetentionProvenance,
-    existing_ref: Option<String>,
-    source_truncated: bool,
+    output_ref: Option<String>,
+    truncated: bool,
+}
+
+async fn render_text_retained<T: Serialize + Send + 'static>(
+    bridge: Arc<RemoteBridge>,
+    presentation: RetainedPresentation<T>,
     budget: WireBudget,
     cancel: CancellationToken,
 ) -> CallToolResult {
-    if !source_truncated
-        && let Some(rendered) =
-            complete_text_result(text.clone(), structured_content.clone(), budget)
+    if !presentation.truncated
+        && let Some(rendered) = complete_text_result(
+            presentation.text.clone(),
+            presentation.structured_content.clone(),
+            budget,
+        )
     {
         return rendered;
     }
 
-    let retained = match existing_ref {
+    let retained = match presentation.output_ref {
         Some(output_ref) => Some(output_ref),
         None => bridge
-            .retain_serialized_detail(provenance, retained_detail, cancel)
+            .retain_serialized_detail(presentation.provenance, presentation.detail, cancel)
             .await
             .ok()
             .map(|reference| reference.as_str().to_owned()),
     };
-    let mut metadata = object(structured_content);
+    let mut metadata = object(presentation.structured_content);
     metadata.insert("truncated".to_owned(), Value::Bool(true));
     if let Some(output_ref) = retained {
         metadata.insert("output_ref".to_owned(), Value::String(output_ref));
     }
-    bounded_text_result(text, Value::Object(metadata), false, budget)
+    bounded_text_result(presentation.text, Value::Object(metadata), false, budget)
 }
 
 fn complete_text_result(
