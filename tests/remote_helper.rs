@@ -85,8 +85,28 @@ fn send_request_with_limits(
     stdout_limit: u64,
     stderr_limit: u64,
 ) {
+    send_request_with_options(
+        writer,
+        request_id,
+        cwd,
+        command,
+        stdout_limit,
+        stderr_limit,
+        2_000,
+    );
+}
+
+fn send_request_with_options(
+    writer: &mut impl Write,
+    request_id: u64,
+    cwd: &[u8],
+    command: &[u8],
+    stdout_limit: u64,
+    stderr_limit: u64,
+    timeout_ms: u64,
+) {
     let metadata = format!(
-        "shell=sh\ncwd_length={}\ncommand_length={}\nstdin_length=0\ntimeout_ms=2000\nstdout_limit={stdout_limit}\nstderr_limit={stderr_limit}\n",
+        "shell=sh\ncwd_length={}\ncommand_length={}\nstdin_length=0\ntimeout_ms={timeout_ms}\nstdout_limit={stdout_limit}\nstderr_limit={stderr_limit}\n",
         cwd.len(),
         command.len()
     );
@@ -114,6 +134,41 @@ fn send_request_with_limits(
             payload: command.to_vec(),
         },
     );
+}
+
+#[test]
+fn helper_marks_its_own_watchdog_timeout_explicitly() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().as_os_str().as_encoded_bytes();
+    let mut child = helper_child();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let _ = read_next(&mut output);
+    send_request_with_options(&mut input, 1, cwd, b"sleep 10", 1024, 1024, 50);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let exit = loop {
+        assert!(Instant::now() < deadline, "helper watchdog did not fire");
+        let frame = read_next(&mut output);
+        if frame.kind == FrameKind::Exit {
+            break frame.payload;
+        }
+    };
+    let fields = std::str::from_utf8(&exit)
+        .unwrap()
+        .lines()
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 5);
+    assert_eq!(fields[4], "1");
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]
