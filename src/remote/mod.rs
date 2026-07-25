@@ -1034,11 +1034,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::config::{Config, HostLimitOverrides, HostProfile, Limits};
+    use crate::config::{CONFIG_VERSION, Config, HostLimitOverrides, HostProfile, Limits};
 
     fn config() -> Config {
         Config {
-            version: 1,
+            version: CONFIG_VERSION,
             limits: Limits::default(),
             hosts: BTreeMap::from([(
                 "dev".to_owned(),
