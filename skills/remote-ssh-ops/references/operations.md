@@ -71,7 +71,16 @@ Timeout and cancellation send a request-level `CANCEL` first. If the dispatcher 
 
 ## Retained output
 
-Calls complete synchronously. There is no background job ID. When a result is too large for one MCP response, `detail_retained` is true and `output_ref` is a 32-character opaque reference.
+Calls complete synchronously. A long-lived service must explicitly detach its
+stdin/stdout/stderr and process group; do not start one as an ad-hoc `&` job
+that inherits bridge pipes. If the shell parent exits while a descendant still
+owns a pipe, the bridge completes after a bounded drain grace and reports
+`remote_process_may_continue: true`; keep the service PID/log path for explicit
+remote management. The stdout/stderr preview is a bounded snapshot and may not
+include output produced after the synchronous request boundary. There is not
+yet a persistent background-job ID. When a result is too large for one MCP
+response, `detail_retained` is true and `output_ref` is a 32-character opaque
+reference.
 
 Page it with:
 

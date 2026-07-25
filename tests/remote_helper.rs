@@ -151,7 +151,59 @@ fn helper_preserves_streams_and_exit_status() {
     }
     assert_eq!(stdout, b"out");
     assert_eq!(stderr, b"err");
-    assert_eq!(exit.as_deref(), Some(b"7\n0\n0\n".as_slice()));
+    assert_eq!(exit.as_deref(), Some(b"7\n0\n0\n0\n".as_slice()));
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn helper_completes_parent_before_pipe_inheriting_child_exits() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().as_os_str().as_encoded_bytes();
+    let mut child = helper_child();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let _ = read_next(&mut output);
+    send_request(&mut input, 1, cwd, b"trap '' TERM; sleep 10 & exit 0");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let exit = loop {
+        assert!(
+            Instant::now() < deadline,
+            "helper withheld EXIT for an orphan"
+        );
+        let frame = read_next(&mut output);
+        if frame.kind == FrameKind::Exit {
+            break frame.payload;
+        }
+    };
+    assert_eq!(exit, b"0\n0\n0\n1\n");
+    // The completed request must release the helper worker even though its
+    // descendant still owns the old pipes.
+    send_request(&mut input, 2, cwd, b"printf follow-up");
+    let follow_up = loop {
+        let frame = read_next(&mut output);
+        assert_eq!(frame.request_id, 2);
+        if frame.kind == FrameKind::Exit {
+            break frame.payload;
+        }
+    };
+    assert_eq!(follow_up, b"0\n0\n0\n0\n");
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Cancel,
+            request_id: 1,
+            payload: Vec::new(),
+        },
+    );
     send_frame(
         &mut input,
         Frame {
@@ -214,7 +266,7 @@ fn helper_drains_beyond_output_limit_and_reports_truncation() {
         }
     };
     assert_eq!(stdout, b"123");
-    assert_eq!(exit, b"0\n1\n0\n");
+    assert_eq!(exit, b"0\n1\n0\n0\n");
     send_frame(
         &mut input,
         Frame {

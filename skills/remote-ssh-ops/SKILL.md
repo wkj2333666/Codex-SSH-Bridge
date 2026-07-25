@@ -30,7 +30,7 @@ The bridge keeps one local-owned persistent SSH session per configured alias and
 - `remote_output_read`: `{output_ref, stream:"stdout"|"stderr", offset?, max_bytes?}`; do not add a host.
 - `remote_apply_patch`: `{host, patch}`; patch headers must use absolute paths (or `/dev/null`), with no cwd field.
 - `remote_write`: `{host, path, content, encoding, mode}`. Prefer patching. For replacement, supply the observed SHA-256 when available.
-- `remote_run`: `{host, command, cwd, shell?, timeout_ms?, stdin?}`; `cwd` must be absolute. `command` is one shell command string, not argv or a background job. stdin is an object `{encoding:"utf8"|"base64", value}`.
+- `remote_run`: `{host, command, cwd, shell?, timeout_ms?, stdin?}`; `cwd` must be absolute. `command` is one shell command string. For an HTTP server, viewer, or other long-lived process, explicitly detach it from stdin/stdout/stderr and its request process group; do not leave an ad-hoc background job inheriting bridge pipes. stdin is an object `{encoding:"utf8"|"base64", value}`.
 
 All schemas are closed. Follow the live schema if it differs from this quick reference.
 
@@ -45,6 +45,14 @@ Requests on one host are accepted into a bounded local task window and execute c
 The account/forced login shell must be able to start the POSIX dispatcher. A failed dispatcher handshake is a hard error; never ask the bridge to silently fall back to a one-shot SSH command.
 
 Treat `remote_run` as mutating even for apparently read-only commands. A timeout or cancellation can leave a remote process running; inspect the process-continuation flag and do not retry blindly. Respect read-only profiles and obtain authorization for destructive or high-impact work.
+
+When a shell parent exits while a descendant still owns a bridge pipe, the
+bridge returns the parent result after a bounded drain grace and sets
+`remote_process_may_continue: true`; later requests on that host remain usable.
+This flag means the descendant may still be running, not that a mutation can be
+retried safely. The stdout/stderr preview is only the bounded snapshot observed
+before completion and may omit later service output. Keep the service PID/log
+path from the command and manage it explicitly on the remote host.
 
 ## SSHFS
 

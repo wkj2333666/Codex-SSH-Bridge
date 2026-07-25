@@ -12,7 +12,7 @@ use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::remote_helper_protocol::{Frame, FrameKind, read_frame, write_frame};
 
@@ -213,6 +213,19 @@ fn send_frame<W: Write>(shared: &Arc<Shared<W>>, frame: Frame) -> io::Result<()>
     writer.flush()
 }
 
+fn send_stream_frame<W: Write>(
+    shared: &Arc<Shared<W>>,
+    frame: Frame,
+    stop_sending: &AtomicBool,
+) -> io::Result<()> {
+    let mut writer = shared.writer.lock().map_err(lock_error)?;
+    if stop_sending.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    write_frame(&mut *writer, &frame, shared.max_frame_bytes)?;
+    writer.flush()
+}
+
 fn read_request<R: Read>(
     reader: &mut R,
     open: Frame,
@@ -336,23 +349,7 @@ fn run_request<W>(shared: Arc<Shared<W>>, spec: RequestSpec, control: Arc<Reques
 where
     W: Write + Send + 'static,
 {
-    let result = execute_request(&shared, &spec, &control);
-    if let Ok((status, stdout_truncated, stderr_truncated)) = result {
-        let payload = format!(
-            "{status}\n{}\n{}\n",
-            u8::from(stdout_truncated),
-            u8::from(stderr_truncated)
-        )
-        .into_bytes();
-        let _ = send_frame(
-            &shared,
-            Frame {
-                kind: FrameKind::Exit,
-                request_id: spec.request_id,
-                payload,
-            },
-        );
-    } else if let Err(message) = result {
+    if let Err(message) = execute_request(&shared, &spec, &control) {
         let _ = send_error(&shared, spec.request_id, &message);
     }
     if let Ok(mut requests) = shared.requests.lock() {
@@ -364,7 +361,7 @@ fn execute_request<W>(
     shared: &Arc<Shared<W>>,
     spec: &RequestSpec,
     control: &Arc<RequestControl>,
-) -> Result<(i32, bool, bool), String>
+) -> Result<(), String>
 where
     W: Write + Send + 'static,
 {
@@ -436,6 +433,12 @@ where
     let stderr_limit = spec.stderr_limit;
     let stdout_shared = Arc::clone(shared);
     let stdout_control = Arc::clone(control);
+    let stdout_pipe_closed = Arc::new(AtomicBool::new(false));
+    let stdout_truncated = Arc::new(AtomicBool::new(false));
+    let stop_sending = Arc::new(AtomicBool::new(false));
+    let stdout_pipe_closed_thread = Arc::clone(&stdout_pipe_closed);
+    let stdout_truncated_thread = Arc::clone(&stdout_truncated);
+    let stop_sending_thread = Arc::clone(&stop_sending);
     let stdout_thread = thread::spawn(move || {
         drain_stream(
             stdout_shared,
@@ -444,10 +447,18 @@ where
             stdout,
             stdout_limit,
             stdout_control,
+            stdout_pipe_closed_thread,
+            stdout_truncated_thread,
+            stop_sending_thread,
         )
     });
     let stderr_shared = Arc::clone(shared);
     let stderr_control = Arc::clone(control);
+    let stderr_pipe_closed = Arc::new(AtomicBool::new(false));
+    let stderr_truncated = Arc::new(AtomicBool::new(false));
+    let stderr_pipe_closed_thread = Arc::clone(&stderr_pipe_closed);
+    let stderr_truncated_thread = Arc::clone(&stderr_truncated);
+    let stop_sending_thread = Arc::clone(&stop_sending);
     let stderr_thread = thread::spawn(move || {
         drain_stream(
             stderr_shared,
@@ -456,6 +467,9 @@ where
             stderr,
             stderr_limit,
             stderr_control,
+            stderr_pipe_closed_thread,
+            stderr_truncated_thread,
+            stop_sending_thread,
         )
     });
     let stdin_thread = child.stdin.take().map(|stdin| {
@@ -494,10 +508,66 @@ where
     if let Some(stdin_thread) = stdin_thread {
         let _ = stdin_thread.join();
     }
-    let stdout_truncated = stdout_thread.join().unwrap_or(true);
-    let stderr_truncated = stderr_thread.join().unwrap_or(true);
+
+    // A shell parent can exit while a long-lived child still owns one of the
+    // capture pipes.  Normal commands have no remaining process group, so wait
+    // for their finite output to close completely.  If a descendant remains in
+    // this request's process group, bound the drain and complete the request;
+    // the continuation bit makes that boundary explicit to the caller.
+    let process_group_alive = process_group_exists(control.process_group.load(Ordering::Acquire));
+    if process_group_alive {
+        let drain_deadline = Instant::now() + Duration::from_millis(120);
+        while !(stdout_pipe_closed.load(Ordering::Acquire)
+            && stderr_pipe_closed.load(Ordering::Acquire))
+            && Instant::now() < drain_deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+    } else {
+        while !(stdout_pipe_closed.load(Ordering::Acquire)
+            && stderr_pipe_closed.load(Ordering::Acquire))
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let pipes_closed =
+        stdout_pipe_closed.load(Ordering::Acquire) && stderr_pipe_closed.load(Ordering::Acquire);
+    let remote_process_may_continue = process_group_alive || !pipes_closed;
+    let status_code = exit_status(status);
+    if pipes_closed {
+        // All finite output has reached EOF.  Join before EXIT so the final
+        // stream frames are guaranteed to precede completion.
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+    } else {
+        // The descendant owns a pipe.  Stop emitting frames, complete the
+        // request, and let the reader threads drain quietly in the background.
+        stop_sending.store(true, Ordering::Release);
+    }
+    let payload = format!(
+        "{status_code}\n{}\n{}\n{}\n",
+        u8::from(stdout_truncated.load(Ordering::Acquire)),
+        u8::from(stderr_truncated.load(Ordering::Acquire)),
+        u8::from(remote_process_may_continue)
+    )
+    .into_bytes();
+    let _ = send_frame(
+        shared,
+        Frame {
+            kind: FrameKind::Exit,
+            request_id: spec.request_id,
+            payload,
+        },
+    );
+    if !pipes_closed {
+        // Dropping a JoinHandle detaches the blocked reader without retaining
+        // the request worker, so later requests are not serialized behind a
+        // server that intentionally outlives this command.
+        drop(stdout_thread);
+        drop(stderr_thread);
+    }
     control.process_group.store(0, Ordering::Release);
-    Ok((exit_status(status), stdout_truncated, stderr_truncated))
+    Ok(())
 }
 
 fn write_stdin(mut stdin: ChildStdin, input: &[u8]) -> bool {
@@ -511,6 +581,9 @@ fn drain_stream<W, R>(
     mut reader: R,
     limit: u64,
     control: Arc<RequestControl>,
+    pipe_closed: Arc<AtomicBool>,
+    truncated_state: Arc<AtomicBool>,
+    stop_sending: Arc<AtomicBool>,
 ) -> bool
 where
     W: Write + Send + 'static,
@@ -522,22 +595,28 @@ where
     let mut truncated = false;
     loop {
         let read = match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => {
+                pipe_closed.store(true, Ordering::Release);
+                break;
+            }
             Ok(read) => read,
         };
         let remaining = limit.saturating_sub(seen);
         let allowed = remaining.min(read as u64) as usize;
         if allowed < read {
             truncated = true;
+            truncated_state.store(true, Ordering::Release);
         }
         if allowed > 0
-            && send_frame(
+            && !stop_sending.load(Ordering::Acquire)
+            && send_stream_frame(
                 &shared,
                 Frame {
                     kind,
                     request_id,
                     payload: buffer[..allowed].to_vec(),
                 },
+                &stop_sending,
             )
             .is_err()
         {
@@ -550,6 +629,7 @@ where
             continue;
         }
     }
+    pipe_closed.store(true, Ordering::Release);
     truncated
 }
 
@@ -565,6 +645,23 @@ fn exit_status(status: std::process::ExitStatus) -> i32 {
         }
     }
     status.code().unwrap_or(1)
+}
+
+fn process_group_exists(process_group: i32) -> bool {
+    if process_group <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: kill with signal 0 only probes process-group existence.
+        let result = unsafe { libc::kill(-process_group, 0) };
+        result == 0 || io::Error::last_os_error().kind() == io::ErrorKind::PermissionDenied
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = process_group;
+        false
+    }
 }
 
 fn terminate_process_group(process_group: i32) {

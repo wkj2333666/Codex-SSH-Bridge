@@ -126,7 +126,7 @@ async fn dispatcher_executes_shell_command_and_preserves_streams_and_exit_status
     }
     assert_eq!(stdout_bytes, b"out");
     assert_eq!(stderr_bytes, b"err");
-    assert_eq!(exit.as_deref(), Some("7\n0\n0\n"));
+    assert_eq!(exit.as_deref(), Some("7\n0\n0\n0\n"));
     write_frame(&mut stdin, "CLOSE", 0, &[]).await;
     drop(stdin);
     assert!(child.wait().await.unwrap().success());

@@ -2825,6 +2825,63 @@ async fn cancellation_still_kills_pipe_inheriting_descendants_after_ssh_parent_e
 }
 
 #[tokio::test]
+async fn normal_completion_does_not_wait_for_pipe_inheriting_descendants() {
+    let files = TempDir::new().unwrap();
+    let pid_file = files.path().join("child.pid");
+    let parent_exit = files.path().join("parent.exit");
+    let fixture = task3_runner(
+        &["dev"],
+        Limits::default(),
+        Duration::from_secs(600),
+        &[
+            ("FAKE_SSH_MODE", "orphan-streams".to_owned()),
+            ("FAKE_SSH_SLEEP_SECONDS", "10".to_owned()),
+            ("FAKE_SSH_CHILD_PID_FILE", pid_file.display().to_string()),
+            (
+                "FAKE_SSH_PARENT_EXIT_FILE",
+                parent_exit.display().to_string(),
+            ),
+        ],
+    );
+    let runner = Arc::clone(&fixture.runner);
+    let started = Instant::now();
+    let result = timeout(
+        Duration::from_millis(500),
+        runner.execute(
+            request("dev", ShellRequest::Auto, Duration::from_secs(20)),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("normal completion waited for an orphaned stream");
+    let result = result.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(450));
+    assert_eq!(result.status, 0);
+    assert!(result.remote_process_may_continue);
+    let follow_up = timeout(
+        Duration::from_millis(500),
+        runner.execute(
+            request("dev", ShellRequest::Auto, Duration::from_secs(20)),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("a completed orphaned request blocked the next request")
+    .unwrap();
+    assert_eq!(follow_up.status, 0);
+    assert!(!follow_up.remote_process_may_continue);
+    wait_for_file(&pid_file).await;
+    wait_for_file(&parent_exit).await;
+    let pid = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    force_kill_process(pid);
+    wait_for_process_exit(pid).await;
+}
+
+#[tokio::test]
 async fn deadline_still_kills_pipe_inheriting_descendants_after_ssh_parent_exit() {
     let files = TempDir::new().unwrap();
     let pid_file = files.path().join("child.pid");

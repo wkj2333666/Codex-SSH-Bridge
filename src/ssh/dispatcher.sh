@@ -127,11 +127,13 @@ copy_capped() {
     full_path=$output_path.full
     remainder_path=$output_path.remainder
     extra_path=$output_path.extra
+    done_path=$output_path.done
     : >"$full_path"
     : >"$remainder_path"
     : >"$extra_path"
     rm -f "$marker_path"
-    exec 3<"$input_path" || return 74
+    rm -f "$done_path"
+    exec 3<"$input_path" || { : >"$done_path"; return 74; }
     full_blocks=$((limit / 65536))
     remainder_bytes=$((limit % 65536))
     if [ "$full_blocks" -gt 0 ]; then
@@ -150,16 +152,29 @@ copy_capped() {
     exec 3<&-
     cat "$full_path" "$remainder_path" >"$output_path"
     rm -f "$full_path" "$remainder_path" "$extra_path"
+    : >"$done_path"
 }
 send_stream() {
     stream_kind=$1
     stream_id=$2
     stream_path=$3
     stream_dir=$4
+    stream_source=$stream_path
+    if [ ! -e "$stream_source" ]; then
+        # A bounded continuation may run before copy_capped reaches its final
+        # concatenation.  Snapshot the bytes collected so far instead of
+        # treating the missing final file as a dispatcher failure.
+        stream_source=$stream_dir/$stream_kind.partial
+        cat "$stream_path.full" "$stream_path.remainder" >"$stream_source" 2>/dev/null || : >"$stream_source"
+        if [ -e "$stream_path" ]; then
+            rm -f "$stream_source"
+            stream_source=$stream_path
+        fi
+    fi
     stream_block=0
     while :; do
         stream_chunk=$stream_dir/chunk.$stream_block
-        dd if="$stream_path" of="$stream_chunk" bs="$STREAM_CHUNK_BYTES" skip="$stream_block" count=1 2>/dev/null || true
+        dd if="$stream_source" of="$stream_chunk" bs="$STREAM_CHUNK_BYTES" skip="$stream_block" count=1 2>/dev/null || true
         stream_length=$(wc -c <"$stream_chunk" | tr -d '[:space:]')
         [ "$stream_length" -gt 0 ] || { rm -f "$stream_chunk"; break; }
         send_file "$stream_kind" "$stream_id" "$stream_chunk"
@@ -167,6 +182,7 @@ send_stream() {
         stream_block=$((stream_block + 1))
         [ "$stream_length" -lt "$STREAM_CHUNK_BYTES" ] && break
     done
+    [ "$stream_source" = "$stream_path" ] || rm -f "$stream_source"
 }
 
 run_request() {
@@ -422,8 +438,35 @@ exit 0"
     fi
     if wait "$run_job_pid"; then run_status=$?; else run_status=$?; fi
     if [ -n "$run_watchdog" ]; then kill "$run_watchdog" 2>/dev/null || true; fi
-    wait "$run_stdout_collector" 2>/dev/null || true
-    wait "$run_stderr_collector" 2>/dev/null || true
+    # A shell can exit while a long-lived child (for example an HTTP server)
+    # still owns the request FIFOs.  Waiting indefinitely for those collectors
+    # would withhold EXIT and consume a host request slot forever.  Give normal
+    # output a bounded drain window, then complete the request and let the
+    # collectors finish in the background.  The fourth EXIT field tells the
+    # local session that a child may still be running.
+    run_process_group_alive=0
+    if kill -0 -"$run_pid" 2>/dev/null; then run_process_group_alive=1; fi
+    if [ "$run_process_group_alive" -eq 1 ]; then
+        run_drain_wait=0
+        while :; do
+            [ -f "$run_stdout.done" ] && [ -f "$run_stderr.done" ] && break
+            [ "$run_drain_wait" -lt 12 ] || break
+            sleep 0.01
+            run_drain_wait=$((run_drain_wait + 1))
+        done
+    else
+        # With no descendant process group left, preserve complete output even
+        # when the streams are still flushing a large finite payload.
+        wait "$run_stdout_collector" 2>/dev/null || true
+        wait "$run_stderr_collector" 2>/dev/null || true
+    fi
+    run_process_may_continue=0
+    if [ ! -f "$run_stdout.done" ] || [ ! -f "$run_stderr.done" ]; then
+        run_process_may_continue=1
+    fi
+    if [ "$run_process_group_alive" -eq 1 ] || kill -0 -"$run_pid" 2>/dev/null; then
+        run_process_may_continue=1
+    fi
     send_stream STDOUT "$run_id" "$run_stdout" "$run_dir"
     send_stream STDERR "$run_id" "$run_stderr" "$run_dir"
     if [ "${FAKE_SSH_MODE-}" = local-fixed ] &&
@@ -445,9 +488,20 @@ exit 0"
     [ -e "$run_stdout_marker" ] && run_stdout_truncated=1
     [ -e "$run_stderr_marker" ] && run_stderr_truncated=1
     run_exit_file=$run_dir/exit
-    printf '%s\n%s\n%s\n' "$run_status" "$run_stdout_truncated" "$run_stderr_truncated" >"$run_exit_file"
+    printf '%s\n%s\n%s\n%s\n' "$run_status" "$run_stdout_truncated" "$run_stderr_truncated" "$run_process_may_continue" >"$run_exit_file"
     send_file EXIT "$run_id" "$run_exit_file"
-    rm -rf "$run_dir"
+    # The request is complete from the protocol's point of view.  Remove the
+    # temporary directory separately once both collectors mark EOF, so a
+    # service that intentionally outlives the command cannot retain this
+    # request worker or block later frames on the SSH session.
+    (
+        while :; do
+            [ -d "$run_dir" ] || exit 0
+            [ -f "$run_stdout.done" ] && [ -f "$run_stderr.done" ] && break
+            sleep 0.05
+        done
+        rm -rf "$run_dir"
+    ) </dev/null >/dev/null 2>&1 &
 }
 
 read_frame() {
