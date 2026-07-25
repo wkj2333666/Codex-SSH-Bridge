@@ -44,145 +44,55 @@ fn task9_help_lists_human_commands_while_mcp_remains_an_entry_mode() {
 }
 
 #[test]
-fn task9_hosts_add_show_list_remove_round_trip_and_save_mode_0600() {
+fn hosts_list_discovers_every_concrete_alias_without_policy_fields() {
     let private = tempfile::TempDir::new().unwrap();
     let config = private.path().join("config.toml");
+    Config::default().save_atomic(&config).unwrap();
+    let home = private.path().join("home");
+    let ssh = home.join(".ssh");
+    fs::create_dir_all(&ssh).unwrap();
+    let mut ssh_config = String::from("Host *\n  ServerAliveInterval 30\n");
+    for index in (0..257).rev() {
+        ssh_config.push_str(&format!("Host server-{index:03}\n  HostName 192.0.2.1\n"));
+    }
+    fs::write(ssh.join("config"), ssh_config).unwrap();
 
-    bridge_command(&config, private.path())
-        .args([
-            "hosts",
-            "add",
-            "future-7",
-            "--root",
-            "/srv/future project",
-            "--description",
-            "future host",
-            "--read-only",
-        ])
+    let output = bridge_command(&config, private.path())
+        .env("HOME", &home)
+        .args(["hosts", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let aliases = value["hosts"].as_array().unwrap();
+    assert_eq!(aliases.len(), 257);
+    assert_eq!(aliases.first().unwrap(), "server-000");
+    assert_eq!(aliases.last().unwrap(), "server-256");
+    let rendered = String::from_utf8(output.stdout).unwrap();
+    for forbidden in ["configured_root", "description", "read_only", "limits"] {
+        assert!(!rendered.contains(forbidden), "{forbidden}");
+    }
+}
+
+#[test]
+fn hosts_cli_is_discovery_only() {
+    Command::new(env!("CARGO_BIN_EXE_codex-ssh-bridge"))
+        .args(["hosts", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("future-7"));
-
-    assert_eq!(
-        fs::metadata(&config).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    let loaded = codex_ssh_bridge::config::Config::load(&config).unwrap();
-    let host = loaded.host("future-7").unwrap();
-    assert_eq!(host.profile.root, "/srv/future project");
-    assert_eq!(host.profile.description.as_deref(), Some("future host"));
-    assert!(host.profile.read_only);
-
-    for subcommand in ["show", "list"] {
-        let mut command = bridge_command(&config, private.path());
-        command.args(["hosts", subcommand]);
-        if subcommand == "show" {
-            command.arg("future-7");
-        }
-        command
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("future-7"))
-            .stdout(predicate::str::contains("/srv/future project"));
-    }
-
-    bridge_command(&config, private.path())
-        .args(["hosts", "remove", "future-7"])
-        .assert()
-        .success();
-    assert!(
-        codex_ssh_bridge::config::Config::load(&config)
-            .unwrap()
-            .hosts
-            .is_empty()
-    );
-}
-
-#[test]
-fn task9_hosts_add_rejects_invalid_alias_and_relative_root_without_creating_config() {
-    for (alias, root) in [("-oProxyCommand=bad", "/srv/x"), ("valid", "relative/root")] {
-        let private = tempfile::TempDir::new().unwrap();
-        let config = private.path().join("config.toml");
-        bridge_command(&config, private.path())
-            .args(["hosts", "add", alias, "--root", root])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("INVALID_"));
-        assert!(!config.exists());
-    }
-}
-
-#[test]
-fn task9_hosts_add_never_imposes_a_five_host_ceiling() {
-    let private = tempfile::TempDir::new().unwrap();
-    let config = private.path().join("config.toml");
-    for index in 0..7 {
-        bridge_command(&config, private.path())
-            .args([
-                "hosts",
-                "add",
-                &format!("server-{index}"),
-                "--root",
-                &format!("/srv/server-{index}"),
-            ])
-            .assert()
-            .success();
-    }
-    assert_eq!(
-        codex_ssh_bridge::config::Config::load(&config)
-            .unwrap()
-            .hosts
-            .len(),
-        7
-    );
-}
-
-#[test]
-fn task9_hosts_add_refuses_symlinked_or_group_writable_config_ancestors() {
-    let private = tempfile::TempDir::new().unwrap();
-    let outside = tempfile::TempDir::new().unwrap();
-    let linked = private.path().join("linked");
-    symlink(outside.path(), &linked).unwrap();
-    let through_link = linked.join("bridge/config.toml");
-    bridge_command(&through_link, private.path())
-        .args(["hosts", "add", "dev", "--root", "/srv/dev"])
-        .assert()
-        .failure();
-    assert!(!outside.path().join("bridge").exists());
-
-    let writable = private.path().join("writable");
-    fs::create_dir(&writable).unwrap();
-    fs::set_permissions(&writable, fs::Permissions::from_mode(0o777)).unwrap();
-    let unsafe_config = writable.join("bridge/config.toml");
-    bridge_command(&unsafe_config, private.path())
-        .args(["hosts", "add", "dev", "--root", "/srv/dev"])
-        .assert()
-        .failure();
-    assert!(!writable.join("bridge").exists());
-}
-
-#[test]
-fn task9_fresh_config_creates_each_missing_parent_privately_without_global_config_flag() {
-    let private = tempfile::TempDir::new().unwrap();
-    let first = private.path().join("one");
-    let second = first.join("two");
-    let config = second.join("config.toml");
-    bridge_command(&config, private.path())
-        .args(["hosts", "add", "dev", "--root", "/srv/dev"])
-        .assert()
-        .success();
-    for directory in [&first, &second] {
-        assert_eq!(
-            fs::metadata(directory).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-    }
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("add").not())
+        .stdout(predicate::str::contains("show").not())
+        .stdout(predicate::str::contains("remove").not());
 
     Command::new(env!("CARGO_BIN_EXE_codex-ssh-bridge"))
-        .args(["--config", config.to_str().unwrap(), "hosts", "list"])
+        .args(["hosts", "add", "dev", "--root", "/srv/dev"])
         .assert()
-        .code(2)
-        .stderr("usage: codex-ssh-bridge mcp\n");
+        .failure();
 }
 
 #[test]
