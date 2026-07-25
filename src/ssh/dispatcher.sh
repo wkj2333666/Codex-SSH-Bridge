@@ -448,7 +448,7 @@ exit 0"
         setsid sh -c '
             printf "%s\n" "$$" >"$4" || exit 74
             sleep "$1"
-            if kill -0 "$2" 2>/dev/null; then
+            if kill -0 -"$2" 2>/dev/null; then
                 : >"$3"
                 kill -TERM -"$2" 2>/dev/null || true
                 sleep 1
