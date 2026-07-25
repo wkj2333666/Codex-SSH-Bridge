@@ -77,6 +77,11 @@ The installer performs a one-time configuration migration so an existing
 configuration, including its user-config includes. It does not use a
 bridge-owned allowlist and does not impose a host-count limit.
 
+Aliases are parsed once when the local MCP process starts and retained as
+immutable local routing state for that Codex task. Adding or changing an SSH
+alias takes effect in a new Codex task or after the MCP server is restarted; a
+warm remote request never rescans SSH configuration.
+
 Discovery keeps these rules:
 
 - wildcard-only patterns are not exposed as callable aliases;
@@ -418,17 +423,20 @@ A `cross-cache` workflow runs on:
 - changes to the cross-cache workflow;
 - manual dispatch.
 
-Its eight-target matrix builds the main bridge for all release targets and the
-helper for the six supported helper targets in the same target directory. It
-saves caches in default-branch scope, which later tag workflows may restore.
+Its nine-target union matrix builds the main bridge for all eight release
+targets and the helper for the six supported helper targets in the same target
+directory whenever their target triples coincide. The ARMv7 GNU main target
+and ARMv7 musl helper target remain separate matrix entries. It saves caches in
+default-branch scope, which later tag workflows may restore.
 
 ### Release workflow
 
-Release uses one eight-target build matrix instead of separate eight-job bridge
-and six-job helper matrices.
+Release uses one nine-target union build matrix instead of separate eight-job
+bridge and six-job helper matrices.
 
-- Every target builds the bridge.
+- Eight entries build the bridge.
 - The six helper targets also build and verify the helper in the same job.
+- The ARMv7 musl helper-only entry does not produce a main bridge archive.
 - Jobs restore main-scoped caches but do not save tag-scoped target caches.
 - Packaging still emits eight archives.
 - Every archive contains its target's bridge plus all six helpers, Skill,
