@@ -36,7 +36,7 @@ All schemas are closed. Follow the live schema if it differs from this quick ref
 
 ## Shell and mutation safety
 
-Omit `shell` (or set `shell:"bash"`) for the Bash default. Set `shell:"sh"` explicitly only when POSIX sh is intended, and use `shell:"login"` only when the account login environment is required. There is no `auto` value and no silent Bash-to-sh fallback: if Bash is unavailable, the factual capability error reports `requested_shell` and `available_shells`; decide whether the command is POSIX-compatible before retrying with `shell:"sh"`.
+Omit `shell` (or set `shell:"bash"`) for the Bash default. Set `shell:"sh"` explicitly only when POSIX sh is intended, and use `shell:"login"` only when the account login environment is required. The selected value controls the actual shell on the remote host. There is no `auto` value and no silent Bash-to-sh fallback: if Bash is unavailable, the factual capability error reports `requested_shell` and `available_shells`; decide whether the command is POSIX-compatible before retrying with `shell:"sh"`.
 
 Commands that use Bash-only syntax must request Bash explicitly (or rely on the omitted Bash default); the bridge never labels a POSIX `sh` execution as an implicit Bash fallback.
 
@@ -48,7 +48,7 @@ Treat `remote_run` as mutating even for apparently read-only commands. A timeout
 
 When a shell parent exits while a descendant still owns a bridge pipe, the
 bridge returns the parent result after a bounded drain grace and sets
-`remote_process_may_continue: true`; later requests on that host remain usable.
+the process-may-continue flag; later requests on that host remain usable.
 This flag means the descendant may still be running, not that a mutation can be
 retried safely. The stdout/stderr preview is only the bounded snapshot observed
 before completion and may omit later service output. Keep the service PID/log
