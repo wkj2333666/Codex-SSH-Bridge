@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
