@@ -358,6 +358,7 @@ impl SshRunner {
             }
         };
         let capture_ms = elapsed_ms(capture_started.elapsed());
+        let remote_process_may_continue = session_result.remote_process_may_continue;
         if session_result.stdout_truncated || session_result.stderr_truncated {
             let mut error = BridgeError::new(
                 ErrorCode::OutputLimit,
@@ -366,7 +367,7 @@ impl SshRunner {
             );
             error.details.host = Some(request.host.clone());
             error.details.bytes_seen = Some(output.aggregate_bytes);
-            error.details.remote_process_may_continue = Some(false);
+            error.details.remote_process_may_continue = Some(remote_process_may_continue);
             self.output_store.discard(&output).await;
             return Err(attach_selected_context(
                 error,
@@ -394,7 +395,7 @@ impl SshRunner {
             shell,
             physical_root: capability.physical_root.clone(),
             output,
-            remote_process_may_continue: false,
+            remote_process_may_continue,
             helper_mode: session.helper_mode(),
             timing: RunTiming {
                 preparation_ms,
