@@ -27,6 +27,8 @@ use crate::config::EffectiveLimits;
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
 
 const CANCEL_GRACE: Duration = Duration::from_millis(200);
+const OUTPUT_FORWARD_QUEUE_CAPACITY: usize = 16;
+const OUTPUT_FORWARD_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct SessionRequest {
@@ -92,9 +94,78 @@ struct PendingRequest {
     stderr_seen: u64,
     stdout_truncated: bool,
     stderr_truncated: bool,
-    stdout_sink: Option<DuplexStream>,
-    stderr_sink: Option<DuplexStream>,
+    stdout_sink: Option<OutputForwarder>,
+    stderr_sink: Option<OutputForwarder>,
     sender: oneshot::Sender<BridgeResult<SessionResult>>,
+}
+
+struct OutputForwarder {
+    sender: Option<mpsc::Sender<Vec<u8>>>,
+    cancel: Option<CancellationToken>,
+    failed: Arc<AtomicBool>,
+}
+
+impl OutputForwarder {
+    fn new(mut sink: DuplexStream) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(OUTPUT_FORWARD_QUEUE_CAPACITY);
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let failed = Arc::new(AtomicBool::new(false));
+        let worker_failed = Arc::clone(&failed);
+        tokio::spawn(async move {
+            while let Some(bytes) = receiver.recv().await {
+                let result = tokio::select! {
+                    biased;
+                    () = worker_cancel.cancelled() => return,
+                    result = sink.write_all(&bytes) => result,
+                };
+                if result.is_err() {
+                    worker_failed.store(true, Ordering::Release);
+                    return;
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            cancel: Some(cancel),
+            failed,
+        }
+    }
+
+    fn forward(&mut self, bytes: &[u8]) -> bool {
+        let Some(sender) = &self.sender else {
+            return false;
+        };
+        for chunk in bytes.chunks(OUTPUT_FORWARD_CHUNK_BYTES) {
+            if sender.try_send(chunk.to_vec()).is_err() {
+                self.failed.store(true, Ordering::Release);
+                if let Some(cancel) = self.cancel.take() {
+                    cancel.cancel();
+                }
+                self.sender.take();
+                return false;
+            }
+        }
+        true
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    fn finish(mut self) -> bool {
+        self.sender.take();
+        self.cancel.take();
+        self.failed()
+    }
+}
+
+impl Drop for OutputForwarder {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+    }
 }
 
 struct Outbound {
@@ -490,7 +561,12 @@ impl HostSession {
         let (sender, mut receiver) = oneshot::channel();
         let (stdout_sink, stderr_sink) = request
             .output
-            .map(|output| (Some(output.stdout), Some(output.stderr)))
+            .map(|output| {
+                (
+                    Some(OutputForwarder::new(output.stdout)),
+                    Some(OutputForwarder::new(output.stderr)),
+                )
+            })
             .unwrap_or((None, None));
         let pending = PendingRequest {
             started,
@@ -829,7 +905,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 }
                 let allowed = remaining.min(frame.payload.len());
                 let write_failed = if let Some(sink) = request.stdout_sink.as_mut() {
-                    sink.write_all(&frame.payload[..allowed]).await.is_err()
+                    !sink.forward(&frame.payload[..allowed])
                 } else {
                     request.stdout.extend_from_slice(&frame.payload[..allowed]);
                     false
@@ -865,7 +941,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 }
                 let allowed = remaining.min(frame.payload.len());
                 let write_failed = if let Some(sink) = request.stderr_sink.as_mut() {
-                    sink.write_all(&frame.payload[..allowed]).await.is_err()
+                    !sink.forward(&frame.payload[..allowed])
                 } else {
                     request.stderr.extend_from_slice(&frame.payload[..allowed]);
                     false
@@ -901,7 +977,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 timed_out,
             ) = parse_exit(&frame.payload)
                 .map_err(|message| protocol_error(&inner.host, &message))?;
-            let request = inner
+            let mut request = inner
                 .pending
                 .lock()
                 .await
@@ -912,13 +988,25 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                         "dispatcher returned an unknown exit request ID",
                     )
                 })?;
+            let stdout_forward_failed = request
+                .stdout_sink
+                .take()
+                .is_some_and(OutputForwarder::finish);
+            let stderr_forward_failed = request
+                .stderr_sink
+                .take()
+                .is_some_and(OutputForwarder::finish);
             let result = SessionResult {
                 request_id: frame.request_id,
                 status,
                 stdout: request.stdout,
                 stderr: request.stderr,
-                stdout_truncated: request.stdout_truncated || stdout_truncated,
-                stderr_truncated: request.stderr_truncated || stderr_truncated,
+                stdout_truncated: request.stdout_truncated
+                    || stdout_forward_failed
+                    || stdout_truncated,
+                stderr_truncated: request.stderr_truncated
+                    || stderr_forward_failed
+                    || stderr_truncated,
                 elapsed_ms: elapsed_ms(request.started.elapsed()),
                 remote_process_may_continue,
                 timed_out,
@@ -1184,7 +1272,7 @@ mod tests {
     use tokio::time::{sleep, timeout};
     use tokio_util::sync::CancellationToken;
 
-    use super::{HostSession, SessionRequest, parse_exit, valid_handshake};
+    use super::{HostSession, SessionOutput, SessionRequest, parse_exit, valid_handshake};
     use crate::capability::{ShellKind, ShellSelection};
     use crate::config::EffectiveLimits;
     use crate::ssh::SshPolicy;
@@ -1317,6 +1405,62 @@ mod tests {
         assert_eq!(first.stdout, b"first");
         assert_eq!(second.stdout, b"second");
         shared.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unread_output_from_one_request_does_not_block_other_request_ids() {
+        let temp = TempDir::new().unwrap();
+        let mut session_limits = limits();
+        session_limits.max_frame_bytes = 4096;
+        let session = Arc::new(
+            HostSession::connect_with(
+                policy(),
+                "test-host".to_owned(),
+                session_limits,
+                OsString::from(fake_ssh(&temp)),
+                BTreeMap::new(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        let (stdout_sink, stdout_reader) = tokio::io::duplex(1);
+        let (stderr_sink, stderr_reader) = tokio::io::duplex(1);
+        let mut noisy_request = request(
+            "dd if=/dev/zero bs=4096 count=64 2>/dev/null",
+            Duration::from_secs(2),
+        );
+        noisy_request.stdout_limit = 256 * 1024;
+        noisy_request.output = Some(SessionOutput {
+            stdout: stdout_sink,
+            stderr: stderr_sink,
+        });
+        let noisy = {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move {
+                session
+                    .execute(noisy_request, CancellationToken::new())
+                    .await
+            })
+        };
+
+        sleep(Duration::from_millis(25)).await;
+        let quick = timeout(
+            Duration::from_secs(1),
+            session.execute(
+                request("printf quick", Duration::from_secs(1)),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("an unread peer stream must not block another request ID")
+        .unwrap();
+        assert_eq!(quick.stdout, b"quick");
+        let noisy = noisy.await.unwrap().unwrap();
+        assert!(noisy.stdout_truncated);
+        drop(stdout_reader);
+        drop(stderr_reader);
+        session.close().await.unwrap();
     }
 
     #[tokio::test]
