@@ -1572,10 +1572,13 @@ mod tests {
                 bytes: vec![0; 1024 * 1024],
             },
         );
-        let error = timeout(Duration::from_millis(300), connect)
+        let result = timeout(Duration::from_millis(300), connect)
             .await
-            .expect("connection setup exceeded its bounded cleanup window")
-            .expect_err("blocked helper upload unexpectedly connected");
+            .expect("connection setup exceeded its bounded cleanup window");
+        let error = match result {
+            Ok(_) => panic!("blocked helper upload unexpectedly connected"),
+            Err(error) => error,
+        };
         assert_eq!(error.code, ErrorCode::ConnectTimeout);
     }
 
