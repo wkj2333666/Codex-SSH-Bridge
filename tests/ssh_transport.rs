@@ -174,6 +174,40 @@ fn argv_uses_hardened_distinct_options_and_a_private_hashed_control_path() {
 }
 
 #[test]
+fn control_path_is_reused_within_one_runner_and_isolated_between_runners() {
+    let base = TempDir::new().unwrap();
+    let paths = RuntimePaths::ensure_from_base(base.path()).unwrap();
+    let config = config_with_host("dev-box", "/srv/project");
+    let first = SshPolicy::for_host_with_instance(
+        "dev-box",
+        config.limits(),
+        &paths,
+        "stable identity",
+        "runner-a",
+    )
+    .unwrap();
+    let same = SshPolicy::for_host_with_instance(
+        "dev-box",
+        config.limits(),
+        &paths,
+        "stable identity",
+        "runner-a",
+    )
+    .unwrap();
+    let isolated = SshPolicy::for_host_with_instance(
+        "dev-box",
+        config.limits(),
+        &paths,
+        "stable identity",
+        "runner-b",
+    )
+    .unwrap();
+
+    assert_eq!(first.control_path(), same.control_path());
+    assert_ne!(first.control_path(), isolated.control_path());
+}
+
+#[test]
 fn operational_argv_rounds_connect_timeout_up_to_openssh_seconds_exactly() {
     for (milliseconds, expected_seconds) in [
         (1, 1),

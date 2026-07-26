@@ -9,7 +9,9 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use std::time::SystemTime;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -47,6 +49,7 @@ const PROBE_OUTPUT_LIMIT: u64 = 1024 * 1024;
 const REMOTE_TIMEOUT_RETURN_GRACE: Duration = Duration::from_millis(200);
 const TERM_GRACE: Duration = Duration::from_millis(50);
 const DRAIN_GRACE: Duration = Duration::from_millis(125);
+static RUNNER_INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
@@ -123,6 +126,7 @@ pub struct SshRunner {
     output_store: Arc<OutputStore>,
     executable: PathBuf,
     environment: BTreeMap<OsString, OsString>,
+    instance_identity: String,
     capabilities: CapabilityCache,
     policies: Mutex<HashMap<String, Arc<SshPolicy>>>,
     identities: Mutex<HashMap<String, String>>,
@@ -168,6 +172,7 @@ impl SshRunner {
             output_store,
             executable,
             environment,
+            instance_identity: runner_instance_identity(),
             capabilities: CapabilityCache::default(),
             policies: Mutex::new(HashMap::new()),
             identities: Mutex::new(HashMap::new()),
@@ -197,18 +202,30 @@ impl SshRunner {
         validate_request(&request, limits)?;
 
         let initializer = self.initializer(&request.host).await;
+        let initialize_deadline = connect_deadline(limits.connect_timeout_ms);
         let initialize_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
             guard = initializer.lock() => guard,
+            () = tokio::time::sleep_until(initialize_deadline) => {
+                return Err(connect_wait_timeout(
+                    &request.host,
+                    "SSH host initialization wait timed out",
+                ));
+            }
         };
         if cancel.is_cancelled() {
             return Err(cancelled_error(false, 0));
         }
 
-        let (policy, capability) = self
-            .initialize_host(&request.host, &root, limits.connect_timeout_ms, &cancel)
-            .await?;
+        let initialize_timeout_ms =
+            remaining_connect_timeout_ms(initialize_deadline, &request.host)?;
+        let (policy, capability) = tokio::time::timeout_at(
+            initialize_deadline,
+            self.initialize_host(&request.host, &root, initialize_timeout_ms, &cancel),
+        )
+        .await
+        .map_err(|_| connect_wait_timeout(&request.host, "SSH host initialization timed out"))??;
         drop(initialize_guard);
         if cancel.is_cancelled() {
             return Err(cancelled_error(false, 0));
@@ -222,15 +239,15 @@ impl SshRunner {
             );
             error
         })?;
-        let operation_deadline = Instant::now()
-            .checked_add(request.timeout)
-            .ok_or_else(|| BridgeError::invalid_argument("command timeout is too large"))?;
         let (session, session_reused) = self
             .session_for_host(&policy, &request.host, limits, &capability, &cancel)
             .await
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
             })?;
+        let operation_deadline = Instant::now()
+            .checked_add(request.timeout)
+            .ok_or_else(|| BridgeError::invalid_argument("command timeout is too large"))?;
         drop(initialization_profile);
         let preparation_profile = crate::bridge_profile_span!(crate::profile::ProfileEvent {
             phase: "runner_preparation",
@@ -407,7 +424,18 @@ impl SshRunner {
                     .or_insert_with(|| Arc::new(Mutex::new(()))),
             )
         };
-        let _guard = connector.lock().await;
+        let session_deadline = connect_deadline(limits.connect_timeout_ms);
+        let _guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
+            guard = connector.lock() => guard,
+            () = tokio::time::sleep_until(session_deadline) => {
+                return Err(connect_wait_timeout(
+                    host,
+                    "SSH session initializer wait timed out",
+                ));
+            }
+        };
         if let Some(session) = self.sessions.lock().await.get(host).cloned() {
             if !session.is_closed() {
                 return Ok((session, true));
@@ -422,11 +450,13 @@ impl SshRunner {
             elapsed_us: 0,
             bytes: None,
         });
+        let mut connect_limits = limits;
+        connect_limits.connect_timeout_ms = remaining_connect_timeout_ms(session_deadline, host)?;
         let session = Arc::new(
             HostSession::connect_with_capability(
                 policy.clone(),
                 host.to_owned(),
-                limits,
+                connect_limits,
                 self.executable.clone().into_os_string(),
                 self.environment.clone(),
                 capability,
@@ -550,14 +580,25 @@ impl SshRunner {
         let root = crate::REMOTE_OPERATION_ROOT.to_owned();
         let limits = self.config.limits();
         let initializer = self.initializer(host).await;
+        let initialize_deadline = connect_deadline(limits.connect_timeout_ms);
         let initialize_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
             guard = initializer.lock() => guard,
+            () = tokio::time::sleep_until(initialize_deadline) => {
+                return Err(connect_wait_timeout(
+                    host,
+                    "SSH host initialization wait timed out",
+                ));
+            }
         };
-        let prepared = self
-            .initialize_host(host, &root, limits.connect_timeout_ms, cancel)
-            .await;
+        let initialize_timeout_ms = remaining_connect_timeout_ms(initialize_deadline, host)?;
+        let prepared = tokio::time::timeout_at(
+            initialize_deadline,
+            self.initialize_host(host, &root, initialize_timeout_ms, cancel),
+        )
+        .await
+        .map_err(|_| connect_wait_timeout(host, "SSH host initialization timed out"))?;
         drop(initialize_guard);
         prepared
     }
@@ -664,10 +705,26 @@ impl SshRunner {
         }
 
         let initializer = self.initializer(&request.host).await;
-        let initialize_guard = tokio::select! { biased; () = cancel.cancelled() => return Err(cancelled_error(false, 0)), guard = initializer.lock() => guard };
-        let (policy, capability) = self
-            .initialize_host(&request.host, &root, limits.connect_timeout_ms, &cancel)
-            .await?;
+        let initialize_deadline = connect_deadline(limits.connect_timeout_ms);
+        let initialize_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
+            guard = initializer.lock() => guard,
+            () = tokio::time::sleep_until(initialize_deadline) => {
+                return Err(connect_wait_timeout(
+                    &request.host,
+                    "SSH host initialization wait timed out",
+                ));
+            }
+        };
+        let initialize_timeout_ms =
+            remaining_connect_timeout_ms(initialize_deadline, &request.host)?;
+        let (policy, capability) = tokio::time::timeout_at(
+            initialize_deadline,
+            self.initialize_host(&request.host, &root, initialize_timeout_ms, &cancel),
+        )
+        .await
+        .map_err(|_| connect_wait_timeout(&request.host, "SSH host initialization timed out"))??;
         drop(initialize_guard);
         let shell = ShellSelection {
             shell: ShellKind::PosixSh,
@@ -687,15 +744,15 @@ impl SshRunner {
                 ));
             }
         }
-        let operation_deadline = Instant::now()
-            .checked_add(request.timeout)
-            .ok_or_else(|| BridgeError::invalid_argument("fixed command timeout is too large"))?;
         let (session, _session_reused) = self
             .session_for_host(&policy, &request.host, limits, &capability, &cancel)
             .await
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
             })?;
+        let operation_deadline = Instant::now()
+            .checked_add(request.timeout)
+            .ok_or_else(|| BridgeError::invalid_argument("fixed command timeout is too large"))?;
         pin_fixed_inputs(
             &root,
             &mut request.args,
@@ -857,8 +914,13 @@ impl SshRunner {
                         }
                     }
                 };
-                let policy =
-                    SshPolicy::for_host(host, self.config.limits(), &self.runtime, &identity)?;
+                let policy = SshPolicy::for_host_with_instance(
+                    host,
+                    self.config.limits(),
+                    &self.runtime,
+                    &identity,
+                    &self.instance_identity,
+                )?;
                 self.policies
                     .lock()
                     .await
@@ -1395,6 +1457,36 @@ fn remaining_timeout(deadline: Instant) -> BridgeResult<Duration> {
             error.details.remote_process_may_continue = Some(false);
             error
         })
+}
+
+fn connect_deadline(connect_timeout_ms: u64) -> Instant {
+    Instant::now() + Duration::from_millis(connect_timeout_ms.max(1))
+}
+
+fn remaining_connect_timeout_ms(deadline: Instant, host: &str) -> BridgeResult<u64> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| connect_wait_timeout(host, "SSH connection setup timed out"))?;
+    Ok(u64::try_from(remaining.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1))
+}
+
+fn connect_wait_timeout(host: &str, message: &str) -> BridgeError {
+    let mut error = BridgeError::new(ErrorCode::ConnectTimeout, message, true);
+    error.details.host = Some(host.to_owned());
+    error.details.remote_process_may_continue = Some(false);
+    error
+}
+
+fn runner_instance_identity() -> String {
+    let sequence = RUNNER_INSTANCE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let unix_nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}:{unix_nanos}:{sequence}", std::process::id())
 }
 
 fn validate_request(request: &RunRequest, limits: EffectiveLimits) -> BridgeResult<()> {

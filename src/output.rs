@@ -1728,8 +1728,8 @@ impl PreviewSink {
         Self {
             head_capacity,
             tail_capacity: budget - head_capacity,
-            head: Vec::with_capacity(head_capacity),
-            tail: Vec::with_capacity(budget - head_capacity),
+            head: Vec::new(),
+            tail: Vec::new(),
             bytes_seen: 0,
         }
     }

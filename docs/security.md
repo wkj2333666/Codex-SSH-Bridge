@@ -57,14 +57,21 @@ Every operational SSH call forces separate `-o` arguments for:
 | `PermitLocalCommand=no` | Prevent local commands from SSH config |
 | `RequestTTY=no` | Keep operations non-interactive |
 | `ControlMaster=auto` | Reuse a private connection when safe |
-| `ControlPersist=300` | Keep the private master for five minutes |
+| `ControlPersist=5` | Keep the per-MCP private master briefly during cold setup |
 | `ServerAliveInterval=15` | Detect a silent encrypted-transport failure every 15 seconds |
 | `ServerAliveCountMax=3` | Stop after three unanswered encrypted keepalives |
-| `ControlPath=<private hashed path>` | Avoid public/predictable sockets and cross-profile masters |
+| `ControlPath=<private hashed path>` | Isolate every MCP runner while hiding aliases and resolved identities |
 
 Connection setup also applies the configured `ConnectTimeout`. Ordinary SSH and SSHFS both inherit the two server-alive options exactly once; SSHFS additionally applies `reconnect` and never enables `allow_other`.
 
 The first operation for an alias runs bounded `ssh -G` with the security-critical options and hashes the resulting configuration. That digest and the derived policy are cached for the bridge process; warm requests do not repeat `ssh -G`. A mismatch discovered during initial setup is non-retryable `INVALID_CONFIG`; restart the bridge only after reviewing an intentional local alias change. Pattern-only aliases are not added to the bridge config. Host aliases are passed after `--`, and the MCP surface accepts no arbitrary SSH option.
+
+Each MCP runner includes a private instance identity in the `ControlPath` hash.
+Independent Codex tasks therefore cannot attach to one another's OpenSSH
+master. The identity is not a credential; the containing runtime directory is
+already current-user-owned mode 0700. Within one runner, the capability probe
+and persistent helper startup may reuse the same master during the five-second
+cold-start grace.
 
 The local Unix user and that user's OpenSSH configuration remain trusted execution authority. A same-UID process can change configuration after the `ssh -G` comparison and before the following OpenSSH invocation; that exact post-check race is inside the same-UID trust boundary, not a claimed hostile-local isolation boundary. Restart the bridge only after reviewing an intentional alias change.
 

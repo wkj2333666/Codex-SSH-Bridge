@@ -53,7 +53,7 @@ const SSH_G_OPTIONS: &[&str] = &[
     "ClearAllForwardings=yes",
     "PermitLocalCommand=no",
     "RequestTTY=no",
-    "ControlPersist=300",
+    "ControlPersist=5",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,9 +292,27 @@ impl SshPolicy {
         runtime_paths: &RuntimePaths,
         resolved_connection_identity: &str,
     ) -> BridgeResult<Self> {
-        let control_path = runtime_paths
-            .directory
-            .join(control_filename(alias, resolved_connection_identity));
+        Self::for_host_with_instance(
+            alias,
+            limits,
+            runtime_paths,
+            resolved_connection_identity,
+            "standalone-policy",
+        )
+    }
+
+    pub fn for_host_with_instance(
+        alias: &str,
+        limits: EffectiveLimits,
+        runtime_paths: &RuntimePaths,
+        resolved_connection_identity: &str,
+        runner_instance_identity: &str,
+    ) -> BridgeResult<Self> {
+        let control_path = runtime_paths.directory.join(control_filename(
+            alias,
+            resolved_connection_identity,
+            runner_instance_identity,
+        ));
         let control_option = encoded_control_path_option(&control_path)?;
 
         let mut options = Vec::new();
@@ -307,7 +325,7 @@ impl SshPolicy {
             "PermitLocalCommand=no",
             "RequestTTY=no",
             "ControlMaster=auto",
-            "ControlPersist=300",
+            "ControlPersist=5",
         ] {
             options.push(OsString::from("-o"));
             options.push(OsString::from(option));
@@ -402,12 +420,18 @@ fn encoded_control_path_option(control_path: &Path) -> BridgeResult<OsString> {
     Ok(OsString::from(encoded))
 }
 
-fn control_filename(alias: &str, resolved_connection_identity: &str) -> String {
+fn control_filename(
+    alias: &str,
+    resolved_connection_identity: &str,
+    runner_instance_identity: &str,
+) -> String {
     let mut digest = Sha256::new();
     digest.update((alias.len() as u64).to_be_bytes());
     digest.update(alias.as_bytes());
     digest.update((resolved_connection_identity.len() as u64).to_be_bytes());
     digest.update(resolved_connection_identity.as_bytes());
+    digest.update((runner_instance_identity.len() as u64).to_be_bytes());
+    digest.update(runner_instance_identity.as_bytes());
     let digest = digest.finalize();
     let mut filename = String::from("cm-");
     for byte in &digest[..16] {

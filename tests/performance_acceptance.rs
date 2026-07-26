@@ -40,6 +40,8 @@ const SSH_P95_CEILING: Duration = Duration::from_millis(250);
 const FIVE_HOST_CEILING: Duration = Duration::from_millis(1_500);
 const CANCELLATION_CEILING: Duration = Duration::from_millis(250);
 const OUTPUT_RSS_CEILING_KIB: u64 = 32 * 1024;
+const ZERO_OUTPUT_RSS_GROWTH_CEILING_KIB: u64 = 8 * 1024;
+const ZERO_OUTPUT_RSS_TAIL_GROWTH_CEILING_KIB: u64 = 2 * 1024;
 const WIDE_JSON_RSS_CEILING_KIB: u64 = 48 * 1024;
 
 struct FakeFixture {
@@ -882,6 +884,103 @@ async fn output_rss_child() {
 }
 
 #[test]
+fn task11_release_zero_output_concurrent_rss_fresh_child() {
+    const CHILD_ENV: &str = "CODEX_SSH_BRIDGE_TASK11_ZERO_OUTPUT_RSS_CHILD";
+    const TEST_NAME: &str = "task11_release_zero_output_concurrent_rss_fresh_child";
+    if cfg!(debug_assertions) {
+        eprintln!("Task11 zero-output RSS acceptance is release-only");
+        return;
+    }
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(zero_output_rss_child());
+        return;
+    }
+    run_fresh_child(CHILD_ENV, TEST_NAME, "Task11 zero-output RSS:");
+}
+
+async fn zero_output_rss_child() {
+    const CONCURRENCY: usize = 20;
+    const ROUNDS: usize = 50;
+    let fixture = fake_fixture(
+        &["dev"],
+        &[
+            ("FAKE_SSH_MODE", OsString::from("streams")),
+            ("FAKE_SSH_STDOUT", OsString::new()),
+            ("FAKE_SSH_STDERR", OsString::new()),
+        ],
+    );
+    let tools = Arc::new(fixture.tools);
+    for _ in 0..CONCURRENCY {
+        let result = call_json(
+            &tools,
+            "remote_run",
+            json!({"host":"dev","cwd":"/","command":":","shell":"sh"}),
+        )
+        .await;
+        assert_eq!(result["isError"], Value::Null, "{result}");
+    }
+
+    let baseline_rss = resident_kib();
+    let baseline_fds = proc_entry_count("/proc/self/fd");
+    let baseline_threads = proc_entry_count("/proc/self/task");
+    let mut observations = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let mut calls = JoinSet::new();
+        for _ in 0..CONCURRENCY {
+            let tools = Arc::clone(&tools);
+            calls.spawn(async move {
+                call_json(
+                    &tools,
+                    "remote_run",
+                    json!({"host":"dev","cwd":"/","command":":","shell":"sh"}),
+                )
+                .await
+            });
+        }
+        while let Some(result) = calls.join_next().await {
+            let result = result.unwrap();
+            assert_eq!(result["isError"], Value::Null, "{result}");
+        }
+        observations.push(resident_kib());
+    }
+
+    let final_rss = resident_kib();
+    let final_fds = proc_entry_count("/proc/self/fd");
+    let final_threads = proc_entry_count("/proc/self/task");
+    let total_growth = final_rss.saturating_sub(baseline_rss);
+    let tail = &observations[observations.len() - 5..];
+    let tail_growth = tail
+        .iter()
+        .max()
+        .unwrap()
+        .saturating_sub(*tail.iter().min().unwrap());
+    eprintln!(
+        "Task11 zero-output RSS: requests={} concurrency={CONCURRENCY} baseline={baseline_rss} KiB final={final_rss} KiB growth={total_growth} KiB tail_growth={tail_growth} KiB fds={baseline_fds}->{final_fds} threads={baseline_threads}->{final_threads}",
+        CONCURRENCY * ROUNDS
+    );
+    assert!(
+        total_growth <= ZERO_OUTPUT_RSS_GROWTH_CEILING_KIB,
+        "zero-output RSS growth={total_growth} KiB"
+    );
+    assert!(
+        tail_growth <= ZERO_OUTPUT_RSS_TAIL_GROWTH_CEILING_KIB,
+        "zero-output final-five growth={tail_growth} KiB"
+    );
+    assert!(
+        final_fds <= baseline_fds + 4,
+        "zero-output descriptors grew from {baseline_fds} to {final_fds}"
+    );
+    assert!(
+        final_threads <= baseline_threads + 2,
+        "zero-output threads grew from {baseline_threads} to {final_threads}"
+    );
+}
+
+#[test]
 fn task11_release_max_wide_array_rss_fresh_child() {
     run_wide_json_rss_fresh_child(
         "CODEX_SSH_BRIDGE_TASK11_WIDE_ARRAY_RSS_CHILD",
@@ -1046,6 +1145,10 @@ fn resident_kib() -> u64 {
                 .and_then(|value| value.parse().ok())
         })
         .unwrap()
+}
+
+fn proc_entry_count(path: &str) -> usize {
+    std::fs::read_dir(path).unwrap().count()
 }
 
 #[test]

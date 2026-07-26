@@ -364,7 +364,10 @@ fn task8_binary_lifecycle_smoke_exposes_exact_surface_without_leaks() {
             .collect::<Vec<_>>()
     );
     assert_eq!(lines[2]["result"]["isError"], Value::Null);
-    assert_eq!(lines[2]["result"]["structuredContent"], json!({}));
+    assert_eq!(
+        lines[2]["result"]["structuredContent"],
+        json!({"hosts":["dev"]})
+    );
     assert_eq!(text_content(&lines[2]["result"]), "dev");
     assert_eq!(std::fs::read(&ssh_log).unwrap_or_default(), b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -503,7 +506,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
 
     let hosts = session.call("remote_hosts", json!({})).await;
     assert_no_diagnostic_success_fields(&hosts);
-    assert_eq!(hosts["structuredContent"], json!({}));
+    assert_eq!(hosts["structuredContent"], json!({"hosts":["dev"]}));
     assert_eq!(text_content(&hosts), "dev");
 
     let listed = session
@@ -1975,7 +1978,10 @@ async fn task8_cancel_process_mcp_reaches_group_under_250ms_and_service_recovers
         .await;
     let hosts = session.read_response(Duration::from_secs(1)).await;
     assert_eq!(hosts["id"], 43);
-    assert_eq!(hosts["result"]["structuredContent"], json!({}));
+    assert_eq!(
+        hosts["result"]["structuredContent"],
+        json!({"hosts":["dev"]})
+    );
     assert_eq!(text_content(&hosts["result"]), "dev");
     assert!(
         tokio::time::timeout(Duration::from_millis(500), session.output.fill_buf())

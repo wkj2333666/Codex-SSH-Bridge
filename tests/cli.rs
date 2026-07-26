@@ -166,7 +166,7 @@ fn task9_sshfs_argv_has_exact_hardening_without_bridge_owned_read_only_policy() 
         "ServerAliveInterval=15",
         "ServerAliveCountMax=3",
         "ControlMaster=auto",
-        "ControlPersist=300",
+        "ControlPersist=5",
         "reconnect",
         "nonempty",
     ] {
@@ -533,7 +533,7 @@ fn verbose_doctor_ssh_g_argv_uses_effective_timeout_and_exact_hardening_once() {
         "ClearAllForwardings=yes",
         "PermitLocalCommand=no",
         "RequestTTY=no",
-        "ControlPersist=300",
+        "ControlPersist=5",
         "ServerAliveInterval=15",
         "ServerAliveCountMax=3",
         "ConnectTimeout=3",

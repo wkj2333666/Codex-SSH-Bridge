@@ -11,12 +11,12 @@ Keep Codex, credentials, approvals, and the bridge on the local machine. Every p
 
 Use only aliases returned by `remote_hosts`. Never construct raw SSH commands or invent a hostname. The bridge owns host resolution, transport quoting, capability probes, limits, and shell selection.
 
-`remote_hosts` returns its aliases as newline-delimited `content.text`. Treat
-that text as the authoritative host list. Its `structuredContent` may be `{}`
-because host discovery has no additional aggregate metadata; `{}` does not
-mean that discovery returned zero hosts. If the text contains aliases, use
-those exact lines and do not run configuration troubleshooting or add hosts.
-Only an empty `content.text` means that no aliases were discovered.
+`remote_hosts` returns `structuredContent.hosts` as an array of exact aliases
+and repeats the same aliases as newline-delimited `content.text` for direct
+reading. Use one exact returned alias and do not run configuration
+troubleshooting or add hosts when either representation contains aliases. Only
+an empty hosts array together with empty text means that no aliases were
+discovered.
 
 The bridge keeps one local-owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities. On a supported Linux host it verifies or installs a private mode-0700 helper under the remote account's `~/.local/share/codex-ssh-bridge/helpers/<bridge-version>/<target>/helper`; the helper process ends with the SSH session, while the verified file is reused after a bridge restart. Warm requests send one framed command with no per-request `ssh -G`, root observation, installation probe, hash, lock, or upload. Unsupported hosts and pre-request helper failures use the ordered temporary-helper then POSIX-dispatcher fallback. Transport mode remains internal diagnostic data. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
 The selected dispatcher applies the absolute cwd, requested shell, and timeout
@@ -25,7 +25,7 @@ wrapper around the model's command.
 
 ## Default workflow
 
-1. Call `remote_hosts` with `{}`; parse the newline-delimited `content.text` and select one exact returned alias. Ignore an empty `{}` `structuredContent` when text contains aliases.
+1. Call `remote_hosts` with `{}`; select one exact alias from `structuredContent.hosts` or the equivalent newline-delimited `content.text`.
 2. Discover narrowly with `remote_search`, then inspect the relevant files with `remote_read`. Use `remote_list` when the project location is unknown.
 3. Make the smallest justified change with `remote_apply_patch`. Inspect partial-progress fields before retrying any failed mutation.
 4. Verify with `remote_run`. Check `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.

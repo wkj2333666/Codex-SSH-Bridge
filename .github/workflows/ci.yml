@@ -49,6 +49,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-
 
+      - name: Restore quality target cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-target-quality-v1-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-target-quality-v1-${{ env.RUST_TOOLCHAIN }}-
+
       - name: Restore ripgrep tool cache
         id: ripgrep-cache
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -64,7 +72,6 @@ jobs:
             mkdir -p "$HOME/.local/bin"
             install -m 0755 /usr/bin/rg "$HOME/.local/bin/rg"
           fi
-          sudo install -m 0755 "$HOME/.local/bin/rg" /usr/bin/rg
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
 
       - name: Check formatting
@@ -140,7 +147,6 @@ jobs:
             mkdir -p "$HOME/.local/bin"
             install -m 0755 /usr/bin/rg "$HOME/.local/bin/rg"
           fi
-          sudo install -m 0755 "$HOME/.local/bin/rg" /usr/bin/rg
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
 
       - name: Collect cold/warm profile
@@ -174,6 +180,9 @@ jobs:
           cargo +"$RUST_TOOLCHAIN" test --release --locked --test performance_acceptance \
             task11_release_bounded_session_output_rss_fresh_child -- --nocapture \
             2>&1 | tee diagnostics/rss-session.log
+          cargo +"$RUST_TOOLCHAIN" test --release --locked --test performance_acceptance \
+            task11_release_zero_output_concurrent_rss_fresh_child -- --nocapture \
+            2>&1 | tee diagnostics/rss-zero-output.log
           cargo +"$RUST_TOOLCHAIN" test --release --locked --test mcp_protocol task7_wide_json_rss_ \
             -- --nocapture 2>&1 | tee diagnostics/rss-json.log
           cargo +"$RUST_TOOLCHAIN" test --release --locked --lib \

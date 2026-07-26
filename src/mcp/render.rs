@@ -72,21 +72,21 @@ pub async fn hosts(
 ) -> CallToolResult {
     match result {
         Ok(result) => {
-            let provenance = RetentionProvenance::Aggregate {
-                kind: AggregateKind::Hosts,
-                source_count: result.hosts.len(),
-            };
-            let text = result
+            let hosts = result
                 .hosts
                 .iter()
-                .map(|host| host.host.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
+                .map(|host| host.host.clone())
+                .collect::<Vec<_>>();
+            let provenance = RetentionProvenance::Aggregate {
+                kind: AggregateKind::Hosts,
+                source_count: hosts.len(),
+            };
+            let text = hosts.join("\n");
             render_text_retained(
                 bridge,
                 RetainedPresentation {
                     text,
-                    structured_content: json!({}),
+                    structured_content: json!({"hosts":hosts}),
                     provenance,
                     output_ref: None,
                     truncated: false,
