@@ -199,6 +199,14 @@ fn fixture(root: &std::path::Path, rg: bool) -> (tempfile::TempDir, Arc<SshRunne
     fixture_with_options(root, rg, None, &[])
 }
 
+fn executable_on_path(name: &str) -> PathBuf {
+    let path = std::env::var_os("PATH").expect("test PATH must be set");
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{name} must be installed for this test"))
+}
+
 fn fixture_with_options(
     root: &std::path::Path,
     rg: bool,
@@ -6188,6 +6196,7 @@ async fn readonly_stale_sentinel_retries_each_production_form_exactly_once() {
     for case in cases {
         let remote = tempfile::TempDir::new().unwrap();
         std::fs::write(remote.path().join("a"), b"needle\n").unwrap();
+        let real_tool = executable_on_path(case.tool);
         let state = tempfile::TempDir::new().unwrap();
         let marker = state.path().join("failed-once");
         let sentinel_log = state.path().join("sentinel.log");
@@ -6197,13 +6206,13 @@ async fn readonly_stale_sentinel_retries_each_production_form_exactly_once() {
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\ncase \"${{CODEX_SSH_SENTINEL:-}}: $*\" in *{}*) printf 'S\\n' >>{}; if [ ! -e {} ]; then : >{}; {}; fi;; esac\nexec /usr/bin/{} \"$@\"\n",
+                "#!/bin/sh\ncase \"${{CODEX_SSH_SENTINEL:-}}: $*\" in *{}*) printf 'S\\n' >>{}; if [ ! -e {} ]; then : >{}; {}; fi;; esac\nexec {} \"$@\"\n",
                 case.sentinel,
                 codex_ssh_bridge::quote::shell_word(sentinel_log.to_str().unwrap()).unwrap(),
                 codex_ssh_bridge::quote::shell_word(marker.to_str().unwrap()).unwrap(),
                 codex_ssh_bridge::quote::shell_word(marker.to_str().unwrap()).unwrap(),
                 case.failure,
-                case.tool,
+                codex_ssh_bridge::quote::shell_word(real_tool.to_str().unwrap()).unwrap(),
             ),
         )
         .unwrap();
@@ -8114,11 +8123,15 @@ async fn search_full_prefix_then_exit_two_is_error() {
 async fn search_unknown_rg_event_is_protocol_error() {
     let remote = tempfile::TempDir::new().unwrap();
     std::fs::write(remote.path().join("candidate"), b"needle\n").unwrap();
+    let real_rg = executable_on_path("rg");
     let bin = tempfile::TempDir::new().unwrap();
     let rg = bin.path().join("rg");
     std::fs::write(
         &rg,
-        b"#!/bin/sh\ncase \" $* \" in *codex-probe-rg*|*codex-sentinel-rg*|*/dev/null*) exec /usr/bin/rg \"$@\";; esac\nprintf '%s\\n' '{\"type\":\"mystery\",\"data\":{}}'\nexit 0\n",
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *codex-probe-rg*|*codex-sentinel-rg*|*/dev/null*) exec {} \"$@\";; esac\nprintf '%s\\n' '{{\"type\":\"mystery\",\"data\":{{}}}}'\nexit 0\n",
+            codex_ssh_bridge::quote::shell_word(real_rg.to_str().unwrap()).unwrap()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&rg, std::fs::Permissions::from_mode(0o755)).unwrap();
