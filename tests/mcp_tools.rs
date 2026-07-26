@@ -1178,7 +1178,7 @@ async fn task8_dispatch_rejects_known_tool_arguments_before_bridge_work() {
 }
 
 #[tokio::test]
-async fn task8_single_copy_hosts_payload_is_only_in_text_content() {
+async fn task8_hosts_payload_is_available_as_text_and_structured_content() {
     let (_runtime, _bridge, tools) = remote_tools_fixture();
     let result = tools
         .call("remote_hosts".to_owned(), json!({}), roomy_context())
@@ -1186,7 +1186,7 @@ async fn task8_single_copy_hosts_payload_is_only_in_text_content() {
     let rendered = serde_json::to_value(result).unwrap();
     assert_eq!(rendered["content"].as_array().unwrap().len(), 1);
     assert_eq!(text_content(&rendered), "dev");
-    assert_eq!(rendered["structuredContent"], json!({}));
+    assert_eq!(rendered["structuredContent"], json!({"hosts": ["dev"]}));
 }
 
 #[tokio::test]
@@ -1398,7 +1398,12 @@ async fn host_descriptions_are_not_exposed_or_retained_in_model_output() {
     .unwrap();
     let mut session = ProtocolSession::start_with_frame(tools, minimum_frame).await;
     let rendered = session.call("remote_hosts", json!({})).await;
-    assert_eq!(rendered["structuredContent"], json!({}));
+    assert_eq!(
+        rendered["structuredContent"],
+        json!({"hosts": [
+            "host-0", "host-1", "host-2", "host-3", "host-4", "host-5", "host-6"
+        ]})
+    );
     assert_eq!(text_content(&rendered).lines().count(), 7);
     assert!(!rendered.to_string().contains("DETAIL-"));
     session.close().await;
