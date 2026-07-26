@@ -62,6 +62,14 @@ fn policy(
     SshPolicy::for_host("dev-box", config.limits(), paths, identity).unwrap()
 }
 
+fn executable_on_path(name: &str) -> std::path::PathBuf {
+    let path = std::env::var_os("PATH").expect("test PATH must be set");
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{name} must be installed for this test"))
+}
+
 fn bash_probe(requested: &str, physical: &str) -> Vec<u8> {
     format!(
         "CODEX_SSH_PROBE=1\0REQUESTED_ROOT={requested}\0ROOT={physical}\0ROOT_DEVICE=1\0ROOT_INODE=2\0SHELL_KIND=bash\0BASH_VERSION=5.2.15\0LOGIN_SHELL=/bin/sh\0TOOL_rg=1\0TOOL_dd_nofollow=1\0TOOL_timeout=0\0"
@@ -1197,7 +1205,8 @@ fn task5_full_probe_reports_functional_mutation_flags() {
 fn capability_probe_rejects_each_incompatible_exact_behavior() {
     let root = TempDir::new().unwrap();
     let scratch = TempDir::new().unwrap();
-    let system_path = "/usr/local/bin:/usr/bin:/bin";
+    let system_path = std::env::var("PATH").expect("test PATH must be valid UTF-8");
+    let real_rg = executable_on_path("rg");
     let cases = [
         (
             "read_slice",
@@ -1223,7 +1232,7 @@ fn capability_probe_rejects_each_incompatible_exact_behavior() {
         (
             "rg_json",
             "rg",
-            "case \" $* \" in *codex-probe-rg-error*) exit 1;; *needle*codex-probe-rg*) shim_out=${TMPDIR:-/tmp}/codex-rg-shim.$$; /usr/bin/rg \"$@\" >\"$shim_out\"; shim_status=$?; /usr/bin/sed 's/\"line_number\":1/\"line_number\":9/g' \"$shim_out\"; rm -f \"$shim_out\"; exit \"$shim_status\";; esac\nexec /usr/bin/rg \"$@\"\n",
+            "case \" $* \" in *codex-probe-rg-error*) exit 1;; *needle*codex-probe-rg*) shim_out=${TMPDIR:-/tmp}/codex-rg-shim.$$; \"$CODEX_REAL_RG\" \"$@\" >\"$shim_out\"; shim_status=$?; /usr/bin/sed 's/\"line_number\":1/\"line_number\":9/g' \"$shim_out\"; rm -f \"$shim_out\"; exit \"$shim_status\";; esac\nexec \"$CODEX_REAL_RG\" \"$@\"\n",
         ),
         (
             "grep_nul",
@@ -1370,6 +1379,7 @@ fn capability_probe_rejects_each_incompatible_exact_behavior() {
                 root.path().to_str().unwrap(),
             ])
             .env("PATH", format!("{}:{system_path}", shim.path().display()))
+            .env("CODEX_REAL_RG", &real_rg)
             .env("TMPDIR", scratch.path())
             .output()
             .unwrap();
@@ -1427,7 +1437,11 @@ fn task5_mutation_hash_probe_is_closed_and_restores_shell_state() {
         ])
         .env(
             "PATH",
-            format!("{}:/usr/local/bin:/usr/bin:/bin", shim.path().display()),
+            format!(
+                "{}:{}",
+                shim.path().display(),
+                std::env::var("PATH").expect("test PATH must be valid UTF-8")
+            ),
         )
         .env("TMPDIR", scratch.path())
         .output()
@@ -1463,7 +1477,11 @@ fn task5_shared_hash_failure_closes_only_mutation_capabilities() {
         ])
         .env(
             "PATH",
-            format!("{}:/usr/local/bin:/usr/bin:/bin", shim.path().display()),
+            format!(
+                "{}:{}",
+                shim.path().display(),
+                std::env::var("PATH").expect("test PATH must be valid UTF-8")
+            ),
         )
         .env("TMPDIR", scratch.path())
         .output()

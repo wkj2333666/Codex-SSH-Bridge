@@ -626,7 +626,7 @@ impl HostSession {
         cancel: CancellationToken,
     ) -> BridgeResult<SessionResult> {
         let started = Instant::now();
-        let response_deadline = started + request.response_timeout;
+        let send_deadline = started + request.response_timeout;
         let request_id = self.inner.next_request_id()?;
         let _request_profile = crate::bridge_profile_span!(crate::profile::ProfileEvent {
             phase: "session_request",
@@ -686,7 +686,7 @@ impl HostSession {
         let send = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(cancelled_error(&self.inner.host, false)),
-            result = timeout_at(response_deadline, self.inner.send(Outbound { frames })) => {
+            result = timeout_at(send_deadline, self.inner.send(Outbound { frames })) => {
                 match result {
                     Ok(result) => result,
                     Err(_) => Err(timeout_error(&self.inner.host, false)),
@@ -699,6 +699,10 @@ impl HostSession {
             return Err(error);
         }
         drop(helper_command_profile);
+        // Queue admission and remote execution are separate phases. Bound both,
+        // but do not consume the remote command's response allowance while a
+        // frame waits for the local writer queue.
+        let response_deadline = Instant::now() + request.response_timeout;
         tokio::select! {
             biased;
             result = &mut receiver => result.map_err(|_| transport_error(&self.inner.host, true))?,

@@ -944,7 +944,7 @@ impl SshRunner {
         connect_timeout_ms: u64,
         cancel: &CancellationToken,
     ) -> BridgeResult<String> {
-        let argv = build_ssh_g_argv(host, connect_timeout_ms);
+        let argv = build_ssh_g_argv(host, self.config.limits().connect_timeout_ms);
         let total_limit = RESOLVED_STDOUT_LIMIT + RESOLVED_STDERR_LIMIT;
         let outcome = self
             .run_child(
