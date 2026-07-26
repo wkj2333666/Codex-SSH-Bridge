@@ -1283,10 +1283,14 @@ mod tests {
     use tokio::time::{sleep, timeout};
     use tokio_util::sync::CancellationToken;
 
-    use super::{HostSession, SessionOutput, SessionRequest, parse_exit, valid_handshake};
+    use super::{
+        ConnectionStart, HostSession, SessionOutput, SessionRequest, parse_exit, valid_handshake,
+    };
     use crate::capability::{ShellKind, ShellSelection};
     use crate::config::EffectiveLimits;
+    use crate::error::ErrorCode;
     use crate::ssh::SshPolicy;
+    use crate::ssh::helper::HelperArtifact;
 
     #[test]
     fn exit_payload_is_strictly_bounded() {
@@ -1542,6 +1546,37 @@ mod tests {
         };
         assert_eq!(error.code, crate::error::ErrorCode::ProtocolError);
         assert!(error.message.contains("dispatcher"));
+    }
+
+    #[tokio::test]
+    async fn helper_upload_backpressure_obeys_the_connection_deadline() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("blocked-ssh");
+        fs::write(&path, "#!/bin/sh\nexec sleep 5\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut session_limits = limits();
+        session_limits.connect_timeout_ms = 50;
+        let connect = HostSession::connect_with_mode(
+            policy(),
+            "test-host".to_owned(),
+            session_limits,
+            OsString::from(path),
+            BTreeMap::new(),
+            CancellationToken::new(),
+            ConnectionStart::Temporary {
+                artifact: HelperArtifact {
+                    path: temp.path().join("helper"),
+                    target: "x86_64-unknown-linux-musl",
+                    arch: "x86_64",
+                },
+                bytes: vec![0; 1024 * 1024],
+            },
+        );
+        let error = timeout(Duration::from_millis(300), connect)
+            .await
+            .expect("connection setup exceeded its bounded cleanup window")
+            .expect_err("blocked helper upload unexpectedly connected");
+        assert_eq!(error.code, ErrorCode::ConnectTimeout);
     }
 
     #[tokio::test]

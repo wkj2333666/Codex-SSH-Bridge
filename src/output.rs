@@ -2041,8 +2041,9 @@ mod tests {
 
     use super::{
         ByteQuota, CleanupTombstone, DiagnosticScanner, EntryAccounting, InternalSpoolOwner,
-        OutputStore, PendingSpool, StoredAggregateKind, StoredProvenance, cleanup_entry,
-        cleanup_paths, create_private_file, create_spool, retry_tombstones, write_all_counted,
+        OutputStore, PendingSpool, PreviewSink, StoredAggregateKind, StoredProvenance,
+        cleanup_entry, cleanup_paths, create_private_file, create_spool, retry_tombstones,
+        write_all_counted,
     };
     use crate::config::{
         MAX_GLOBAL_SPOOL_QUOTA_BYTES, MAX_SPOOL_ENTRIES, MIN_GLOBAL_SPOOL_QUOTA_BYTES,
@@ -2074,6 +2075,21 @@ mod tests {
     struct PartialErrorWriter {
         first_write: usize,
         wrote_once: bool,
+    }
+
+    #[test]
+    fn empty_preview_sink_allocates_no_output_storage() {
+        let sink = PreviewSink::new(256 * 1024);
+        assert_eq!(sink.head.capacity(), 0);
+        assert_eq!(sink.tail.capacity(), 0);
+
+        let preview = sink.finish();
+        assert!(preview.head.is_empty());
+        assert!(preview.tail.is_empty());
+        assert_eq!(preview.head.capacity(), 0);
+        assert_eq!(preview.tail.capacity(), 0);
+        assert_eq!(preview.bytes_seen, 0);
+        assert!(!preview.truncated);
     }
 
     impl Serialize for FailingDetail {

@@ -41,7 +41,7 @@ const HARDENED_OPTIONS: &[&str] = &[
     "PermitLocalCommand=no",
     "RequestTTY=no",
     "ControlMaster=auto",
-    "ControlPersist=300",
+    "ControlPersist=5",
     "ServerAliveInterval=15",
     "ServerAliveCountMax=3",
 ];
@@ -1739,7 +1739,7 @@ async fn runner_caches_policy_probes_once_and_uses_hardened_ssh_g() {
         "ClearAllForwardings=yes",
         "PermitLocalCommand=no",
         "RequestTTY=no",
-        "ControlPersist=300",
+        "ControlPersist=5",
         "ServerAliveInterval=15",
         "ServerAliveCountMax=3",
     ] {

@@ -1286,7 +1286,7 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(hosts_result["structuredContent"], json!({}));
+        assert_eq!(hosts_result["structuredContent"], json!({"hosts":["dev"]}));
         assert_eq!(text_value(&hosts_result), "dev");
 
         let list_result = result_value(
