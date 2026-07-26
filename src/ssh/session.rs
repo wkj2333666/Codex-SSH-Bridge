@@ -200,6 +200,13 @@ struct StartupProcessGuard {
     armed: bool,
 }
 
+#[derive(Clone)]
+struct ConnectionRuntime {
+    executable: OsString,
+    environment: std::collections::BTreeMap<OsString, OsString>,
+    deadline: Instant,
+}
+
 impl StartupProcessGuard {
     fn new(process_group: i32) -> Self {
         Self {
@@ -273,11 +280,13 @@ impl HostSession {
             policy,
             host,
             limits,
-            executable,
-            environment,
             cancel.clone(),
             ConnectionStart::Shell,
-            deadline,
+            ConnectionRuntime {
+                executable,
+                environment,
+                deadline,
+            },
         );
         tokio::select! {
             biased;
@@ -302,6 +311,11 @@ impl HostSession {
         let timeout_host = host.clone();
         let outer_cancel = cancel.clone();
         let connect = async move {
+            let runtime = ConnectionRuntime {
+                executable,
+                environment,
+                deadline,
+            };
             let helper = helper_artifact(capability).and_then(|artifact| {
                 helper_bytes(&artifact).ok().and_then(|bytes| {
                     helper_identity(&artifact, &bytes)
@@ -314,31 +328,25 @@ impl HostSession {
                     policy,
                     host,
                     limits,
-                    executable,
-                    environment,
                     cancel,
                     ConnectionStart::Shell,
-                    deadline,
+                    runtime,
                 )
                 .await;
             };
             let fallback_policy = policy.clone();
             let fallback_host = host.clone();
-            let fallback_executable = executable.clone();
-            let fallback_environment = environment.clone();
             match Self::connect_with_mode(
                 policy,
                 host,
                 limits,
-                executable,
-                environment,
                 cancel.clone(),
                 ConnectionStart::Persistent {
                     artifact: artifact.clone(),
                     bytes: bytes.clone(),
                     identity,
                 },
-                deadline,
+                runtime.clone(),
             )
             .await
             {
@@ -348,11 +356,9 @@ impl HostSession {
                         fallback_policy.clone(),
                         fallback_host.clone(),
                         limits,
-                        fallback_executable.clone(),
-                        fallback_environment.clone(),
                         cancel.clone(),
                         ConnectionStart::Temporary { artifact, bytes },
-                        deadline,
+                        runtime.clone(),
                     )
                     .await
                     {
@@ -362,11 +368,9 @@ impl HostSession {
                                 fallback_policy,
                                 fallback_host,
                                 limits,
-                                fallback_executable,
-                                fallback_environment,
                                 cancel,
                                 ConnectionStart::Shell,
-                                deadline,
+                                runtime,
                             )
                             .await
                         }
@@ -390,18 +394,16 @@ impl HostSession {
         policy: SshPolicy,
         host: String,
         limits: EffectiveLimits,
-        executable: OsString,
-        environment: std::collections::BTreeMap<OsString, OsString>,
         cancel: CancellationToken,
         start: ConnectionStart,
-        deadline: Instant,
+        runtime: ConnectionRuntime,
     ) -> BridgeResult<Self> {
         if limits.max_frame_bytes == 0 {
             return Err(BridgeError::invalid_argument(
                 "SSH session frame limit must be positive",
             ));
         }
-        if deadline <= Instant::now() {
+        if runtime.deadline <= Instant::now() {
             return Err(connect_timeout_error(&host, "SSH session setup timed out"));
         }
         let helper_arch = start.helper_arch();
@@ -415,10 +417,10 @@ impl HostSession {
             }
         };
         let argv = build_ssh_argv(&policy, &host, &command);
-        let mut child_command = Command::new(executable);
+        let mut child_command = Command::new(runtime.executable);
         child_command
             .args(argv)
-            .envs(environment)
+            .envs(runtime.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -480,7 +482,7 @@ impl HostSession {
                         return Err(cancelled_error(&host, false));
                     }
                     result = timeout_at(
-                        deadline,
+                        runtime.deadline,
                         read_bootstrap_status_line(&mut output),
                     ) => match result {
                         Ok(Ok(status)) => status,
@@ -512,7 +514,7 @@ impl HostSession {
                         &mut child,
                         &host,
                         bytes,
-                        deadline,
+                        runtime.deadline,
                         &cancel,
                         &mut startup_guard,
                     )
@@ -526,7 +528,7 @@ impl HostSession {
                     &mut child,
                     &host,
                     bytes,
-                    deadline,
+                    runtime.deadline,
                     &cancel,
                     &mut startup_guard,
                 )
@@ -551,7 +553,7 @@ impl HostSession {
                 cleanup_startup_child(&mut child, &mut startup_guard).await;
                 return Err(cancelled_error(&host, false));
             }
-            result = timeout_at(deadline, read_frame(&mut output, limits.max_frame_bytes)) => {
+            result = timeout_at(runtime.deadline, read_frame(&mut output, limits.max_frame_bytes)) => {
                 match result {
                     Ok(Ok(Some(frame))) => frame,
                     Ok(Ok(None)) => {
@@ -1427,8 +1429,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ConnectionStart, HostSession, Outbound, SessionInner, SessionOutput, SessionRequest,
-        parse_exit, valid_handshake,
+        ConnectionRuntime, ConnectionStart, HostSession, Outbound, SessionInner, SessionOutput,
+        SessionRequest, parse_exit, valid_handshake,
     };
     use crate::capability::{ShellKind, ShellSelection};
     use crate::config::EffectiveLimits;
@@ -1704,8 +1706,6 @@ mod tests {
             policy(),
             "test-host".to_owned(),
             session_limits,
-            OsString::from(path),
-            BTreeMap::new(),
             CancellationToken::new(),
             ConnectionStart::Temporary {
                 artifact: HelperArtifact {
@@ -1715,7 +1715,11 @@ mod tests {
                 },
                 bytes: vec![0; 1024 * 1024],
             },
-            Instant::now() + Duration::from_millis(50),
+            ConnectionRuntime {
+                executable: OsString::from(path),
+                environment: BTreeMap::new(),
+                deadline: Instant::now() + Duration::from_millis(50),
+            },
         );
         let result = timeout(Duration::from_millis(300), connect)
             .await
