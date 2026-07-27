@@ -416,6 +416,7 @@ fn public_generation_order_is_monotonic() {
     assert!(Generation(2) > Generation(1));
     assert_eq!(RemoteBase::Missing, RemoteBase::Missing);
     assert_eq!(DesiredState::Deleted, DesiredState::Deleted);
+    assert_ne!(EditErrorKind::OutcomeUnknown, EditErrorKind::Permanent);
 }
 
 #[tokio::test]
