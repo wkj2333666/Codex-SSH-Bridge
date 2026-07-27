@@ -102,26 +102,28 @@ pub(super) async fn read(
             host: request.host.clone(),
             path: path.as_str().to_owned(),
         };
-        if let Some(desired) = bridge.edit_cache.lookup_complete(&cache_key).await {
-            if operation_context.is_none() {
-                operation_context = bridge.edit_backend.context_for(&request.host).await;
+        if bridge.edit_buffering_enabled {
+            if let Some(desired) = bridge.edit_cache.lookup_complete(&cache_key).await {
+                if operation_context.is_none() {
+                    operation_context = bridge.edit_backend.context_for(&request.host).await;
+                }
+                let (entry, raw_bytes) = cached_read_entry(
+                    &path,
+                    &desired,
+                    request.start_line,
+                    request.max_lines,
+                    remaining,
+                );
+                remaining = remaining.saturating_sub(raw_bytes);
+                returned_raw_bytes = returned_raw_bytes
+                    .checked_add(raw_bytes as u64)
+                    .ok_or_else(|| protocol_error("read byte count overflowed"))
+                    .map_err(|error| {
+                        attach_optional_remote_context(error, operation_context.as_ref())
+                    })?;
+                files.push(entry);
+                continue;
             }
-            let (entry, raw_bytes) = cached_read_entry(
-                &path,
-                &desired,
-                request.start_line,
-                request.max_lines,
-                remaining,
-            );
-            remaining = remaining.saturating_sub(raw_bytes);
-            returned_raw_bytes = returned_raw_bytes
-                .checked_add(raw_bytes as u64)
-                .ok_or_else(|| protocol_error("read byte count overflowed"))
-                .map_err(|error| {
-                    attach_optional_remote_context(error, operation_context.as_ref())
-                })?;
-            files.push(entry);
-            continue;
         }
         let owner = InternalSpoolOwner::new();
         let stdout_limit = (remaining as u64)
@@ -247,7 +249,7 @@ pub(super) async fn read(
         } else {
             hash1.to_owned()
         };
-        if !truncated {
+        if bridge.edit_buffering_enabled && !truncated {
             bridge
                 .edit_cache
                 .cache_clean_if_absent(
