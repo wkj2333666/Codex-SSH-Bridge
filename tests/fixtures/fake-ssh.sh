@@ -23,6 +23,13 @@ run_fake_sleep() {
 
 log_call() {
     if [ -n "${FAKE_SSH_LOG:-}" ]; then
+        log_lock=$FAKE_SSH_LOG.lock
+        log_wait=0
+        while ! mkdir "$log_lock" 2>/dev/null; do
+            sleep 0
+            log_wait=$((log_wait + 1))
+            [ "$log_wait" -lt 10000 ] || return 0
+        done
         {
             printf '%s\n' "$1"
             shift
@@ -31,6 +38,7 @@ log_call() {
             done
             printf '%s\n' END
         } >>"$FAKE_SSH_LOG"
+        rmdir "$log_lock" 2>/dev/null || true
     fi
 }
 

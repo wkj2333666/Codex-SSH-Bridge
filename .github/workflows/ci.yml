@@ -49,14 +49,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-
 
-      - name: Restore quality target cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-target-quality-v1-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-target-quality-v1-${{ env.RUST_TOOLCHAIN }}-
-
       - name: Restore ripgrep tool cache
         id: ripgrep-cache
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
