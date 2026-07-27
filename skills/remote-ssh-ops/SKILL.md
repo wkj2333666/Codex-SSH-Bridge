@@ -36,8 +36,8 @@ fails, the requested barrier command or observation does not run.
 
 1. Call `remote_hosts` with `{}`; select one exact alias from `structuredContent.hosts` or the equivalent newline-delimited `content.text`.
 2. Discover narrowly with `remote_search`, then inspect the relevant files with `remote_read`. Use `remote_list` when the project location is unknown.
-3. Make the smallest justified change with `remote_apply_patch`. Inspect partial-progress fields before retrying any failed mutation.
-4. Verify with `remote_run`. Check `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
+3. Group closely related edits into one logical change, then make each smallest justified change with `remote_apply_patch`. Use `remote_read` to inspect the latest cached generation. Do not use `remote_run` with `cat`, `sed`, `nl`, or `grep` merely to reread edited files. Inspect partial-progress fields before retrying any failed mutation.
+4. Verify once with `remote_run` at a meaningful behavior boundary. Do not batch unrelated changes or postpone a required RED→GREEN verification. Check `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 5. When `truncated` is true and `output_ref` is present, page it with `remote_output_read`; do not rerun a command merely to recover omitted output.
 
 ## Tool contract
