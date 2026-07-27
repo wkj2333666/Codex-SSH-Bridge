@@ -1894,6 +1894,57 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
     drop(roots);
 }
 
+#[tokio::test]
+async fn task14_same_host_barriers_release_before_parallel_remote_runs() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let (_runtime, log, tools) = fake_remote_tools_fixture(remote.path());
+    let warm = call_json(
+        &tools,
+        "remote_run",
+        json!({"host":"dev","cwd":remote.path(),"command":":","shell":"sh"}),
+    )
+    .await;
+    assert_eq!(warm["isError"], Value::Null, "{warm}");
+    std::fs::write(&log, b"").unwrap();
+
+    let mut session = ProtocolSession::start(tools).await;
+    let started = Instant::now();
+    for index in 0..5 {
+        let id = 200 + index;
+        session
+            .send(json!({
+                "jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"remote_run","arguments":{
+                    "host":"dev",
+                    "cwd":remote.path(),
+                    "command":format!("sleep 1; printf SAME-{index}"),
+                    "shell":"sh"
+                }}
+            }))
+            .await;
+    }
+    let mut responses = BTreeMap::new();
+    for _ in 0..5 {
+        let response = session.read_response(Duration::from_secs(3)).await;
+        let id = response["id"].as_u64().unwrap();
+        assert!(responses.insert(id, response).is_none());
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(2_500),
+        "same-host remote_run requests were serialized: {elapsed:?}"
+    );
+    for index in 0..5 {
+        let id = 200 + index;
+        let result = &responses[&id]["result"];
+        assert_eq!(result["structuredContent"]["exit_code"], 0);
+        assert!(text_content(result).contains(&format!("SAME-{index}")));
+    }
+    assert_eq!(transport_call_kinds(&log), vec!["C"; 5]);
+    eprintln!("same-host MCP concurrency sample: elapsed={elapsed:?}");
+    session.close().await;
+}
+
 async fn wait_for_file(path: &std::path::Path, timeout: Duration) {
     tokio::time::timeout(timeout, async {
         while !path.exists() {

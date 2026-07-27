@@ -247,7 +247,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<ListResult> {
         let resolved = resolve_list(self.runner.config(), request)?;
-        let _barrier = self.edit_barrier(&resolved.host).await?;
+        self.edit_barrier(&resolved.host).await?;
         metadata::list(self, resolved, cancel).await
     }
 
@@ -257,7 +257,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<StatResult> {
         let resolved = resolve_stat(self.runner.config(), request)?;
-        let _barrier = self.edit_barrier(&resolved.host).await?;
+        self.edit_barrier(&resolved.host).await?;
         metadata::stat(self, resolved, cancel).await
     }
 
@@ -276,7 +276,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<SearchResult> {
         let resolved = resolve_search(self.runner.config(), request)?;
-        let _barrier = self.edit_barrier(&resolved.host).await?;
+        self.edit_barrier(&resolved.host).await?;
         search::search(self, resolved, cancel).await
     }
 
@@ -289,7 +289,7 @@ impl RemoteBridge {
             .config()
             .require_discovered_alias(&request.host)?;
         let host = request.host.clone();
-        let _barrier = self.edit_barrier(&host).await?;
+        self.edit_barrier(&host).await?;
         let result = run::run(self, request, cancel).await?;
         self.edit_cache.invalidate_clean_host(&host).await;
         Ok(result)
@@ -465,8 +465,8 @@ impl RemoteBridge {
         })
     }
 
-    async fn edit_barrier(&self, host: &str) -> BridgeResult<tokio::sync::OwnedMutexGuard<()>> {
-        let guard = self.edit_cache.begin_barrier(host).await;
+    async fn edit_barrier(&self, host: &str) -> BridgeResult<()> {
+        let _guard = self.edit_cache.begin_barrier(host).await;
         if let Err(error) = self.edit_cache.flush_host(host).await {
             let error = edit_bridge_error(error);
             return Err(match self.edit_backend.context_for(host).await {
@@ -474,7 +474,7 @@ impl RemoteBridge {
                 None => error,
             });
         }
-        Ok(guard)
+        Ok(())
     }
 
     async fn execute_readonly_fixed(
