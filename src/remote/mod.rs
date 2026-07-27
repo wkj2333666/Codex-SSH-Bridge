@@ -51,6 +51,7 @@ pub struct RemoteBridge {
     runner: Arc<SshRunner>,
     edit_backend: Arc<edit_sync::SshEditBackend>,
     edit_cache: Arc<edit_cache::EditCache>,
+    edit_buffering_enabled: bool,
 }
 
 fn attach_fixed_result_context(
@@ -197,6 +198,15 @@ fn edit_error_code(code: edit_cache::EditErrorCode) -> ErrorCode {
 
 impl RemoteBridge {
     pub fn new(runner: Arc<SshRunner>) -> Self {
+        Self::new_with_edit_buffering(runner, true)
+    }
+
+    #[doc(hidden)]
+    pub fn new_immediate_for_transport_tests(runner: Arc<SshRunner>) -> Self {
+        Self::new_with_edit_buffering(runner, false)
+    }
+
+    fn new_with_edit_buffering(runner: Arc<SshRunner>, edit_buffering_enabled: bool) -> Self {
         let edit_limits = &runner.config().limits;
         let edit_backend =
             edit_sync::SshEditBackend::new(Arc::clone(&runner), edit_limits.edit_cache_max_bytes);
@@ -212,6 +222,7 @@ impl RemoteBridge {
             runner,
             edit_backend,
             edit_cache,
+            edit_buffering_enabled,
         }
     }
 

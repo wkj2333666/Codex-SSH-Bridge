@@ -1329,6 +1329,9 @@ pub(super) async fn apply_patch(
     request: ApplyPatchRequest,
     cancel: CancellationToken,
 ) -> BridgeResult<ApplyPatchResult> {
+    if !bridge.edit_buffering_enabled {
+        return apply_patch_immediate(bridge, request, cancel).await;
+    }
     let immediate_request = request.clone();
     let ApplyPatchRequest { host, patch } = request;
     bridge.runner.config().require_discovered_alias(&host)?;

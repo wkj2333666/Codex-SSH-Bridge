@@ -199,11 +199,6 @@ fn fixture(root: &std::path::Path, rg: bool) -> (tempfile::TempDir, Arc<SshRunne
     fixture_with_options(root, rg, None, &[])
 }
 
-fn use_immediate_mutations(config: &mut codex_ssh_bridge::config::Config) {
-    config.limits.edit_cache_max_bytes = 1;
-    config.limits.edit_flush_threshold_bytes = 1;
-}
-
 fn executable_on_path(name: &str) -> PathBuf {
     let path = std::env::var_os("PATH").expect("test PATH must be set");
     std::env::split_paths(&path)
@@ -222,7 +217,6 @@ fn fixture_with_options(
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = support::config_with_host("dev", root.to_str().unwrap());
-    use_immediate_mutations(&mut config);
     if let Some(max_frame) = max_frame {
         config.limits.max_frame_bytes = max_frame;
     }
@@ -265,7 +259,10 @@ fn fixture_with_options(
         )
         .unwrap(),
     );
-    let bridge = FixtureBridge::new(RemoteBridge::new(Arc::clone(&runner)), root);
+    let bridge = FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(Arc::clone(&runner)),
+        root,
+    );
     (runtime_base, runner, bridge)
 }
 
@@ -320,7 +317,6 @@ fn fixture_with_patch_policy(
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = support::config_with_host("dev", root.to_str().unwrap());
-    use_immediate_mutations(&mut config);
     if let Some(max_write_bytes) = max_write_bytes {
         config.limits.max_write_bytes = max_write_bytes;
     }
@@ -348,7 +344,10 @@ fn fixture_with_patch_policy(
         )
         .unwrap(),
     );
-    let bridge = FixtureBridge::new(RemoteBridge::new(Arc::clone(&runner)), root);
+    let bridge = FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(Arc::clone(&runner)),
+        root,
+    );
     (runtime_base, runner, bridge)
 }
 
@@ -2892,7 +2891,6 @@ async fn task6_five_concurrent_large_snapshots_bound_rss_and_spools() {
     let runtime_directory = runtime.directory().to_owned();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = support::config_with_host("host-0", remote.path().to_str().unwrap());
-    use_immediate_mutations(&mut config);
     let profile = config.hosts.get("host-0").unwrap().clone();
     for index in 1..HOSTS {
         config
@@ -2920,7 +2918,10 @@ async fn task6_five_concurrent_large_snapshots_bound_rss_and_spools() {
         )
         .unwrap(),
     );
-    let bridge = Arc::new(FixtureBridge::new(RemoteBridge::new(runner), remote.path()));
+    let bridge = Arc::new(FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(runner),
+        remote.path(),
+    ));
     let baseline_rss = resident_kib();
     let stop = CancellationToken::new();
     let monitor_stop = stop.clone();
@@ -4151,7 +4152,10 @@ async fn task5_base64_is_strict_and_oversize_preflight_launches_nothing() {
         )
         .unwrap(),
     );
-    let bridge = FixtureBridge::new(RemoteBridge::new(runner), remote.path());
+    let bridge = FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(runner),
+        remote.path(),
+    );
     let error = bridge
         .write(
             WriteRequest {
@@ -6075,7 +6079,10 @@ async fn readonly_real_mismatch_retries_exactly_once_from_the_list_script() {
         )
         .unwrap(),
     );
-    let bridge = FixtureBridge::new(RemoteBridge::new(runner), remote.path());
+    let bridge = FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(runner),
+        remote.path(),
+    );
     let result = bridge
         .list(
             ListRequest {
@@ -6941,7 +6948,10 @@ async fn aborting_a_fixed_facade_unlinks_internal_spools_without_ttl() {
         )
         .unwrap(),
     );
-    let bridge = FixtureBridge::new(RemoteBridge::new(runner), remote.path());
+    let bridge = FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(runner),
+        remote.path(),
+    );
     let task = tokio::spawn(async move {
         bridge
             .list(
@@ -7106,7 +7116,6 @@ async fn task5_five_hosts_write_four_mib_with_bounded_rss_and_complete_cleanup()
     let runtime_directory = runtime.directory().to_owned();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = support::config_with_host("h0", roots[0].to_str().unwrap());
-    use_immediate_mutations(&mut config);
     let profile: HostProfile = config.hosts["h0"].clone();
     for (index, root) in roots.iter().enumerate().skip(1) {
         let mut host = profile.clone();
@@ -7141,7 +7150,7 @@ async fn task5_five_hosts_write_four_mib_with_bounded_rss_and_complete_cleanup()
         )
         .unwrap(),
     );
-    let bridge = Arc::new(RemoteBridge::new(runner));
+    let bridge = Arc::new(RemoteBridge::new_immediate_for_transport_tests(runner));
 
     let encoded = STANDARD.encode(vec![b'x'; RAW_BYTES]);
     let mut sources = (0..5).map(|_| encoded.clone()).collect::<Vec<_>>();
@@ -7311,7 +7320,7 @@ async fn five_hosts_successfully_stream_forty_mib_below_rss_bound() {
         )
         .unwrap(),
     );
-    let bridge = Arc::new(RemoteBridge::new(runner));
+    let bridge = Arc::new(RemoteBridge::new_immediate_for_transport_tests(runner));
     let baseline_rss = resident_kib();
     let monitor_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let monitor_peak = Arc::new(std::sync::Mutex::new((0usize, 0u64, baseline_rss, true)));
@@ -7794,7 +7803,10 @@ async fn read_hash_before_after_race_is_a_contentless_read_conflict() {
         )
         .unwrap(),
     );
-    let bridge = FixtureBridge::new(RemoteBridge::new(runner), remote.path());
+    let bridge = FixtureBridge::new(
+        RemoteBridge::new_immediate_for_transport_tests(runner),
+        remote.path(),
+    );
     let task = tokio::spawn(async move {
         bridge
             .read(

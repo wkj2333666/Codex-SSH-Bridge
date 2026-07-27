@@ -990,6 +990,9 @@ pub(super) async fn write(
             false,
         ));
     }
+    if !bridge.edit_buffering_enabled {
+        return execute_preflighted_write(bridge, resolved, cancel).await;
+    }
     let key = CacheKey {
         host: resolved.host.clone(),
         path: resolved.path.as_str().to_owned(),
