@@ -2691,6 +2691,34 @@ async fn unconfirmed_cancellation_retires_the_session_before_follow_up() {
 }
 
 #[tokio::test]
+async fn unconfirmed_deadline_does_not_wait_for_capture_eof() {
+    let fixture = task3_runner(
+        &["dev"],
+        Limits::default(),
+        Duration::from_secs(600),
+        &[
+            ("FAKE_SSH_MODE", "sleep".to_owned()),
+            ("FAKE_SSH_SLEEP_SECONDS", "10".to_owned()),
+            ("FAKE_SSH_IGNORE_TERM", "1".to_owned()),
+        ],
+    );
+    let started = Instant::now();
+    let error = timeout(
+        Duration::from_millis(500),
+        fixture.runner.execute(
+            request("dev", ShellRequest::Auto, Duration::from_millis(50)),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("command deadline waited for an unclosed capture pipe")
+    .unwrap_err();
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_eq!(error.code, ErrorCode::CommandTimeout);
+    assert_eq!(error.details.remote_process_may_continue, Some(true));
+}
+
+#[tokio::test]
 async fn cancellation_during_ssh_g_kills_its_group_without_remote_detach_warning() {
     let files = TempDir::new().unwrap();
     let log = files.path().join("calls.log");
