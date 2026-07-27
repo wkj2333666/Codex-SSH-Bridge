@@ -35,6 +35,21 @@ pub(crate) struct RemoteSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CachedEntry {
+    pub(crate) base: RemoteBase,
+    pub(crate) desired: DesiredState,
+    pub(crate) generation: Generation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedEdit {
+    pub(crate) key: CacheKey,
+    pub(crate) expected_generation: Generation,
+    pub(crate) desired: DesiredState,
+    pub(crate) payload_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitItem {
     pub(crate) key: CacheKey,
     pub(crate) base: RemoteBase,
@@ -87,6 +102,12 @@ pub(crate) struct EditCacheConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MutationDisposition {
     Buffered(Generation),
+    ImmediateWriteRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BatchMutationDisposition {
+    Buffered(Vec<Generation>),
     ImmediateWriteRequired,
 }
 
@@ -169,7 +190,7 @@ impl EditCache {
         {
             return Ok(existing.desired.clone());
         }
-        if !make_capacity(&mut state, self.config.max_bytes, size, None) {
+        if !make_capacity(&mut state, self.config.max_bytes, size, &[]) {
             return Ok(desired);
         }
         let lru_sequence = next_lru(&mut state);
@@ -197,6 +218,176 @@ impl EditCache {
         Some(entry.desired.clone())
     }
 
+    pub(crate) async fn load_entry_complete(
+        &self,
+        key: CacheKey,
+    ) -> Result<CachedEntry, EditError> {
+        if let Some(entry) = self.lookup_entry(&key).await {
+            return Ok(entry);
+        }
+        self.load_complete(key.clone()).await?;
+        self.lookup_entry(&key)
+            .await
+            .ok_or_else(|| permanent_error("complete entry does not fit the edit cache"))
+    }
+
+    pub(crate) async fn lookup_entry(&self, key: &CacheKey) -> Option<CachedEntry> {
+        let mut state = self.state.lock().await;
+        let lru_sequence = next_lru(&mut state);
+        let entry = state.hosts.get_mut(&key.host)?.entries.get_mut(&key.path)?;
+        entry.lru_sequence = lru_sequence;
+        Some(CachedEntry {
+            base: entry.base.clone(),
+            desired: entry.desired.clone(),
+            generation: entry.generation,
+        })
+    }
+
+    pub(crate) async fn cache_clean_if_absent(&self, key: CacheKey, snapshot: RemoteSnapshot) {
+        let size = desired_size(&snapshot.desired);
+        if size > self.config.max_bytes {
+            return;
+        }
+        let mut state = self.state.lock().await;
+        if state
+            .hosts
+            .get(&key.host)
+            .is_some_and(|host| host.entries.contains_key(&key.path))
+            || !make_capacity(&mut state, self.config.max_bytes, size, &[])
+        {
+            return;
+        }
+        let lru_sequence = next_lru(&mut state);
+        host_state_mut(&mut state, &key.host).entries.insert(
+            key.path,
+            Entry {
+                base: snapshot.base,
+                desired: snapshot.desired,
+                generation: Generation(0),
+                dirty: false,
+                in_flight: None,
+                conflict: None,
+                lru_sequence,
+            },
+        );
+        state.cached_bytes = state.cached_bytes.saturating_add(size);
+    }
+
+    pub(crate) async fn mutate_prepared_batch(
+        self: &Arc<Self>,
+        edits: Vec<PreparedEdit>,
+    ) -> Result<BatchMutationDisposition, EditError> {
+        let Some(first) = edits.first() else {
+            return Ok(BatchMutationDisposition::Buffered(Vec::new()));
+        };
+        let host_name = first.key.host.clone();
+        if edits.iter().any(|edit| edit.key.host != host_name) {
+            return Err(permanent_error(
+                "prepared edit batch contains more than one SSH host",
+            ));
+        }
+        let mut paths = edits
+            .iter()
+            .map(|edit| edit.key.path.as_str())
+            .collect::<Vec<_>>();
+        paths.sort_unstable();
+        if paths.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(permanent_error(
+                "prepared edit batch contains duplicate paths",
+            ));
+        }
+        if edits
+            .iter()
+            .any(|edit| desired_size(&edit.desired) > self.config.max_bytes)
+        {
+            return Ok(BatchMutationDisposition::ImmediateWriteRequired);
+        }
+
+        let runtime = self.host_runtime(&host_name).await;
+        let _preparation = runtime.preparation.lock().await;
+        let mut state = self.state.lock().await;
+        for edit in &edits {
+            let Some(entry) = state
+                .hosts
+                .get(&host_name)
+                .and_then(|host| host.entries.get(&edit.key.path))
+            else {
+                return Err(transient_error("prepared edit cache entry was evicted"));
+            };
+            if entry.generation != edit.expected_generation {
+                return Err(transient_error(
+                    "prepared edit cache generation changed concurrently",
+                ));
+            }
+        }
+        let old_bytes = edits.iter().fold(0usize, |total, edit| {
+            total.saturating_add(
+                state
+                    .hosts
+                    .get(&host_name)
+                    .and_then(|host| host.entries.get(&edit.key.path))
+                    .map_or(0, |entry| desired_size(&entry.desired)),
+            )
+        });
+        let new_bytes = edits.iter().fold(0usize, |total, edit| {
+            total.saturating_add(desired_size(&edit.desired))
+        });
+        let additional = new_bytes.saturating_sub(old_bytes);
+        let protected = edits
+            .iter()
+            .map(|edit| edit.key.clone())
+            .collect::<Vec<_>>();
+        if !make_capacity(&mut state, self.config.max_bytes, additional, &protected) {
+            return Ok(BatchMutationDisposition::ImmediateWriteRequired);
+        }
+
+        let mut generations = Vec::with_capacity(edits.len());
+        let payload_bytes = edits.iter().fold(0usize, |total, edit| {
+            total.saturating_add(edit.payload_bytes)
+        });
+        for edit in edits {
+            let generation = Generation(state.next_generation);
+            state.next_generation = state.next_generation.saturating_add(1);
+            let lru_sequence = next_lru(&mut state);
+            let entry = state
+                .hosts
+                .get_mut(&host_name)
+                .and_then(|host| host.entries.get_mut(&edit.key.path))
+                .expect("validated prepared cache entry disappeared");
+            entry.desired = edit.desired;
+            entry.generation = generation;
+            entry.dirty = true;
+            entry.lru_sequence = lru_sequence;
+            generations.push(generation);
+        }
+        let host = host_state_mut(&mut state, &host_name);
+        host.dirty_payload_bytes = host.dirty_payload_bytes.saturating_add(payload_bytes);
+        if host.first_dirty_deadline.is_none() {
+            host.first_dirty_deadline = Some(Instant::now() + self.config.flush_delay);
+        }
+        let flush_now = host.dirty_payload_bytes >= self.config.flush_threshold_bytes;
+        let start_timer = !host.timer_running;
+        if start_timer {
+            host.timer_running = true;
+        }
+        state.cached_bytes = state
+            .cached_bytes
+            .saturating_sub(old_bytes)
+            .saturating_add(new_bytes);
+        runtime.changed.notify_waiters();
+        drop(state);
+        if start_timer {
+            self.spawn_timer(host_name.clone(), Arc::clone(&runtime));
+        }
+        if flush_now {
+            let cache = Arc::clone(self);
+            tokio::spawn(async move {
+                let _ = cache.flush_once(&host_name).await;
+            });
+        }
+        Ok(BatchMutationDisposition::Buffered(generations))
+    }
+
     pub(crate) async fn mutate(
         self: &Arc<Self>,
         key: CacheKey,
@@ -214,7 +405,7 @@ impl EditCache {
             let snapshot_bytes = desired_size(&snapshot.desired);
             let mut state = self.state.lock().await;
             if snapshot_bytes <= self.config.max_bytes
-                && make_capacity(&mut state, self.config.max_bytes, snapshot_bytes, None)
+                && make_capacity(&mut state, self.config.max_bytes, snapshot_bytes, &[])
             {
                 let lru_sequence = next_lru(&mut state);
                 host_state_mut(&mut state, &key.host).entries.insert(
@@ -243,7 +434,12 @@ impl EditCache {
             return Ok(MutationDisposition::ImmediateWriteRequired);
         };
         let additional = desired_bytes.saturating_sub(old_size);
-        if !make_capacity(&mut state, self.config.max_bytes, additional, Some(&key)) {
+        if !make_capacity(
+            &mut state,
+            self.config.max_bytes,
+            additional,
+            std::slice::from_ref(&key),
+        ) {
             return Ok(MutationDisposition::ImmediateWriteRequired);
         }
         let generation = Generation(state.next_generation);
@@ -320,6 +516,19 @@ impl EditCache {
 
     pub(crate) async fn cached_bytes(&self) -> usize {
         self.state.lock().await.cached_bytes
+    }
+
+    pub(crate) async fn invalidate_clean_host(&self, host: &str) {
+        let mut state = self.state.lock().await;
+        let Some(host_state) = state.hosts.get_mut(host) else {
+            return;
+        };
+        let removed = host_state
+            .entries
+            .extract_if(|_, entry| !entry.dirty && entry.in_flight.is_none())
+            .map(|(_, entry)| desired_size(&entry.desired))
+            .fold(0usize, usize::saturating_add);
+        state.cached_bytes = state.cached_bytes.saturating_sub(removed);
     }
 
     async fn host_runtime(&self, host: &str) -> Arc<HostRuntime> {
@@ -521,7 +730,7 @@ fn make_capacity(
     state: &mut CacheState,
     maximum: usize,
     additional: usize,
-    protected: Option<&CacheKey>,
+    protected: &[CacheKey],
 ) -> bool {
     while state.cached_bytes.saturating_add(additional) > maximum {
         let candidate = state
@@ -530,7 +739,8 @@ fn make_capacity(
             .flat_map(|(host, host_state)| {
                 host_state.entries.iter().filter_map(move |(path, entry)| {
                     let protected = protected
-                        .is_some_and(|key| key.host == host.as_str() && key.path == path.as_str());
+                        .iter()
+                        .any(|key| key.host == host.as_str() && key.path == path.as_str());
                     (!protected && !entry.dirty && entry.in_flight.is_none()).then_some((
                         entry.lru_sequence,
                         host.clone(),
@@ -553,6 +763,20 @@ fn make_capacity(
         }
     }
     true
+}
+
+fn permanent_error(message: &str) -> EditError {
+    EditError {
+        kind: EditErrorKind::Permanent,
+        message: message.to_owned(),
+    }
+}
+
+fn transient_error(message: &str) -> EditError {
+    EditError {
+        kind: EditErrorKind::Transient,
+        message: message.to_owned(),
+    }
 }
 
 fn retry_delay(attempt: usize) -> Duration {

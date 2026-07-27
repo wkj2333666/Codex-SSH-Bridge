@@ -19,15 +19,7 @@ use crate::output::{
 use crate::path::RemotePath;
 use crate::ssh::{FixedRunRequest, FixedRunResult, HelperMode, SshRunner};
 
-#[allow(
-    dead_code,
-    reason = "the cache state machine is wired into RemoteBridge in Task 4"
-)]
 mod edit_cache;
-#[allow(
-    dead_code,
-    reason = "the SSH edit backend is wired into RemoteBridge in Task 4"
-)]
 mod edit_sync;
 mod metadata;
 mod patch;
@@ -57,6 +49,8 @@ pub(crate) const POSIX_SH_WARNING: &str = "selected POSIX sh does not support Ba
 
 pub struct RemoteBridge {
     runner: Arc<SshRunner>,
+    edit_backend: Arc<edit_sync::SshEditBackend>,
+    edit_cache: Arc<edit_cache::EditCache>,
 }
 
 fn attach_fixed_result_context(
@@ -144,9 +138,43 @@ fn attach_optional_remote_context(
     }
 }
 
+fn edit_bridge_error(error: edit_cache::EditError) -> BridgeError {
+    match error.kind {
+        edit_cache::EditErrorKind::Conflict => {
+            BridgeError::new(ErrorCode::WriteConflict, error.message, false)
+        }
+        edit_cache::EditErrorKind::OutcomeUnknown => {
+            let mut bridge_error = BridgeError::mutation_outcome_unknown();
+            bridge_error.message = error.message;
+            bridge_error
+        }
+        edit_cache::EditErrorKind::Permanent => {
+            BridgeError::new(ErrorCode::InvalidArgument, error.message, false)
+        }
+        edit_cache::EditErrorKind::Transient => {
+            BridgeError::new(ErrorCode::Io, error.message, true)
+        }
+    }
+}
+
 impl RemoteBridge {
     pub fn new(runner: Arc<SshRunner>) -> Self {
-        Self { runner }
+        let limits = runner.config().limits();
+        let edit_backend =
+            edit_sync::SshEditBackend::new(Arc::clone(&runner), limits.edit_cache_max_bytes);
+        let edit_cache = edit_cache::EditCache::new(
+            edit_cache::EditCacheConfig {
+                flush_delay: std::time::Duration::from_millis(limits.edit_flush_delay_ms),
+                flush_threshold_bytes: limits.edit_flush_threshold_bytes,
+                max_bytes: limits.edit_cache_max_bytes,
+            },
+            edit_backend.clone(),
+        );
+        Self {
+            runner,
+            edit_backend,
+            edit_cache,
+        }
     }
 
     pub async fn hosts(&self) -> BridgeResult<HostsResult> {

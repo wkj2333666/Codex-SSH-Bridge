@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use edit_cache::{
-    CacheKey, CommitBatchOutcome, CommitFuture, CommitItem, CommitSuccess, DesiredState,
-    EditBackend, EditCache, EditCacheConfig, EditError, EditErrorKind, EditFuture, Generation,
-    MutationDisposition, RemoteBase, RemoteSnapshot,
+    BatchMutationDisposition, CacheKey, CommitBatchOutcome, CommitFuture, CommitItem,
+    CommitSuccess, DesiredState, EditBackend, EditCache, EditCacheConfig, EditError, EditErrorKind,
+    EditFuture, Generation, MutationDisposition, PreparedEdit, RemoteBase, RemoteSnapshot,
 };
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::advance;
@@ -104,13 +104,11 @@ impl EditBackend for FakeBackend {
                     };
                 };
             }
-            if let Some(outcome) = self.outcomes.lock().unwrap().pop_front() {
-                if let Err(error) = outcome {
-                    return CommitBatchOutcome {
-                        successes: Vec::new(),
-                        error: Some(error),
-                    };
-                }
+            if let Some(Err(error)) = self.outcomes.lock().unwrap().pop_front() {
+                return CommitBatchOutcome {
+                    successes: Vec::new(),
+                    error: Some(error),
+                };
             }
             let partial_failure = self.partial_failures.lock().unwrap().pop_front();
             let successful_items = partial_failure
@@ -350,6 +348,79 @@ async fn a_partial_batch_applies_confirmed_successes_and_only_poison_unconfirmed
         snapshots.get(&second).unwrap().desired,
         DesiredState::Present(Arc::from(&b"second-base"[..]))
     );
+}
+
+#[tokio::test]
+async fn prepared_multi_file_edits_commit_locally_all_or_none() {
+    let first = key("alpha", "/repo/a.rs");
+    let second = key("alpha", "/repo/b.rs");
+    let backend = FakeBackend::new([
+        (first.clone(), regular(b"first-base")),
+        (second.clone(), regular(b"second-base")),
+    ]);
+    let cache = EditCache::new(config(), backend);
+    let first_view = cache.load_entry_complete(first.clone()).await.unwrap();
+    let stale_second = cache.load_entry_complete(second.clone()).await.unwrap();
+    cache
+        .mutate(
+            second.clone(),
+            DesiredState::Present(Arc::from(&b"concurrent"[..])),
+            1,
+        )
+        .await
+        .unwrap();
+
+    let error = cache
+        .mutate_prepared_batch(vec![
+            PreparedEdit {
+                key: first.clone(),
+                expected_generation: first_view.generation,
+                desired: DesiredState::Present(Arc::from(&b"first-local"[..])),
+                payload_bytes: 1,
+            },
+            PreparedEdit {
+                key: second.clone(),
+                expected_generation: stale_second.generation,
+                desired: DesiredState::Present(Arc::from(&b"second-local"[..])),
+                payload_bytes: 1,
+            },
+        ])
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, EditErrorKind::Transient);
+    assert_eq!(
+        cache.lookup_complete(&first).await,
+        Some(DesiredState::Present(Arc::from(&b"first-base"[..])))
+    );
+    assert_eq!(
+        cache.lookup_complete(&second).await,
+        Some(DesiredState::Present(Arc::from(&b"concurrent"[..])))
+    );
+
+    let first_view = cache.load_entry_complete(first.clone()).await.unwrap();
+    let second_view = cache.load_entry_complete(second.clone()).await.unwrap();
+    let disposition = cache
+        .mutate_prepared_batch(vec![
+            PreparedEdit {
+                key: first,
+                expected_generation: first_view.generation,
+                desired: DesiredState::Present(Arc::from(&b"first-local"[..])),
+                payload_bytes: 1,
+            },
+            PreparedEdit {
+                key: second,
+                expected_generation: second_view.generation,
+                desired: DesiredState::Present(Arc::from(&b"second-local"[..])),
+                payload_bytes: 1,
+            },
+        ])
+        .await
+        .unwrap();
+    let BatchMutationDisposition::Buffered(generations) = disposition else {
+        panic!("prepared batch unexpectedly required immediate writes");
+    };
+    assert_eq!(generations.len(), 2);
 }
 
 #[tokio::test]

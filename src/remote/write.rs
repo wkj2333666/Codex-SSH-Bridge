@@ -12,10 +12,14 @@ use crate::ssh::{
     FixedOperationKind, FixedRunRequest, FixedRunResult, RootedPathInputs, render_fixed_command,
 };
 
+use super::edit_cache::{
+    BatchMutationDisposition, CacheKey, DesiredState, PreparedEdit, RemoteBase,
+};
 use super::protocol::{context, encode_bytes, read_small_stream};
 use super::{
     GuardedDeleteRequest, GuardedDeleteResult, MAX_INPUT_PATH_BYTES, RemoteBridge, WriteEncoding,
     WriteMode, WriteOperation, WriteRequest, WriteResult, attach_fixed_result_context,
+    edit_bridge_error,
 };
 
 const WRITE_PROTOCOL_LIMIT: u64 = 512;
@@ -977,8 +981,95 @@ pub(super) async fn write(
     request: WriteRequest,
     cancel: CancellationToken,
 ) -> BridgeResult<WriteResult> {
-    let resolved = preflight_write(bridge, request)?;
-    execute_preflighted_write(bridge, resolved, cancel).await
+    let mut resolved = preflight_write(bridge, request)?;
+    if cancel.is_cancelled() {
+        return Err(BridgeError::new(
+            ErrorCode::Cancelled,
+            "remote write was cancelled",
+            false,
+        ));
+    }
+    let key = CacheKey {
+        host: resolved.host.clone(),
+        path: resolved.path.as_str().to_owned(),
+    };
+    let current = bridge
+        .edit_cache
+        .load_entry_complete(key.clone())
+        .await
+        .map_err(edit_bridge_error)?;
+    match (&resolved.operation, &current.desired) {
+        (WriteOperation::Create, DesiredState::Deleted)
+        | (WriteOperation::Replace, DesiredState::Present(_)) => {}
+        _ => {
+            return Err(BridgeError::new(
+                ErrorCode::WriteConflict,
+                "remote write base conflicts with the request",
+                false,
+            ));
+        }
+    }
+    if let Some(expected) = &resolved.expected_sha256 {
+        let DesiredState::Present(bytes) = &current.desired else {
+            return Err(BridgeError::new(
+                ErrorCode::WriteConflict,
+                "remote write base conflicts with the request",
+                false,
+            ));
+        };
+        let actual = format!("{:x}", Sha256::digest(bytes));
+        if actual != *expected {
+            return Err(BridgeError::new(
+                ErrorCode::WriteConflict,
+                "remote write base hash conflicts with the request",
+                false,
+            ));
+        }
+    }
+    let desired = DesiredState::Present(Arc::from(std::mem::take(&mut resolved.content)));
+    let disposition = bridge
+        .edit_cache
+        .mutate_prepared_batch(vec![PreparedEdit {
+            key,
+            expected_generation: current.generation,
+            desired: desired.clone(),
+            payload_bytes: desired.len(),
+        }])
+        .await
+        .map_err(edit_bridge_error)?;
+    if disposition == BatchMutationDisposition::ImmediateWriteRequired {
+        resolved.content = desired.as_ref().to_vec();
+        bridge
+            .edit_cache
+            .flush_host(&resolved.host)
+            .await
+            .map_err(edit_bridge_error)?;
+        let host = resolved.host.clone();
+        let result = execute_preflighted_write(bridge, resolved, cancel).await?;
+        bridge.edit_cache.invalidate_clean_host(&host).await;
+        return Ok(result);
+    }
+    let context = bridge
+        .edit_backend
+        .context_for(&resolved.host)
+        .await
+        .ok_or_else(|| {
+            BridgeError::new(ErrorCode::ProtocolError, "edit context is missing", false)
+        })?;
+    let mode = match current.base {
+        RemoteBase::Missing => 0o600,
+        RemoteBase::Regular { mode, .. } => mode,
+    };
+    Ok(WriteResult {
+        context,
+        actual_path: encode_bytes(resolved.path.as_str().as_bytes()),
+        relative_path: encode_bytes(resolved.path.relative().as_bytes()),
+        operation: resolved.operation,
+        raw_bytes: resolved.raw_bytes,
+        sha256: resolved.sha256,
+        mode,
+        temporary_cleanup_confirmed: false,
+    })
 }
 
 pub(super) async fn execute_preflighted_write(

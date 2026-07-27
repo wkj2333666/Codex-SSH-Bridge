@@ -7,6 +7,7 @@ use crate::error::BridgeResult;
 use crate::output::{InternalSpoolOwner, StreamKind};
 use crate::ssh::{FixedOperationKind, FixedRunRequest, RootedPathInputs};
 
+use super::edit_cache::{CacheKey, DesiredState, RemoteBase, RemoteSnapshot};
 use super::protocol::{
     context, encode_bytes, entry_error, nul_fields, parse_u64, protocol_error, read_small_stream,
     utf8,
@@ -65,6 +66,7 @@ fi
 if [ ! -r "$path" ]; then printf 'PERMISSION_DENIED\000' >&2; exit 0; fi
 if [ ! -f "$path" ]; then printf 'INVALID_ARGUMENT\000' >&2; exit 0; fi
 size=$(stat --printf='%s' -- "$path" 2>/dev/null) || { printf 'PERMISSION_DENIED\000' >&2; exit 0; }
+mode=$(stat --printf='%a' -- "$path" 2>/dev/null) || { printf 'PERMISSION_DENIED\000' >&2; exit 0; }
 count=$(wc -l < "$path") || { printf 'PERMISSION_DENIED\000' >&2; exit 0; }
 if [ "$size" -gt 0 ]; then
     final_lf=$(tail -c 1 -- "$path" | wc -l)
@@ -78,7 +80,7 @@ tail -n "+$start" -- "$path" 2>/dev/null | head -n "$lines" | head -c "$look"
 hash2=$(sha256sum -- "$path" 2>/dev/null) || { printf 'PERMISSION_DENIED\000' >&2; exit 0; }
 set -- $hash2
 hash2=$1
-printf 'OK\000%s\000%s\000%s\000%s\000' "$size" "$count" "$hash1" "$hash2" >&2
+printf 'OK\000%s\000%s\000%s\000%s\000%s\000' "$size" "$count" "$hash1" "$hash2" "$mode" >&2
 "#;
 
 pub(super) async fn read(
@@ -95,6 +97,31 @@ pub(super) async fn read(
     for path in request.paths {
         if cancel.is_cancelled() {
             return Err(read_cancelled_error(operation_context.as_ref()));
+        }
+        let cache_key = CacheKey {
+            host: request.host.clone(),
+            path: path.as_str().to_owned(),
+        };
+        if let Some(desired) = bridge.edit_cache.lookup_complete(&cache_key).await {
+            if operation_context.is_none() {
+                operation_context = bridge.edit_backend.context_for(&request.host).await;
+            }
+            let (entry, raw_bytes) = cached_read_entry(
+                &path,
+                &desired,
+                request.start_line,
+                request.max_lines,
+                remaining,
+            );
+            remaining = remaining.saturating_sub(raw_bytes);
+            returned_raw_bytes = returned_raw_bytes
+                .checked_add(raw_bytes as u64)
+                .ok_or_else(|| protocol_error("read byte count overflowed"))
+                .map_err(|error| {
+                    attach_optional_remote_context(error, operation_context.as_ref())
+                })?;
+            files.push(entry);
+            continue;
         }
         let owner = InternalSpoolOwner::new();
         let stdout_limit = (remaining as u64)
@@ -137,6 +164,10 @@ pub(super) async fn read(
                 result.helper_mode,
             ));
         }
+        bridge
+            .edit_backend
+            .remember_context(&request.host, &result)
+            .await;
         let attach = |error| attach_fixed_result_context(error, &request.host, &result);
         let stderr = read_small_stream(&result.output, StreamKind::Stderr, 1024)
             .await
@@ -161,7 +192,7 @@ pub(super) async fn read(
             });
             continue;
         }
-        if fields.len() != 5 {
+        if fields.len() != 6 {
             return Err(attach(protocol_error(
                 "read metadata field count is invalid",
             )));
@@ -170,9 +201,18 @@ pub(super) async fn read(
         let total_lines = parse_u64(fields[2]).map_err(&attach)?;
         let hash1 = utf8(fields[3]).map_err(&attach)?;
         let hash2 = utf8(fields[4]).map_err(&attach)?;
+        let mode = utf8(fields[5]).map_err(&attach)?;
         if !valid_hash(hash1) || !valid_hash(hash2) {
             return Err(attach(protocol_error("read hash is invalid")));
         }
+        if mode.is_empty()
+            || mode.len() > 4
+            || !mode.bytes().all(|byte| (b'0'..=b'7').contains(&byte))
+        {
+            return Err(attach(protocol_error("read mode is invalid")));
+        }
+        let mode = u32::from_str_radix(mode, 8)
+            .map_err(|_| attach(protocol_error("read mode is invalid")))?;
         let stdout = read_small_stream(
             &result.output,
             StreamKind::Stdout,
@@ -207,6 +247,21 @@ pub(super) async fn read(
         } else {
             hash1.to_owned()
         };
+        if !truncated {
+            bridge
+                .edit_cache
+                .cache_clean_if_absent(
+                    cache_key,
+                    RemoteSnapshot {
+                        base: RemoteBase::Regular {
+                            sha256: sha256.clone(),
+                            mode,
+                        },
+                        desired: DesiredState::Present(std::sync::Arc::from(retained)),
+                    },
+                )
+                .await;
+        }
         remaining -= retained.len();
         returned_raw_bytes = returned_raw_bytes
             .checked_add(retained.len() as u64)
@@ -232,6 +287,80 @@ pub(super) async fn read(
     })
 }
 
+fn cached_read_entry(
+    path: &crate::path::RemotePath,
+    desired: &DesiredState,
+    start_line: u64,
+    max_lines: u64,
+    maximum_bytes: usize,
+) -> (ReadEntry, usize) {
+    let actual_path = encode_bytes(path.as_str().as_bytes());
+    let relative_path = encode_bytes(path.relative().as_bytes());
+    let DesiredState::Present(bytes) = desired else {
+        return (
+            ReadEntry::Error {
+                actual_path,
+                relative_path,
+                error: EntryError {
+                    code: EntryErrorCode::NotFound,
+                    message: "remote path was not found",
+                },
+            },
+            0,
+        );
+    };
+    let total_lines = logical_line_count(bytes);
+    let start = logical_line_offset(bytes, start_line.saturating_sub(1));
+    let end = logical_line_offset_from(bytes, start, max_lines);
+    let selected = &bytes[start..end];
+    let byte_truncated = selected.len() > maximum_bytes;
+    let retained = &selected[..selected.len().min(maximum_bytes)];
+    let truncated_before = start_line > 1 && !bytes.is_empty();
+    let line_end = start_line.saturating_sub(1).saturating_add(max_lines);
+    let truncated_after = byte_truncated || line_end < total_lines;
+    let truncated = truncated_before || truncated_after;
+    let sha256 = if truncated {
+        format!("{:x}", Sha256::digest(bytes))
+    } else {
+        format!("{:x}", Sha256::digest(retained))
+    };
+    (
+        ReadEntry::Success {
+            actual_path,
+            relative_path,
+            content: encode_bytes(retained),
+            raw_bytes: retained.len() as u64,
+            sha256,
+            truncated_before,
+            truncated_after,
+            truncated,
+        },
+        retained.len(),
+    )
+}
+
+fn logical_line_count(bytes: &[u8]) -> u64 {
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+    newlines + u64::from(!bytes.is_empty() && bytes.last() != Some(&b'\n'))
+}
+
+fn logical_line_offset(bytes: &[u8], lines: u64) -> usize {
+    logical_line_offset_from(bytes, 0, lines)
+}
+
+fn logical_line_offset_from(bytes: &[u8], start: usize, lines: u64) -> usize {
+    let mut remaining = lines;
+    for (offset, byte) in bytes[start..].iter().enumerate() {
+        if remaining == 0 {
+            return start + offset;
+        }
+        if *byte == b'\n' {
+            remaining -= 1;
+        }
+    }
+    bytes.len()
+}
+
 fn read_cancelled_error(operation_context: Option<&super::RemoteContext>) -> crate::BridgeError {
     let error = crate::error::BridgeError::new(
         crate::error::ErrorCode::Cancelled,
@@ -250,7 +379,10 @@ fn valid_hash(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{RemoteContext, ShellMetadata, ShellName};
+    use std::sync::Arc;
+
+    use super::super::edit_cache::DesiredState;
+    use super::super::{ReadEntry, RemoteContext, ShellMetadata, ShellName, ValueEncoding};
     use crate::ErrorCode;
 
     #[test]
@@ -294,5 +426,41 @@ mod tests {
         assert_eq!(error.message, "timeout");
         assert_eq!(error.details.host.as_deref(), Some("dev"));
         assert_eq!(error.details.physical_root.as_deref(), Some("/srv/app"));
+    }
+
+    #[test]
+    fn cached_read_preserves_line_and_byte_truncation_semantics() {
+        let path = crate::path::RemotePath::absolute("/srv/app/file").unwrap();
+        let desired = DesiredState::Present(Arc::from(&b"one\ntwo\nthree"[..]));
+        let (entry, raw_bytes) = super::cached_read_entry(&path, &desired, 2, 2, 4);
+
+        assert_eq!(raw_bytes, 4);
+        let ReadEntry::Success {
+            content,
+            truncated_before,
+            truncated_after,
+            truncated,
+            ..
+        } = entry
+        else {
+            panic!("cached present file did not produce content");
+        };
+        assert_eq!(content.encoding, ValueEncoding::Utf8);
+        assert_eq!(content.value, "two\n");
+        assert!(truncated_before);
+        assert!(truncated_after);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn cached_tombstone_reads_as_not_found() {
+        let path = crate::path::RemotePath::absolute("/srv/app/missing").unwrap();
+        let (entry, raw_bytes) =
+            super::cached_read_entry(&path, &DesiredState::Deleted, 1, 2_000, 1024);
+        assert_eq!(raw_bytes, 0);
+        let ReadEntry::Error { error, .. } = entry else {
+            panic!("cached tombstone did not produce an error");
+        };
+        assert_eq!(error.code, super::super::EntryErrorCode::NotFound);
     }
 }

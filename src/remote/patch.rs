@@ -8,10 +8,12 @@ use crate::error::{BridgeError, BridgeResult, ErrorCode};
 use crate::output::{InternalSpoolOwner, StreamKind};
 use crate::ssh::{FixedOperationKind, FixedRunRequest, RootedPathInputs};
 
+use super::edit_cache::{BatchMutationDisposition, CacheKey, DesiredState, PreparedEdit};
 use super::protocol::{context, nul_fields, parse_u64, read_small_stream, utf8};
 use super::{
     ApplyPatchRequest, ApplyPatchResult, RemoteBridge, RemoteContext, WriteEncoding, WriteMode,
     attach_fixed_result_context, attach_optional_remote_context, attach_remote_context,
+    edit_bridge_error,
 };
 
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
@@ -1321,6 +1323,118 @@ fn attach_mutation_progress_context(
 }
 
 pub(super) async fn apply_patch(
+    bridge: &RemoteBridge,
+    request: ApplyPatchRequest,
+    cancel: CancellationToken,
+) -> BridgeResult<ApplyPatchResult> {
+    let immediate_request = request.clone();
+    let ApplyPatchRequest { host, patch } = request;
+    bridge.runner.config().require_discovered_alias(&host)?;
+    let maximum_bytes = bridge.runner.config().limits().max_write_bytes;
+    if patch.len() > maximum_bytes {
+        return Err(patch_too_large(
+            "patch exceeds the effective host write limit",
+        ));
+    }
+    let payload_bytes = patch.len();
+    let patches = parse_patch(&patch)?;
+    let all_paths = patches
+        .iter()
+        .map(|patch| patch.path.clone())
+        .collect::<Vec<_>>();
+    let resolved = resolve_patch_files(bridge, &host, patches)
+        .map_err(|error| attach_preparation_progress(error, None, &all_paths))?;
+    let mut prepared = Vec::with_capacity(resolved.len());
+    let mut remaining_output_bytes = maximum_bytes;
+    for (index, file) in resolved.into_iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(attach_preparation_progress(
+                BridgeError::new(ErrorCode::Cancelled, "remote patch was cancelled", false),
+                Some(&file.patch.path),
+                &all_paths,
+            ));
+        }
+        let key = CacheKey {
+            host: host.clone(),
+            path: file.patch.path.clone(),
+        };
+        let current = bridge
+            .edit_cache
+            .load_entry_complete(key.clone())
+            .await
+            .map_err(edit_bridge_error)
+            .map_err(|error| {
+                attach_preparation_progress(error, Some(&file.patch.path), &all_paths)
+            })?;
+        let current_hash = match &current.desired {
+            DesiredState::Present(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
+            DesiredState::Deleted => None,
+        };
+        let base = match &current.desired {
+            DesiredState::Present(bytes) => {
+                Some((bytes.as_ref(), current_hash.as_deref().unwrap()))
+            }
+            DesiredState::Deleted => None,
+        };
+        let output =
+            apply_file_patch(base, &file.patch, remaining_output_bytes).map_err(|error| {
+                attach_preparation_progress(error, Some(&file.patch.path), &all_paths)
+            })?;
+        let desired = match output {
+            PatchedFile::Write(bytes) => {
+                remaining_output_bytes = remaining_output_bytes
+                    .checked_sub(bytes.len())
+                    .ok_or_else(|| {
+                        attach_preparation_progress(
+                            patch_too_large("patch outputs exceed the aggregate write limit"),
+                            Some(&file.patch.path),
+                            &all_paths,
+                        )
+                    })?;
+                DesiredState::Present(bytes.into())
+            }
+            PatchedFile::Delete => DesiredState::Deleted,
+        };
+        prepared.push(PreparedEdit {
+            key,
+            expected_generation: current.generation,
+            desired,
+            payload_bytes: if index == 0 { payload_bytes } else { 0 },
+        });
+    }
+    match bridge
+        .edit_cache
+        .mutate_prepared_batch(prepared)
+        .await
+        .map_err(edit_bridge_error)?
+    {
+        BatchMutationDisposition::Buffered(_) => {
+            let context = bridge
+                .edit_backend
+                .context_for(&host)
+                .await
+                .ok_or_else(|| {
+                    BridgeError::new(ErrorCode::ProtocolError, "edit context is missing", false)
+                })?;
+            Ok(ApplyPatchResult {
+                context,
+                changed_paths: all_paths,
+            })
+        }
+        BatchMutationDisposition::ImmediateWriteRequired => {
+            bridge
+                .edit_cache
+                .flush_host(&host)
+                .await
+                .map_err(edit_bridge_error)?;
+            let result = apply_patch_immediate(bridge, immediate_request, cancel).await?;
+            bridge.edit_cache.invalidate_clean_host(&host).await;
+            Ok(result)
+        }
+    }
+}
+
+async fn apply_patch_immediate(
     bridge: &RemoteBridge,
     request: ApplyPatchRequest,
     cancel: CancellationToken,

@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 use crate::error::ErrorCode;
 use crate::output::{InternalSpoolOwner, StreamKind};
@@ -14,13 +16,13 @@ use super::edit_cache::{
     CacheKey, CommitBatchOutcome, CommitFuture, CommitItem, CommitSuccess, DesiredState,
     EditBackend, EditError, EditErrorKind, EditFuture, RemoteBase, RemoteSnapshot,
 };
-use super::execute_readonly_fixed;
 use super::patch::{
     FileSnapshot, PATCH_SNAPSHOT_SCRIPT, SNAPSHOT_CAPTURE_METADATA_BYTES, SNAPSHOT_PROTOCOL_BYTES,
     parse_snapshot_protocol,
 };
-use super::protocol::read_small_stream;
+use super::protocol::{context, read_small_stream};
 use super::write::split_parent_basename;
+use super::{RemoteContext, execute_readonly_fixed};
 
 const ITEM_ARGUMENTS: usize = 8;
 const RECORD_BYTES: u64 = 192;
@@ -159,6 +161,7 @@ done
 pub(super) struct SshEditBackend {
     runner: Arc<SshRunner>,
     maximum_snapshot_bytes: usize,
+    host_contexts: Mutex<HashMap<String, RemoteContext>>,
 }
 
 impl SshEditBackend {
@@ -166,7 +169,25 @@ impl SshEditBackend {
         Arc::new(Self {
             runner,
             maximum_snapshot_bytes,
+            host_contexts: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub(super) async fn context_for(&self, host: &str) -> Option<RemoteContext> {
+        self.host_contexts.lock().await.get(host).cloned()
+    }
+
+    pub(super) async fn remember_context(&self, host: &str, result: &crate::ssh::FixedRunResult) {
+        let operation_context = context(
+            host.to_owned(),
+            result.capability.physical_root.clone(),
+            &result.shell,
+            result.helper_mode,
+        );
+        self.host_contexts
+            .lock()
+            .await
+            .insert(host.to_owned(), operation_context);
     }
 
     async fn fetch_snapshot(&self, key: &CacheKey) -> Result<RemoteSnapshot, EditError> {
@@ -211,6 +232,7 @@ impl SshEditBackend {
         )
         .await
         .map_err(map_runner_error)?;
+        self.remember_context(&key.host, &result).await;
         let stderr = read_small_stream(&result.output, StreamKind::Stderr, SNAPSHOT_PROTOCOL_BYTES)
             .await
             .map_err(map_runner_error)?;
@@ -283,6 +305,7 @@ impl SshEditBackend {
             .execute_fixed_once(request, tokio_util::sync::CancellationToken::new())
             .await
             .map_err(map_runner_error)?;
+        self.remember_context(host, &result).await;
         let stderr = read_small_stream(&result.output, StreamKind::Stderr, 1)
             .await
             .map_err(map_runner_error)?;
