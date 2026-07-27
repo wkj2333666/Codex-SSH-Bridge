@@ -26,6 +26,9 @@ use super::{RemoteContext, execute_readonly_fixed};
 
 const ITEM_ARGUMENTS: usize = 8;
 const RECORD_BYTES: u64 = 192;
+const WRITE_CAPABILITIES: &[&str] = &["safe_write"];
+const DELETE_CAPABILITIES: &[&str] = &["guarded_delete"];
+const MIXED_CAPABILITIES: &[&str] = &["safe_write", "guarded_delete"];
 
 const BATCH_EDIT_SCRIPT: &str = r#"
 set -u
@@ -279,6 +282,18 @@ impl SshEditBackend {
         if output_limit == 0 || output_limit > limits.max_output_bytes {
             return Err(permanent("batch output exceeds the configured limit"));
         }
+        let has_write = items
+            .iter()
+            .any(|item| matches!(item.desired, DesiredState::Present(_)));
+        let has_delete = items
+            .iter()
+            .any(|item| matches!(item.desired, DesiredState::Deleted));
+        let required_capabilities = match (has_write, has_delete) {
+            (true, true) => MIXED_CAPABILITIES,
+            (true, false) => WRITE_CAPABILITIES,
+            (false, true) => DELETE_CAPABILITIES,
+            (false, false) => return Err(permanent("batch contains no edit operations")),
+        };
         let owner = InternalSpoolOwner::new();
         let request = FixedRunRequest {
             kind: FixedOperationKind::Mutation,
@@ -294,7 +309,7 @@ impl SshEditBackend {
                 }),
                 stdin_nul_paths: false,
             },
-            required_capabilities: &["safe_write", "guarded_delete"],
+            required_capabilities,
             stdout_limit: output_limit,
             stderr_limit: 1,
             timeout: Duration::from_millis(limits.command_timeout_ms),
@@ -557,7 +572,8 @@ fn map_runner_error(error: crate::error::BridgeError) -> EditError {
         ErrorCode::MutationOutcomeUnknown => EditErrorKind::OutcomeUnknown,
         ErrorCode::WriteConflict => EditErrorKind::Conflict,
         ErrorCode::InvalidArgument | ErrorCode::RequestTooLarge => EditErrorKind::Permanent,
-        _ => EditErrorKind::Transient,
+        _ if error.retryable => EditErrorKind::Transient,
+        _ => EditErrorKind::Permanent,
     };
     EditError {
         kind,

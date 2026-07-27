@@ -604,6 +604,24 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
     assert_no_diagnostic_success_fields(&patched);
     assert_eq!(patched["structuredContent"], json!({}));
     assert_eq!(text_content(&patched), "Done!");
+    let cached = session
+        .call(
+            "remote_read",
+            json!({"host":"dev","paths":[root.join("created.txt")],"max_bytes":4096}),
+        )
+        .await;
+    assert!(text_content(&cached).contains("PATCH_SURFACE"));
+    assert!(
+        !remote.path().join("created.txt").exists(),
+        "buffered mutation must not reach the remote before a barrier"
+    );
+    let barrier = session
+        .call(
+            "remote_run",
+            json!({"host":"dev","cwd":root,"command":":","shell":"sh"}),
+        )
+        .await;
+    assert_eq!(barrier["structuredContent"]["exit_code"], 0);
     assert_eq!(
         std::fs::read(remote.path().join("created.txt")).unwrap(),
         b"PATCH_SURFACE\n"
@@ -1268,10 +1286,17 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     .await;
     assert_eq!(written["structuredContent"], json!({}));
     assert!(text_content(&written).starts_with("Wrote "));
-    assert_eq!(
-        std::fs::read(remote.path().join("created.txt")).unwrap(),
-        b"WRITE_SENTINEL\n"
+    assert!(
+        !remote.path().join("created.txt").exists(),
+        "write must remain buffered until a barrier"
     );
+    let cached_write = call_json(
+        &tools,
+        "remote_read",
+        json!({"host":"dev", "paths":[root.join("created.txt")], "max_bytes":4096}),
+    )
+    .await;
+    assert!(text_content(&cached_write).contains("WRITE_SENTINEL"));
 
     let patched = call_json(
         &tools,
@@ -1287,6 +1312,20 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     .await;
     assert_eq!(patched["structuredContent"], json!({}));
     assert_eq!(text_content(&patched), "Done!");
+    let cached_patch = call_json(
+        &tools,
+        "remote_read",
+        json!({"host":"dev", "paths":[root.join("created.txt")], "max_bytes":4096}),
+    )
+    .await;
+    assert!(text_content(&cached_patch).contains("PATCH_SENTINEL"));
+    let barrier = call_json(
+        &tools,
+        "remote_run",
+        json!({"host":"dev", "cwd":root, "command":":", "shell":"sh"}),
+    )
+    .await;
+    assert_eq!(barrier["structuredContent"]["exit_code"], 0);
     assert_eq!(
         std::fs::read(remote.path().join("created.txt")).unwrap(),
         b"PATCH_SENTINEL\n"
@@ -1650,7 +1689,6 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
         )
         .await;
         assert_eq!(result["isError"], Value::Null, "value={value:?}: {result}");
-        assert_eq!(std::fs::read(&path).unwrap(), value.as_bytes());
         let (argv, command) = only_command_record(&log);
         let shape = (argv, fixed_script_prefix(&command, " codex-ssh-bridge-op "));
         if let Some(expected) = &write_shape {
@@ -1658,6 +1696,30 @@ async fn task8_hostile_content_and_command_output_remain_single_response_data() 
         } else {
             write_shape = Some(shape);
         }
+        let cached = call_json(
+            &tools,
+            "remote_read",
+            json!({"host":"dev","paths":[&path],"max_bytes":4096}),
+        )
+        .await;
+        let cached_text = text_content(&cached);
+        if value.contains('\0') {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(value.as_bytes());
+            assert!(cached_text.contains(&format!("base64:{encoded}")));
+        } else {
+            assert!(
+                cached_text.contains(value),
+                "value={value:?}: {cached_text}"
+            );
+        }
+        let barrier = call_json(
+            &tools,
+            "remote_run",
+            json!({"host":"dev","cwd":remote.path(),"command":":","shell":"sh"}),
+        )
+        .await;
+        assert_eq!(barrier["structuredContent"]["exit_code"], 0);
+        assert_eq!(std::fs::read(&path).unwrap(), value.as_bytes());
         assert_hostile_marker_absent(remote.path());
     }
 

@@ -224,25 +224,34 @@ impl EditCache {
         &self,
         key: CacheKey,
     ) -> Result<CachedEntry, EditError> {
-        if let Some(entry) = self.lookup_entry(&key).await {
+        if let Some(entry) = self.lookup_entry(&key).await? {
             return Ok(entry);
         }
         self.load_complete(key.clone()).await?;
         self.lookup_entry(&key)
-            .await
+            .await?
             .ok_or_else(|| permanent_error("complete entry does not fit the edit cache"))
     }
 
-    pub(crate) async fn lookup_entry(&self, key: &CacheKey) -> Option<CachedEntry> {
+    async fn lookup_entry(&self, key: &CacheKey) -> Result<Option<CachedEntry>, EditError> {
         let mut state = self.state.lock().await;
         let lru_sequence = next_lru(&mut state);
-        let entry = state.hosts.get_mut(&key.host)?.entries.get_mut(&key.path)?;
+        let Some(entry) = state
+            .hosts
+            .get_mut(&key.host)
+            .and_then(|host| host.entries.get_mut(&key.path))
+        else {
+            return Ok(None);
+        };
+        if let Some(error) = &entry.conflict {
+            return Err(error.clone());
+        }
         entry.lru_sequence = lru_sequence;
-        Some(CachedEntry {
+        Ok(Some(CachedEntry {
             base: entry.base.clone(),
             desired: entry.desired.clone(),
             generation: entry.generation,
-        })
+        }))
     }
 
     pub(crate) async fn cache_clean_if_absent(&self, key: CacheKey, snapshot: RemoteSnapshot) {
