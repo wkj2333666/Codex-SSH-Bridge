@@ -659,10 +659,27 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .await
         .expect("safe write through real sshd");
     assert_eq!(write.operation, WriteOperation::Create);
-    assert_eq!(
-        fs::read(fixture.root.join("generated.txt")).unwrap(),
-        b"old\n"
+    assert!(
+        !fixture.root.join("generated.txt").exists(),
+        "successful write must remain buffered before a barrier"
     );
+    let cached_write = bridge
+        .read(
+            ReadRequest {
+                host: BASH_HOST.to_owned(),
+                paths: vec!["generated.txt".to_owned()],
+                start_line: Some(1),
+                max_lines: Some(10),
+                max_bytes: Some(4096),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("read buffered create through real sshd");
+    assert!(matches!(
+        &cached_write.files[0],
+        ReadEntry::Success { content, .. } if utf8(content) == "old\n"
+    ));
     let patch = bridge
         .apply_patch(
             ApplyPatchRequest {
@@ -675,6 +692,38 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .await
         .expect("patch through real sshd");
     assert_eq!(patch.changed_paths, ["generated.txt"]);
+    let cached_patch = bridge
+        .read(
+            ReadRequest {
+                host: BASH_HOST.to_owned(),
+                paths: vec!["generated.txt".to_owned()],
+                start_line: Some(1),
+                max_lines: Some(10),
+                max_bytes: Some(4096),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("read buffered patch through real sshd");
+    assert!(matches!(
+        &cached_patch.files[0],
+        ReadEntry::Success { content, .. } if utf8(content) == "new\n"
+    ));
+    assert!(!fixture.root.join("generated.txt").exists());
+    bridge
+        .run(
+            RemoteRunRequest {
+                host: BASH_HOST.to_owned(),
+                command: ":".to_owned(),
+                cwd: None,
+                shell: RunShell::Sh,
+                timeout_ms: Some(2_000),
+                stdin: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("command barrier must synchronize buffered real-SSH edits");
     assert_eq!(
         fs::read(fixture.root.join("generated.txt")).unwrap(),
         b"new\n"

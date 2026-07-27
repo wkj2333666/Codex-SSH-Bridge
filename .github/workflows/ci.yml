@@ -149,7 +149,25 @@ jobs:
           fi
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
 
-      - name: Collect cold/warm profile
+      - name: Install real SSH test dependency
+        run: |
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends openssh-server
+          fi
+          sudo install -d -m 0755 /run/sshd
+
+      - name: Prepare release diagnostic binaries
+        run: |
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --no-run \
+            --lib \
+            --test mcp_tools \
+            --test performance_acceptance \
+            --test mcp_protocol \
+            --test real_ssh \
+            --test remote_ops
+
+      - name: Collect cold/warm and edit-cache profiles
         shell: bash
         run: |
           set -euo pipefail
@@ -160,37 +178,43 @@ jobs:
             -- --nocapture \
             >diagnostics/profile.stdout \
             2>diagnostics/profile.jsonl
-
-      - name: Prepare release diagnostic binaries
-        run: |
-          cargo +"$RUST_TOOLCHAIN" test --release --locked --no-run \
-            --lib \
-            --test mcp_tools \
-            --test performance_acceptance \
-            --test mcp_protocol \
-            --test remote_ops
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
+            --test performance_acceptance task13_release_edit_cache_latency_profile \
+            -- --nocapture 2>&1 | tee diagnostics/profile-edit-cache.log
 
       - name: Collect release RSS diagnostics
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p diagnostics
-          cargo +"$RUST_TOOLCHAIN" test --release --locked --test mcp_tools task8_output_rss_ \
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
+            --test performance_acceptance task13_release_edit_cache_rss_fresh_child \
+            -- --nocapture 2>&1 | tee diagnostics/rss-edit-cache.log
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --test mcp_tools task8_output_rss_ \
             -- --nocapture 2>&1 | tee diagnostics/rss-mcp.log
-          cargo +"$RUST_TOOLCHAIN" test --release --locked --test performance_acceptance \
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --test performance_acceptance \
             task11_release_bounded_session_output_rss_fresh_child -- --nocapture \
             2>&1 | tee diagnostics/rss-session.log
-          cargo +"$RUST_TOOLCHAIN" test --release --locked --test performance_acceptance \
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --test performance_acceptance \
             task11_release_zero_output_concurrent_rss_fresh_child -- --nocapture \
             2>&1 | tee diagnostics/rss-zero-output.log
-          cargo +"$RUST_TOOLCHAIN" test --release --locked --test mcp_protocol task7_wide_json_rss_ \
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --test mcp_protocol task7_wide_json_rss_ \
             -- --nocapture 2>&1 | tee diagnostics/rss-json.log
-          cargo +"$RUST_TOOLCHAIN" test --release --locked --lib \
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --lib \
             remote::run::tests::task78_base64_admission_release_rss -- --nocapture \
             2>&1 | tee diagnostics/rss-base64.log
-          cargo +"$RUST_TOOLCHAIN" test --release --locked --test remote_ops \
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --test remote_ops \
             five_hosts_successfully_stream_forty_mib_below_rss_bound -- --nocapture \
             2>&1 | tee diagnostics/rss-fixed-operations.log
+
+      - name: Run required real SSH edit-cache integration
+        env:
+          CODEX_SSH_BRIDGE_REQUIRE_REAL_SSH: "1"
+        run: |
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
+            --test real_ssh \
+            real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellation \
+            -- --nocapture
 
       - name: Upload diagnostic evidence
         if: always()

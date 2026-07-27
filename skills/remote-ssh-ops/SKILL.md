@@ -25,8 +25,8 @@ wrapper around the model's command.
 
 Successful `remote_write` and `remote_apply_patch` calls may first update a
 bounded in-memory edit cache. Later complete reads and edits in this task see
-that latest local generation immediately. The bridge synchronizes within 30
-seconds, after 16 KiB of edit payload, before `remote_run`, `remote_stat`,
+that latest local generation immediately. The bridge synchronizes within 30 seconds,
+after 16 KiB of edit payload, before `remote_run`, `remote_stat`,
 `remote_list`, or `remote_search`, and once on clean MCP shutdown. Do not
 manage generations or request a manual flush. If the connection is interrupted
 or the bridge exits abnormally, a buffered write may fail; when synchronization
