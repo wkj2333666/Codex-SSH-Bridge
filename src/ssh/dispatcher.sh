@@ -481,9 +481,14 @@ exit 0"
     if kill -0 -"$run_pid" 2>/dev/null; then run_process_group_alive=1; fi
     if [ "$run_process_group_alive" -eq 1 ]; then
         run_drain_wait=0
+        run_drain_limit=12
         while :; do
             [ -f "$run_stdout.done" ] && [ -f "$run_stderr.done" ] && break
-            [ "$run_drain_wait" -lt 12 ] || break
+            # Once the watchdog has fired, allow its TERM/KILL cleanup to close
+            # inherited pipes before reporting whether a descendant survived.
+            # Normal intentionally detached commands keep the 120 ms bound.
+            [ ! -e "$run_timeout_marker" ] || run_drain_limit=20
+            [ "$run_drain_wait" -lt "$run_drain_limit" ] || break
             sleep 0.01
             run_drain_wait=$((run_drain_wait + 1))
         done

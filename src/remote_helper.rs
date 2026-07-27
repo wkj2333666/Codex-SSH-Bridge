@@ -20,6 +20,8 @@ const HELPER_PROTOCOL: &str = "codex-ssh-helper/1";
 const DEFAULT_HELPER_VERSION: &str = "1";
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const TERM_GRACE: Duration = Duration::from_millis(50);
+const DESCENDANT_DRAIN_GRACE: Duration = Duration::from_millis(120);
+const TIMEOUT_PIPE_CLOSE_GRACE: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy)]
 pub struct HelperConfig {
@@ -533,11 +535,20 @@ where
     // the continuation bit makes that boundary explicit to the caller.
     let process_group_alive = process_group_exists(control.process_group.load(Ordering::Acquire));
     if process_group_alive {
-        let drain_deadline = Instant::now() + Duration::from_millis(120);
+        let mut drain_deadline = Instant::now() + DESCENDANT_DRAIN_GRACE;
+        let mut timeout_cleanup_observed = false;
         while !(stdout_state.pipe_closed.load(Ordering::Acquire)
             && stderr_state.pipe_closed.load(Ordering::Acquire))
             && Instant::now() < drain_deadline
         {
+            if timed_out.load(Ordering::Acquire) && !timeout_cleanup_observed {
+                timeout_cleanup_observed = true;
+                let timeout_cleanup_deadline =
+                    Instant::now() + TERM_GRACE + TIMEOUT_PIPE_CLOSE_GRACE;
+                if timeout_cleanup_deadline > drain_deadline {
+                    drain_deadline = timeout_cleanup_deadline;
+                }
+            }
             thread::sleep(Duration::from_millis(5));
         }
     } else {
