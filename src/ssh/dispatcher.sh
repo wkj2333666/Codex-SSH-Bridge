@@ -71,11 +71,29 @@ send_text() {
     rm -f "$send_path"
 }
 
+write_test_call_record() {
+    write_kind=$1
+    write_path=$2
+    write_log=$3
+    {
+        printf '%s\narg=' "$write_kind"
+        cat "$write_path"
+        printf '\nEND\n'
+    } >>"$write_log" 2>/dev/null || true
+}
+
 record_test_call() {
     if [ -n "${CODEX_SSH_BRIDGE_TEST_CALL_LOG-}" ]; then
         record_kind=$1
         record_path=$2
         record_log=$CODEX_SSH_BRIDGE_TEST_CALL_LOG
+        if has_command flock; then
+            (
+                flock 9
+                write_test_call_record "$record_kind" "$record_path" "$record_log"
+            ) 9>"$record_log.flock"
+            return
+        fi
         record_lock=$record_log.lock
         record_wait=0
         while ! mkdir "$record_lock" 2>/dev/null; do
@@ -83,11 +101,7 @@ record_test_call() {
             record_wait=$((record_wait + 1))
             [ "$record_wait" -lt 10000 ] || return 0
         done
-        {
-            printf '%s\narg=' "$record_kind"
-            cat "$record_path"
-            printf '\nEND\n'
-        } >>"$record_log" 2>/dev/null || true
+        write_test_call_record "$record_kind" "$record_path" "$record_log"
         rmdir "$record_lock" 2>/dev/null || true
     fi
 }
