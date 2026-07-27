@@ -1723,6 +1723,24 @@ async fn wait_for_log_marker(path: &std::path::Path, marker: &str) {
     .expect("fake SSH marker");
 }
 
+async fn wait_for_log_marker_count(path: &std::path::Path, marker: &str, expected: usize) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let count = fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| *line == marker)
+                .count();
+            if count >= expected {
+                return;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("fake SSH marker {marker:?} did not reach count {expected}"));
+}
+
 async fn wait_for_file(path: &std::path::Path) {
     timeout(Duration::from_secs(2), async {
         while fs::metadata(path)
@@ -2610,7 +2628,7 @@ async fn five_commands_are_not_head_of_line_blocked() {
 }
 
 #[tokio::test]
-async fn cancellation_kills_the_child_group_quickly() {
+async fn unconfirmed_cancellation_retires_the_session_before_follow_up() {
     let log_dir = TempDir::new().unwrap();
     let log = log_dir.path().join("calls.log");
     let fixture = task3_runner(
@@ -2648,6 +2666,28 @@ async fn cancellation_kills_the_child_group_quickly() {
     assert!(started.elapsed() < Duration::from_millis(250));
     assert_eq!(error.code, ErrorCode::Cancelled);
     assert_eq!(error.details.remote_process_may_continue, Some(true));
+
+    let follow_cancel = CancellationToken::new();
+    let follow_up = {
+        let runner = Arc::clone(&fixture.runner);
+        let cancel = follow_cancel.clone();
+        tokio::spawn(async move {
+            runner
+                .execute(
+                    request("dev", ShellRequest::Auto, Duration::from_secs(20)),
+                    cancel,
+                )
+                .await
+        })
+    };
+    wait_for_log_marker_count(&log, "S", 2).await;
+    follow_cancel.cancel();
+    let follow_error = timeout(Duration::from_millis(300), follow_up)
+        .await
+        .expect("follow-up cancellation exceeded 300 ms")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(follow_error.code, ErrorCode::Cancelled);
 }
 
 #[tokio::test]
