@@ -4014,7 +4014,10 @@ async fn task6_postspawn_cancel_on_second_mutation_marks_only_current_unknown_an
             )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // This is only a fixture-readiness barrier. The full remote_ops suite runs
+    // many process-heavy tests concurrently, so runner load must not masquerade
+    // as a cancellation latency failure.
+    tokio::time::timeout(Duration::from_secs(10), async {
         while !ready.exists() {
             tokio::task::yield_now().await;
         }
