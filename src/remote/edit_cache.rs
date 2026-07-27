@@ -78,9 +78,40 @@ pub(crate) enum EditErrorKind {
     Permanent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "standalone state-machine tests do not construct transport error codes"
+)]
+pub(crate) enum EditErrorCode {
+    HostKeyUnknown,
+    AuthRequired,
+    ConnectTimeout,
+    RemoteCapabilityMissing,
+    RemoteAbsolutePathRequired,
+    PathOutsideRoot,
+    ReadOnlyHost,
+    WriteConflict,
+    ReadConflict,
+    NotFound,
+    PermissionDenied,
+    NotDirectory,
+    MutationOutcomeUnknown,
+    OutputLimit,
+    RequestTooLarge,
+    ProtocolError,
+    Cancelled,
+    CommandTimeout,
+    RemoteExit,
+    InvalidConfig,
+    InvalidArgument,
+    Io,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EditError {
     pub(crate) kind: EditErrorKind,
+    pub(crate) code: Option<EditErrorCode>,
     pub(crate) message: String,
 }
 
@@ -788,6 +819,7 @@ fn make_capacity(
 fn permanent_error(message: &str) -> EditError {
     EditError {
         kind: EditErrorKind::Permanent,
+        code: None,
         message: message.to_owned(),
     }
 }
@@ -795,6 +827,7 @@ fn permanent_error(message: &str) -> EditError {
 fn transient_error(message: &str) -> EditError {
     EditError {
         kind: EditErrorKind::Transient,
+        code: None,
         message: message.to_owned(),
     }
 }

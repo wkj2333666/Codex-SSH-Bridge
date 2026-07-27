@@ -14,7 +14,7 @@ use crate::ssh::{
 
 use super::edit_cache::{
     CacheKey, CommitBatchOutcome, CommitFuture, CommitItem, CommitSuccess, DesiredState,
-    EditBackend, EditError, EditErrorKind, EditFuture, RemoteBase, RemoteSnapshot,
+    EditBackend, EditError, EditErrorCode, EditErrorKind, EditFuture, RemoteBase, RemoteSnapshot,
 };
 use super::patch::{
     FileSnapshot, PATCH_SNAPSHOT_SCRIPT, SNAPSHOT_CAPTURE_METADATA_BYTES, SNAPSHOT_PROTOCOL_BYTES,
@@ -112,7 +112,7 @@ while [ "$#" -gt 0 ]; do
         cleanup_tmp() { rm -f -- "$tmp" >/dev/null 2>&1 || :; }
         trap 'cleanup_tmp; exit 125' HUP INT TERM
         dd of="$tmp" bs=262144 iflag=count_bytes count="$desired_size" \
-            status=none conv=notrunc || { cleanup_tmp; exit 4; }
+            status=none conv=notrunc oflag=nofollow || { cleanup_tmp; exit 4; }
         staged_size=$(stat --printf='%s' -- "$tmp" 2>/dev/null) || {
             cleanup_tmp
             exit 4
@@ -489,6 +489,7 @@ fn parse_batch_result(
                 successes,
                 error: Some(EditError {
                     kind: EditErrorKind::Conflict,
+                    code: Some(EditErrorCode::WriteConflict),
                     message: format!("WRITE_CONFLICT: {}", items[index].key.path),
                 }),
             });
@@ -577,6 +578,7 @@ fn map_runner_error(error: crate::error::BridgeError) -> EditError {
     };
     EditError {
         kind,
+        code: Some(edit_error_code(error.code)),
         message: error.message,
     }
 }
@@ -584,6 +586,7 @@ fn map_runner_error(error: crate::error::BridgeError) -> EditError {
 fn map_bridge_error(error: crate::error::BridgeError) -> EditError {
     EditError {
         kind: EditErrorKind::Permanent,
+        code: Some(edit_error_code(error.code)),
         message: error.message,
     }
 }
@@ -591,6 +594,7 @@ fn map_bridge_error(error: crate::error::BridgeError) -> EditError {
 fn permanent(message: &str) -> EditError {
     EditError {
         kind: EditErrorKind::Permanent,
+        code: None,
         message: message.to_owned(),
     }
 }
@@ -598,7 +602,35 @@ fn permanent(message: &str) -> EditError {
 fn unknown(message: &str) -> EditError {
     EditError {
         kind: EditErrorKind::OutcomeUnknown,
+        code: Some(EditErrorCode::MutationOutcomeUnknown),
         message: message.to_owned(),
+    }
+}
+
+fn edit_error_code(code: ErrorCode) -> EditErrorCode {
+    match code {
+        ErrorCode::HostKeyUnknown => EditErrorCode::HostKeyUnknown,
+        ErrorCode::AuthRequired => EditErrorCode::AuthRequired,
+        ErrorCode::ConnectTimeout => EditErrorCode::ConnectTimeout,
+        ErrorCode::RemoteCapabilityMissing => EditErrorCode::RemoteCapabilityMissing,
+        ErrorCode::RemoteAbsolutePathRequired => EditErrorCode::RemoteAbsolutePathRequired,
+        ErrorCode::PathOutsideRoot => EditErrorCode::PathOutsideRoot,
+        ErrorCode::ReadOnlyHost => EditErrorCode::ReadOnlyHost,
+        ErrorCode::WriteConflict => EditErrorCode::WriteConflict,
+        ErrorCode::ReadConflict => EditErrorCode::ReadConflict,
+        ErrorCode::NotFound => EditErrorCode::NotFound,
+        ErrorCode::PermissionDenied => EditErrorCode::PermissionDenied,
+        ErrorCode::NotDirectory => EditErrorCode::NotDirectory,
+        ErrorCode::MutationOutcomeUnknown => EditErrorCode::MutationOutcomeUnknown,
+        ErrorCode::OutputLimit => EditErrorCode::OutputLimit,
+        ErrorCode::RequestTooLarge => EditErrorCode::RequestTooLarge,
+        ErrorCode::ProtocolError => EditErrorCode::ProtocolError,
+        ErrorCode::Cancelled => EditErrorCode::Cancelled,
+        ErrorCode::CommandTimeout => EditErrorCode::CommandTimeout,
+        ErrorCode::RemoteExit => EditErrorCode::RemoteExit,
+        ErrorCode::InvalidConfig => EditErrorCode::InvalidConfig,
+        ErrorCode::InvalidArgument => EditErrorCode::InvalidArgument,
+        ErrorCode::Io => EditErrorCode::Io,
     }
 }
 
@@ -707,5 +739,23 @@ mod tests {
                 .all(|partition| batch_transport_bytes(partition).unwrap() < two)
         );
         assert!(one < two);
+    }
+
+    #[test]
+    fn synchronization_errors_preserve_factual_codes_and_retryability() {
+        let permission =
+            crate::remote::edit_bridge_error(map_runner_error(crate::error::BridgeError::new(
+                ErrorCode::PermissionDenied,
+                "remote permission denied",
+                false,
+            )));
+        assert_eq!(permission.code, ErrorCode::PermissionDenied);
+        assert!(!permission.retryable);
+
+        let timeout = crate::remote::edit_bridge_error(map_runner_error(
+            crate::error::BridgeError::new(ErrorCode::ConnectTimeout, "connect timeout", true),
+        ));
+        assert_eq!(timeout.code, ErrorCode::ConnectTimeout);
+        assert!(timeout.retryable);
     }
 }

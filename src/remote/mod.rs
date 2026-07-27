@@ -139,6 +139,15 @@ fn attach_optional_remote_context(
 }
 
 fn edit_bridge_error(error: edit_cache::EditError) -> BridgeError {
+    if let Some(code) = error.code
+        && error.kind != edit_cache::EditErrorKind::OutcomeUnknown
+    {
+        return BridgeError::new(
+            edit_error_code(code),
+            error.message,
+            error.kind == edit_cache::EditErrorKind::Transient,
+        );
+    }
     match error.kind {
         edit_cache::EditErrorKind::Conflict => {
             BridgeError::new(ErrorCode::WriteConflict, error.message, false)
@@ -154,6 +163,35 @@ fn edit_bridge_error(error: edit_cache::EditError) -> BridgeError {
         edit_cache::EditErrorKind::Transient => {
             BridgeError::new(ErrorCode::Io, error.message, true)
         }
+    }
+}
+
+fn edit_error_code(code: edit_cache::EditErrorCode) -> ErrorCode {
+    match code {
+        edit_cache::EditErrorCode::HostKeyUnknown => ErrorCode::HostKeyUnknown,
+        edit_cache::EditErrorCode::AuthRequired => ErrorCode::AuthRequired,
+        edit_cache::EditErrorCode::ConnectTimeout => ErrorCode::ConnectTimeout,
+        edit_cache::EditErrorCode::RemoteCapabilityMissing => ErrorCode::RemoteCapabilityMissing,
+        edit_cache::EditErrorCode::RemoteAbsolutePathRequired => {
+            ErrorCode::RemoteAbsolutePathRequired
+        }
+        edit_cache::EditErrorCode::PathOutsideRoot => ErrorCode::PathOutsideRoot,
+        edit_cache::EditErrorCode::ReadOnlyHost => ErrorCode::ReadOnlyHost,
+        edit_cache::EditErrorCode::WriteConflict => ErrorCode::WriteConflict,
+        edit_cache::EditErrorCode::ReadConflict => ErrorCode::ReadConflict,
+        edit_cache::EditErrorCode::NotFound => ErrorCode::NotFound,
+        edit_cache::EditErrorCode::PermissionDenied => ErrorCode::PermissionDenied,
+        edit_cache::EditErrorCode::NotDirectory => ErrorCode::NotDirectory,
+        edit_cache::EditErrorCode::MutationOutcomeUnknown => ErrorCode::MutationOutcomeUnknown,
+        edit_cache::EditErrorCode::OutputLimit => ErrorCode::OutputLimit,
+        edit_cache::EditErrorCode::RequestTooLarge => ErrorCode::RequestTooLarge,
+        edit_cache::EditErrorCode::ProtocolError => ErrorCode::ProtocolError,
+        edit_cache::EditErrorCode::Cancelled => ErrorCode::Cancelled,
+        edit_cache::EditErrorCode::CommandTimeout => ErrorCode::CommandTimeout,
+        edit_cache::EditErrorCode::RemoteExit => ErrorCode::RemoteExit,
+        edit_cache::EditErrorCode::InvalidConfig => ErrorCode::InvalidConfig,
+        edit_cache::EditErrorCode::InvalidArgument => ErrorCode::InvalidArgument,
+        edit_cache::EditErrorCode::Io => ErrorCode::Io,
     }
 }
 

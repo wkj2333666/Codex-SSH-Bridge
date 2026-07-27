@@ -87,6 +87,7 @@ impl EditBackend for FakeBackend {
                 .cloned()
                 .ok_or_else(|| EditError {
                     kind: EditErrorKind::Transient,
+                    code: None,
                     message: "missing fake snapshot".to_owned(),
                 })
         })
@@ -103,6 +104,7 @@ impl EditBackend for FakeBackend {
                         successes: Vec::new(),
                         error: Some(EditError {
                             kind: EditErrorKind::Transient,
+                            code: None,
                             message: "fake commit blocked".to_owned(),
                         }),
                     };
@@ -252,6 +254,7 @@ async fn transient_retries_are_capped_and_a_barrier_bypasses_the_sleep_once() {
     for _ in 0..6 {
         backend.queue_outcome(Err(EditError {
             kind: EditErrorKind::Transient,
+            code: None,
             message: "offline".to_owned(),
         }));
     }
@@ -279,6 +282,7 @@ async fn conflicts_are_sticky_and_retain_the_latest_local_bytes() {
     let backend = FakeBackend::new([(path.clone(), regular(b"base"))]);
     backend.queue_outcome(Err(EditError {
         kind: EditErrorKind::Conflict,
+        code: None,
         message: "WRITE_CONFLICT".to_owned(),
     }));
     let cache = EditCache::new(config(), backend.clone());
@@ -315,6 +319,7 @@ async fn a_partial_batch_applies_confirmed_successes_and_only_poison_unconfirmed
         1,
         EditError {
             kind: EditErrorKind::Conflict,
+            code: None,
             message: "WRITE_CONFLICT".to_owned(),
         },
     );

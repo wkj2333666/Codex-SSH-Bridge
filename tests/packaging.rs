@@ -381,7 +381,11 @@ fn skill_closes_search_stdin_and_patch_schema_ambiguities() {
 
 #[test]
 fn skill_states_buffered_edit_durability_without_burdening_the_agent() {
-    let skill = read_text("skills/remote-ssh-ops/SKILL.md").to_ascii_lowercase();
+    let skill = read_text("skills/remote-ssh-ops/SKILL.md")
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     for required in [
         "bounded in-memory edit cache",
         "within 30 seconds",
