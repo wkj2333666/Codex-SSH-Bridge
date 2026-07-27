@@ -89,7 +89,7 @@ impl EditBackend for FakeBackend {
             self.commit_started.notify_waiters();
             let gate = self.blocked_hosts.lock().unwrap().remove(host);
             if let Some(gate) = gate {
-                gate.acquire().await.map_err(|_| EditError {
+                let _permit = gate.acquire().await.map_err(|_| EditError {
                     kind: EditErrorKind::Transient,
                     message: "fake commit blocked".to_owned(),
                 })?;
@@ -311,20 +311,21 @@ async fn a_new_generation_rebases_while_the_previous_flush_is_in_flight() {
     first_flush.await.unwrap().unwrap();
     barrier.await.unwrap().unwrap();
 
-    let commits = backend.commits.lock().unwrap();
-    assert_eq!(commits.len(), 2);
-    assert_eq!(
-        commits[1][0].desired,
-        DesiredState::Present(Arc::from(&b"second"[..]))
-    );
-    assert_eq!(
-        commits[1][0].base,
-        RemoteBase::Regular {
-            sha256: "committed-5".to_owned(),
-            mode: 0o640,
-        }
-    );
-    drop(commits);
+    {
+        let commits = backend.commits.lock().unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(
+            commits[1][0].desired,
+            DesiredState::Present(Arc::from(&b"second"[..]))
+        );
+        assert_eq!(
+            commits[1][0].base,
+            RemoteBase::Regular {
+                sha256: "committed-5".to_owned(),
+                mode: 0o640,
+            }
+        );
+    }
     assert_eq!(
         cache.lookup_complete(&path).await,
         Some(DesiredState::Present(Arc::from(&b"second"[..])))
