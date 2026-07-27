@@ -197,14 +197,15 @@ fn ci_and_release_workflows_use_split_caches() {
     const CACHE_ACTION: &str = "actions/cache@caa296126883cff596d87d8935842f9db880ef25";
 
     let ci = read_text(".github/workflows/ci.yml");
-    assert_eq!(ci.matches(CACHE_ACTION).count(), 8);
+    assert_eq!(ci.matches(CACHE_ACTION).count(), 7);
     assert_eq!(ci.matches("Restore pinned Rust toolchain cache").count(), 2);
     assert_eq!(
         ci.matches("Restore shared Cargo dependency cache").count(),
         2
     );
     assert_eq!(ci.matches("Restore diagnostics target cache").count(), 1);
-    assert_eq!(ci.matches("Restore quality target cache").count(), 1);
+    assert_eq!(ci.matches("Restore quality target cache").count(), 0);
+    assert!(!ci.contains("rust-target-quality"));
     assert_eq!(ci.matches("Restore ripgrep tool cache").count(), 2);
     assert!(ci.contains("~/.rustup/toolchains/${{ env.RUST_TOOLCHAIN }}-*"));
     assert!(ci.contains("~/.cargo/registry"));
