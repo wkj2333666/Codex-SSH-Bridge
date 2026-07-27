@@ -199,6 +199,11 @@ fn fixture(root: &std::path::Path, rg: bool) -> (tempfile::TempDir, Arc<SshRunne
     fixture_with_options(root, rg, None, &[])
 }
 
+fn use_immediate_mutations(config: &mut codex_ssh_bridge::config::Config) {
+    config.limits.edit_cache_max_bytes = 0;
+    config.limits.edit_flush_threshold_bytes = 0;
+}
+
 fn executable_on_path(name: &str) -> PathBuf {
     let path = std::env::var_os("PATH").expect("test PATH must be set");
     std::env::split_paths(&path)
@@ -217,6 +222,7 @@ fn fixture_with_options(
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = support::config_with_host("dev", root.to_str().unwrap());
+    use_immediate_mutations(&mut config);
     if let Some(max_frame) = max_frame {
         config.limits.max_frame_bytes = max_frame;
     }
@@ -314,6 +320,7 @@ fn fixture_with_patch_policy(
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = support::config_with_host("dev", root.to_str().unwrap());
+    use_immediate_mutations(&mut config);
     if let Some(max_write_bytes) = max_write_bytes {
         config.limits.max_write_bytes = max_write_bytes;
     }
@@ -2885,6 +2892,7 @@ async fn task6_five_concurrent_large_snapshots_bound_rss_and_spools() {
     let runtime_directory = runtime.directory().to_owned();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = support::config_with_host("host-0", remote.path().to_str().unwrap());
+    use_immediate_mutations(&mut config);
     let profile = config.hosts.get("host-0").unwrap().clone();
     for index in 1..HOSTS {
         config
@@ -7098,6 +7106,7 @@ async fn task5_five_hosts_write_four_mib_with_bounded_rss_and_complete_cleanup()
     let runtime_directory = runtime.directory().to_owned();
     let store = Arc::new(OutputStore::new(&runtime).unwrap());
     let mut config = support::config_with_host("h0", roots[0].to_str().unwrap());
+    use_immediate_mutations(&mut config);
     let profile: HostProfile = config.hosts["h0"].clone();
     for (index, root) in roots.iter().enumerate().skip(1) {
         let mut host = profile.clone();

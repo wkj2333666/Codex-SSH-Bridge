@@ -13,7 +13,8 @@ use crate::ssh::{
 };
 
 use super::edit_cache::{
-    BatchMutationDisposition, CacheKey, DesiredState, PreparedEdit, RemoteBase,
+    BatchMutationDisposition, CacheKey, DesiredState, LoadEntryDisposition, PreparedEdit,
+    RemoteBase,
 };
 use super::protocol::{context, encode_bytes, read_small_stream};
 use super::{
@@ -993,11 +994,25 @@ pub(super) async fn write(
         host: resolved.host.clone(),
         path: resolved.path.as_str().to_owned(),
     };
-    let current = bridge
+    let current = match bridge
         .edit_cache
         .load_entry_complete(key.clone())
         .await
-        .map_err(edit_bridge_error)?;
+        .map_err(edit_bridge_error)?
+    {
+        LoadEntryDisposition::Cached(current) => current,
+        LoadEntryDisposition::ImmediateWriteRequired => {
+            bridge
+                .edit_cache
+                .flush_host(&resolved.host)
+                .await
+                .map_err(edit_bridge_error)?;
+            let host = resolved.host.clone();
+            let result = execute_preflighted_write(bridge, resolved, cancel).await?;
+            bridge.edit_cache.invalidate_clean_host(&host).await;
+            return Ok(result);
+        }
+    };
     match (&resolved.operation, &current.desired) {
         (WriteOperation::Create, DesiredState::Deleted)
         | (WriteOperation::Replace, DesiredState::Present(_)) => {}

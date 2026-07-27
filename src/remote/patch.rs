@@ -8,7 +8,9 @@ use crate::error::{BridgeError, BridgeResult, ErrorCode};
 use crate::output::{InternalSpoolOwner, StreamKind};
 use crate::ssh::{FixedOperationKind, FixedRunRequest, RootedPathInputs};
 
-use super::edit_cache::{BatchMutationDisposition, CacheKey, DesiredState, PreparedEdit};
+use super::edit_cache::{
+    BatchMutationDisposition, CacheKey, DesiredState, LoadEntryDisposition, PreparedEdit,
+};
 use super::protocol::{context, nul_fields, parse_u64, read_small_stream, utf8};
 use super::{
     ApplyPatchRequest, ApplyPatchResult, RemoteBridge, RemoteContext, WriteEncoding, WriteMode,
@@ -1358,14 +1360,26 @@ pub(super) async fn apply_patch(
             host: host.clone(),
             path: file.patch.path.clone(),
         };
-        let current = bridge
+        let current = match bridge
             .edit_cache
             .load_entry_complete(key.clone())
             .await
             .map_err(edit_bridge_error)
             .map_err(|error| {
                 attach_preparation_progress(error, Some(&file.patch.path), &all_paths)
-            })?;
+            })? {
+            LoadEntryDisposition::Cached(current) => current,
+            LoadEntryDisposition::ImmediateWriteRequired => {
+                bridge
+                    .edit_cache
+                    .flush_host(&host)
+                    .await
+                    .map_err(edit_bridge_error)?;
+                let result = apply_patch_immediate(bridge, immediate_request, cancel).await?;
+                bridge.edit_cache.invalidate_clean_host(&host).await;
+                return Ok(result);
+            }
+        };
         let current_hash = match &current.desired {
             DesiredState::Present(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
             DesiredState::Deleted => None,

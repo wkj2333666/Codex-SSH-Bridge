@@ -13,7 +13,8 @@ use std::time::Duration;
 use edit_cache::{
     BatchMutationDisposition, CacheKey, CommitBatchOutcome, CommitFuture, CommitItem,
     CommitSuccess, DesiredState, EditBackend, EditCache, EditCacheConfig, EditError, EditErrorKind,
-    EditFuture, Generation, MutationDisposition, PreparedEdit, RemoteBase, RemoteSnapshot,
+    EditFuture, Generation, LoadEntryDisposition, MutationDisposition, PreparedEdit, RemoteBase,
+    RemoteSnapshot,
 };
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::advance;
@@ -26,6 +27,15 @@ struct FakeBackend {
     partial_failures: Mutex<VecDeque<(usize, EditError)>>,
     blocked_hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
     commit_started: Notify,
+}
+
+fn cached_entry(disposition: LoadEntryDisposition) -> edit_cache::CachedEntry {
+    match disposition {
+        LoadEntryDisposition::Cached(entry) => entry,
+        LoadEntryDisposition::ImmediateWriteRequired => {
+            panic!("test fixture unexpectedly exceeded its cache capacity")
+        }
+    }
 }
 
 impl FakeBackend {
@@ -368,8 +378,8 @@ async fn prepared_multi_file_edits_commit_locally_all_or_none() {
         (second.clone(), regular(b"second-base")),
     ]);
     let cache = EditCache::new(config(), backend);
-    let first_view = cache.load_entry_complete(first.clone()).await.unwrap();
-    let stale_second = cache.load_entry_complete(second.clone()).await.unwrap();
+    let first_view = cached_entry(cache.load_entry_complete(first.clone()).await.unwrap());
+    let stale_second = cached_entry(cache.load_entry_complete(second.clone()).await.unwrap());
     cache
         .mutate(
             second.clone(),
@@ -407,8 +417,8 @@ async fn prepared_multi_file_edits_commit_locally_all_or_none() {
         Some(DesiredState::Present(Arc::from(&b"concurrent"[..])))
     );
 
-    let first_view = cache.load_entry_complete(first.clone()).await.unwrap();
-    let second_view = cache.load_entry_complete(second.clone()).await.unwrap();
+    let first_view = cached_entry(cache.load_entry_complete(first.clone()).await.unwrap());
+    let second_view = cached_entry(cache.load_entry_complete(second.clone()).await.unwrap());
     let disposition = cache
         .mutate_prepared_batch(vec![
             PreparedEdit {

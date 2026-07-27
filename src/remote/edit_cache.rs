@@ -42,6 +42,12 @@ pub(crate) struct CachedEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoadEntryDisposition {
+    Cached(CachedEntry),
+    ImmediateWriteRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedEdit {
     pub(crate) key: CacheKey,
     pub(crate) expected_generation: Generation,
@@ -212,7 +218,7 @@ impl EditCache {
         let snapshot = self.backend.fetch_complete(&key).await?;
         let desired = snapshot.desired.clone();
         let size = desired_size(&desired);
-        if size > self.config.max_bytes {
+        if self.config.max_bytes == 0 || size > self.config.max_bytes {
             return Ok(desired);
         }
         let mut state = self.state.lock().await;
@@ -254,14 +260,18 @@ impl EditCache {
     pub(crate) async fn load_entry_complete(
         &self,
         key: CacheKey,
-    ) -> Result<CachedEntry, EditError> {
+    ) -> Result<LoadEntryDisposition, EditError> {
+        if self.config.max_bytes == 0 {
+            return Ok(LoadEntryDisposition::ImmediateWriteRequired);
+        }
         if let Some(entry) = self.lookup_entry(&key).await? {
-            return Ok(entry);
+            return Ok(LoadEntryDisposition::Cached(entry));
         }
         self.load_complete(key.clone()).await?;
-        self.lookup_entry(&key)
-            .await?
-            .ok_or_else(|| permanent_error("complete entry does not fit the edit cache"))
+        Ok(match self.lookup_entry(&key).await? {
+            Some(entry) => LoadEntryDisposition::Cached(entry),
+            None => LoadEntryDisposition::ImmediateWriteRequired,
+        })
     }
 
     async fn lookup_entry(&self, key: &CacheKey) -> Result<Option<CachedEntry>, EditError> {

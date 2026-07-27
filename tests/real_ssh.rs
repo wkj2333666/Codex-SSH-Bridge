@@ -801,7 +801,11 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             .expect("cancelled SSH operation did not return")
             .expect_err("cancelled SSH operation unexpectedly succeeded");
         assert_eq!(cancel_error.code, ErrorCode::Cancelled);
-        assert_eq!(cancel_error.details.remote_process_may_continue, Some(true));
+        assert_eq!(
+            cancel_error.details.remote_process_may_continue,
+            Some(false)
+        );
+        assert!(!same_process_exists(cancelled_remote_pid));
         assert!(cancel_started.elapsed() < Duration::from_millis(500));
     }
 
