@@ -159,14 +159,14 @@ fn edit_bridge_error(error: edit_cache::EditError) -> BridgeError {
 
 impl RemoteBridge {
     pub fn new(runner: Arc<SshRunner>) -> Self {
-        let limits = runner.config().limits();
+        let edit_limits = &runner.config().limits;
         let edit_backend =
-            edit_sync::SshEditBackend::new(Arc::clone(&runner), limits.edit_cache_max_bytes);
+            edit_sync::SshEditBackend::new(Arc::clone(&runner), edit_limits.edit_cache_max_bytes);
         let edit_cache = edit_cache::EditCache::new(
             edit_cache::EditCacheConfig {
-                flush_delay: std::time::Duration::from_millis(limits.edit_flush_delay_ms),
-                flush_threshold_bytes: limits.edit_flush_threshold_bytes,
-                max_bytes: limits.edit_cache_max_bytes,
+                flush_delay: std::time::Duration::from_millis(edit_limits.edit_flush_delay_ms),
+                flush_threshold_bytes: edit_limits.edit_flush_threshold_bytes,
+                max_bytes: edit_limits.edit_cache_max_bytes,
             },
             edit_backend.clone(),
         );
@@ -194,6 +194,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<ListResult> {
         let resolved = resolve_list(self.runner.config(), request)?;
+        let _barrier = self.edit_barrier(&resolved.host).await?;
         metadata::list(self, resolved, cancel).await
     }
 
@@ -203,6 +204,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<StatResult> {
         let resolved = resolve_stat(self.runner.config(), request)?;
+        let _barrier = self.edit_barrier(&resolved.host).await?;
         metadata::stat(self, resolved, cancel).await
     }
 
@@ -221,6 +223,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<SearchResult> {
         let resolved = resolve_search(self.runner.config(), request)?;
+        let _barrier = self.edit_barrier(&resolved.host).await?;
         search::search(self, resolved, cancel).await
     }
 
@@ -229,7 +232,14 @@ impl RemoteBridge {
         request: RemoteRunRequest,
         cancel: CancellationToken,
     ) -> BridgeResult<RemoteRunResult> {
-        run::run(self, request, cancel).await
+        self.runner
+            .config()
+            .require_discovered_alias(&request.host)?;
+        let host = request.host.clone();
+        let _barrier = self.edit_barrier(&host).await?;
+        let result = run::run(self, request, cancel).await?;
+        self.edit_cache.invalidate_clean_host(&host).await;
+        Ok(result)
     }
 
     pub async fn write(
@@ -400,6 +410,18 @@ impl RemoteBridge {
                 source_count,
             },
         })
+    }
+
+    async fn edit_barrier(&self, host: &str) -> BridgeResult<tokio::sync::OwnedMutexGuard<()>> {
+        let guard = self.edit_cache.begin_barrier(host).await;
+        if let Err(error) = self.edit_cache.flush_host(host).await {
+            let error = edit_bridge_error(error);
+            return Err(match self.edit_backend.context_for(host).await {
+                Some(context) => attach_remote_context(error, &context),
+                None => error,
+            });
+        }
+        Ok(guard)
     }
 
     async fn execute_readonly_fixed(

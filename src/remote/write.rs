@@ -1026,19 +1026,20 @@ pub(super) async fn write(
             ));
         }
     }
-    let desired = DesiredState::Present(Arc::from(std::mem::take(&mut resolved.content)));
+    let desired_bytes: Arc<[u8]> = Arc::from(std::mem::take(&mut resolved.content));
+    let desired = DesiredState::Present(Arc::clone(&desired_bytes));
     let disposition = bridge
         .edit_cache
         .mutate_prepared_batch(vec![PreparedEdit {
             key,
             expected_generation: current.generation,
             desired: desired.clone(),
-            payload_bytes: desired.len(),
+            payload_bytes: desired_bytes.len(),
         }])
         .await
         .map_err(edit_bridge_error)?;
     if disposition == BatchMutationDisposition::ImmediateWriteRequired {
-        resolved.content = desired.as_ref().to_vec();
+        resolved.content = desired_bytes.as_ref().to_vec();
         bridge
             .edit_cache
             .flush_host(&resolved.host)

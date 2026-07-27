@@ -516,6 +516,31 @@ async fn a_blocked_host_does_not_block_another_hosts_threshold_flush() {
 }
 
 #[tokio::test]
+async fn a_same_host_barrier_excludes_new_local_generations_until_released() {
+    let path = key("alpha", "/repo/a.rs");
+    let backend = FakeBackend::new([(path.clone(), regular(b"base"))]);
+    let cache = EditCache::new(config(), backend);
+    cache.load_complete(path.clone()).await.unwrap();
+    let barrier = cache.begin_barrier("alpha").await;
+    let mutation = {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move {
+            cache
+                .mutate(
+                    path,
+                    DesiredState::Present(Arc::from(&b"after-barrier"[..])),
+                    1,
+                )
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(!mutation.is_finished());
+    drop(barrier);
+    assert!(mutation.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn clean_lru_is_evicted_dirty_content_is_retained_and_oversize_falls_back() {
     let first = key("alpha", "/repo/first");
     let second = key("alpha", "/repo/second");
