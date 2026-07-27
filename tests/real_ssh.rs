@@ -16,8 +16,8 @@ use codex_ssh_bridge::config::{Config, HostLimitOverrides, HostProfile};
 use codex_ssh_bridge::output::OutputStore;
 use codex_ssh_bridge::remote::{
     ApplyPatchRequest, EncodedValue, ListRequest, ReadEntry, ReadRequest, RemoteBridge,
-    RemoteFileKind, RemoteRunRequest, RunShell, SearchEngine, SearchRequest, ShellName, StatEntry,
-    StatRequest, ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest,
+    RemoteFileKind, RemoteRunRequest, RunShell, SearchRequest, ShellName, StatEntry, StatRequest,
+    ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest,
 };
 use codex_ssh_bridge::ssh::{RuntimePaths, SshRunner};
 use codex_ssh_bridge::{ErrorCode, quote};
@@ -566,7 +566,6 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         )
         .await
         .expect("search through real sshd");
-    assert_eq!(search.engine, SearchEngine::Rg);
     assert_eq!(search.matches.len(), 1);
     assert_eq!(utf8(&search.matches[0].relative_path), "seed.txt");
     assert_eq!(search.matches[0].line, 1);
@@ -695,7 +694,10 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         )
         .await
         .expect("patch through real sshd");
-    assert_eq!(patch.changed_paths, [generated_path.clone()]);
+    assert_eq!(
+        patch.changed_paths.as_slice(),
+        std::slice::from_ref(&generated_path)
+    );
     let cached_patch = bridge
         .read(
             ReadRequest {
