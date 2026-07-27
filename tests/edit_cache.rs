@@ -19,8 +19,8 @@ struct FakeBackend {
     fetches: AtomicUsize,
     commits: Mutex<Vec<Vec<CommitItem>>>,
     outcomes: Mutex<VecDeque<Result<(), EditError>>>,
+    blocked_hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
     commit_started: Notify,
-    commit_permits: Semaphore,
 }
 
 impl FakeBackend {
@@ -30,9 +30,18 @@ impl FakeBackend {
             fetches: AtomicUsize::new(0),
             commits: Mutex::new(Vec::new()),
             outcomes: Mutex::new(VecDeque::new()),
+            blocked_hosts: Mutex::new(HashMap::new()),
             commit_started: Notify::new(),
-            commit_permits: Semaphore::new(usize::MAX >> 4),
         })
+    }
+
+    fn block_host(&self, host: &str) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        self.blocked_hosts
+            .lock()
+            .unwrap()
+            .insert(host.to_owned(), Arc::clone(&gate));
+        gate
     }
 
     fn queue_outcome(&self, outcome: Result<(), EditError>) {
@@ -41,6 +50,16 @@ impl FakeBackend {
 
     fn commit_count(&self) -> usize {
         self.commits.lock().unwrap().len()
+    }
+
+    async fn wait_for_commits(&self, expected: usize) {
+        loop {
+            let notified = self.commit_started.notified();
+            if self.commit_count() >= expected {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -62,17 +81,19 @@ impl EditBackend for FakeBackend {
 
     fn commit_batch<'a>(
         &'a self,
-        _host: &'a str,
+        host: &'a str,
         items: Vec<CommitItem>,
     ) -> EditFuture<'a, Vec<CommitSuccess>> {
         Box::pin(async move {
             self.commits.lock().unwrap().push(items.clone());
             self.commit_started.notify_waiters();
-            let permit = self.commit_permits.acquire().await.map_err(|_| EditError {
-                kind: EditErrorKind::Transient,
-                message: "fake commit blocked".to_owned(),
-            })?;
-            permit.forget();
+            let gate = self.blocked_hosts.lock().unwrap().remove(host);
+            if let Some(gate) = gate {
+                gate.acquire().await.map_err(|_| EditError {
+                    kind: EditErrorKind::Transient,
+                    message: "fake commit blocked".to_owned(),
+                })?;
+            }
             if let Some(outcome) = self.outcomes.lock().unwrap().pop_front() {
                 outcome?;
             }
@@ -255,6 +276,97 @@ async fn conflicts_are_sticky_and_retain_the_latest_local_bytes() {
 }
 
 #[tokio::test]
+async fn a_new_generation_rebases_while_the_previous_flush_is_in_flight() {
+    let path = key("alpha", "/repo/a.rs");
+    let backend = FakeBackend::new([(path.clone(), regular(b"base"))]);
+    let release = backend.block_host("alpha");
+    let cache = EditCache::new(config(), backend.clone());
+    cache.load_complete(path.clone()).await.unwrap();
+    cache
+        .mutate(
+            path.clone(),
+            DesiredState::Present(Arc::from(&b"first"[..])),
+            1,
+        )
+        .await
+        .unwrap();
+    let first_flush = {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move { cache.flush_host("alpha").await })
+    };
+    backend.wait_for_commits(1).await;
+    cache
+        .mutate(
+            path.clone(),
+            DesiredState::Present(Arc::from(&b"second"[..])),
+            1,
+        )
+        .await
+        .unwrap();
+    let barrier = {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move { cache.flush_host("alpha").await })
+    };
+    release.add_permits(1);
+    first_flush.await.unwrap().unwrap();
+    barrier.await.unwrap().unwrap();
+
+    let commits = backend.commits.lock().unwrap();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(
+        commits[1][0].desired,
+        DesiredState::Present(Arc::from(&b"second"[..]))
+    );
+    assert_eq!(
+        commits[1][0].base,
+        RemoteBase::Regular {
+            sha256: "committed-5".to_owned(),
+            mode: 0o640,
+        }
+    );
+    drop(commits);
+    assert_eq!(
+        cache.lookup_complete(&path).await,
+        Some(DesiredState::Present(Arc::from(&b"second"[..])))
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_host_does_not_block_another_hosts_threshold_flush() {
+    let alpha = key("alpha", "/repo/a.rs");
+    let beta = key("beta", "/repo/b.rs");
+    let backend = FakeBackend::new([
+        (alpha.clone(), regular(b"a")),
+        (beta.clone(), regular(b"b")),
+    ]);
+    let release = backend.block_host("alpha");
+    let cache = EditCache::new(config(), backend.clone());
+    cache.load_complete(alpha.clone()).await.unwrap();
+    cache.load_complete(beta.clone()).await.unwrap();
+    cache
+        .mutate(
+            alpha,
+            DesiredState::Present(Arc::from(&b"blocked"[..])),
+            16 * 1024,
+        )
+        .await
+        .unwrap();
+    backend.wait_for_commits(1).await;
+    cache
+        .mutate(
+            beta,
+            DesiredState::Present(Arc::from(&b"independent"[..])),
+            16 * 1024,
+        )
+        .await
+        .unwrap();
+    backend.wait_for_commits(2).await;
+    assert_eq!(backend.commits.lock().unwrap()[1][0].key.host, "beta");
+    release.add_permits(1);
+    cache.flush_host("alpha").await.unwrap();
+}
+
+#[tokio::test]
 async fn clean_lru_is_evicted_dirty_content_is_retained_and_oversize_falls_back() {
     let first = key("alpha", "/repo/first");
     let second = key("alpha", "/repo/second");
@@ -302,6 +414,7 @@ async fn clean_lru_is_evicted_dirty_content_is_retained_and_oversize_falls_back(
 fn public_generation_order_is_monotonic() {
     assert!(Generation(2) > Generation(1));
     assert_eq!(RemoteBase::Missing, RemoteBase::Missing);
+    assert_eq!(DesiredState::Deleted, DesiredState::Deleted);
 }
 
 #[tokio::test]
