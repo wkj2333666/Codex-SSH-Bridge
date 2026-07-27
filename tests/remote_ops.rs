@@ -200,8 +200,8 @@ fn fixture(root: &std::path::Path, rg: bool) -> (tempfile::TempDir, Arc<SshRunne
 }
 
 fn use_immediate_mutations(config: &mut codex_ssh_bridge::config::Config) {
-    config.limits.edit_cache_max_bytes = 0;
-    config.limits.edit_flush_threshold_bytes = 0;
+    config.limits.edit_cache_max_bytes = 1;
+    config.limits.edit_flush_threshold_bytes = 1;
 }
 
 fn executable_on_path(name: &str) -> PathBuf {

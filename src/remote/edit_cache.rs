@@ -261,9 +261,6 @@ impl EditCache {
         &self,
         key: CacheKey,
     ) -> Result<LoadEntryDisposition, EditError> {
-        if self.config.max_bytes == 0 {
-            return Ok(LoadEntryDisposition::ImmediateWriteRequired);
-        }
         if let Some(entry) = self.lookup_entry(&key).await? {
             return Ok(LoadEntryDisposition::Cached(entry));
         }
