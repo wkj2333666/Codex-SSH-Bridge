@@ -322,6 +322,82 @@ fn config_defaults_match_compiled_limits() {
 }
 
 #[test]
+fn edit_cache_config_defaults_are_frozen() {
+    let limits = Limits::default();
+    assert_eq!(limits.edit_flush_delay_ms, 30_000);
+    assert_eq!(limits.edit_flush_threshold_bytes, 16 * 1024);
+    assert_eq!(limits.edit_cache_max_bytes, 16 * 1024 * 1024);
+}
+
+#[test]
+fn version_two_config_defaults_and_round_trips_edit_cache_limits() {
+    let defaults: Config = toml::from_str("version = 2\n").unwrap();
+    assert_eq!(defaults.limits.edit_flush_delay_ms, 30_000);
+    assert_eq!(defaults.limits.edit_flush_threshold_bytes, 16 * 1024);
+    assert_eq!(defaults.limits.edit_cache_max_bytes, 16 * 1024 * 1024);
+
+    let configured: Config = toml::from_str(
+        r#"
+version = 2
+[limits]
+edit_flush_delay_ms = 12345
+edit_flush_threshold_bytes = 8192
+edit_cache_max_bytes = 2097152
+"#,
+    )
+    .unwrap();
+    assert_eq!(configured.limits.edit_flush_delay_ms, 12_345);
+    assert_eq!(configured.limits.edit_flush_threshold_bytes, 8 * 1024);
+    assert_eq!(configured.limits.edit_cache_max_bytes, 2 * 1024 * 1024);
+
+    let rendered = toml::to_string(&configured).unwrap();
+    let reparsed: Config = toml::from_str(&rendered).unwrap();
+    assert_eq!(reparsed, configured);
+}
+
+#[test]
+fn edit_cache_config_accepts_exact_upper_bounds() {
+    let file = write_config(
+        "version = 2\n[limits]\nedit_flush_delay_ms = 300000\nedit_flush_threshold_bytes = 4194304\nedit_cache_max_bytes = 67108864\n",
+    );
+    assert!(Config::load(file.path()).is_ok());
+}
+
+#[test]
+fn edit_cache_config_rejects_zero_over_ceiling_and_threshold_over_cache() {
+    let cases = [
+        "edit_flush_delay_ms = 0".to_owned(),
+        "edit_flush_delay_ms = 300001".to_owned(),
+        "edit_flush_threshold_bytes = 0".to_owned(),
+        "edit_flush_threshold_bytes = 4194305".to_owned(),
+        "edit_cache_max_bytes = 0".to_owned(),
+        "edit_cache_max_bytes = 67108865".to_owned(),
+        "edit_flush_threshold_bytes = 4194304\nedit_cache_max_bytes = 2097152".to_owned(),
+    ];
+
+    for limits in cases {
+        let file = write_config(&format!("version = 2\n[limits]\n{limits}\n"));
+        let error = Config::load(file.path()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{limits}");
+    }
+}
+
+#[test]
+fn edit_cache_limits_are_not_host_overrides() {
+    for limit in [
+        "edit_flush_delay_ms = 1000",
+        "edit_flush_threshold_bytes = 1024",
+        "edit_cache_max_bytes = 1048576",
+    ] {
+        let file = write_config(&format!(
+            "version = 2\n[hosts.dev]\nroot = \"/srv/dev\"\n[hosts.dev.limits]\n{limit}\n"
+        ));
+        let error = Config::load(file.path()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{limit}");
+    }
+}
+
+#[test]
 fn task8_spool_limit_config_defaults_and_exact_bounds_are_frozen() {
     let limits = Limits::default();
     assert_eq!(
