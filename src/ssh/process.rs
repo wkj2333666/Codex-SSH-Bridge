@@ -300,7 +300,7 @@ impl SshRunner {
                 preview_bytes: limits.preview_bytes,
                 max_output_bytes: limits.max_output_bytes,
             },
-            capture_cancel,
+            capture_cancel.clone(),
         );
         let capture_started = Instant::now();
         let captured = self
@@ -325,12 +325,13 @@ impl SshRunner {
                 },
                 capture,
                 session_cancel,
+                capture_cancel,
             )
             .await;
         let (session_result, output) = match captured {
             Ok(result) => result,
             Err(error) => {
-                if session.is_closed() {
+                if !session.is_reusable() {
                     self.drop_session(&request.host, &session).await;
                 }
                 return Err(attach_selected_context(
@@ -419,7 +420,7 @@ impl SshRunner {
         cancel: &CancellationToken,
     ) -> BridgeResult<(Arc<HostSession>, bool)> {
         if let Some(session) = self.sessions.lock().await.get(host).cloned() {
-            if !session.is_closed() {
+            if session.is_reusable() {
                 return Ok((session, true));
             }
             self.sessions.lock().await.remove(host);
@@ -445,7 +446,7 @@ impl SshRunner {
             }
         };
         if let Some(session) = self.sessions.lock().await.get(host).cloned() {
-            if !session.is_closed() {
+            if session.is_reusable() {
                 return Ok((session, true));
             }
             self.sessions.lock().await.remove(host);
@@ -496,6 +497,7 @@ impl SshRunner {
         request: SessionRequest,
         capture: F,
         session_cancel: CancellationToken,
+        capture_cancel: CancellationToken,
     ) -> BridgeResult<(SessionResult, T)>
     where
         F: Future<Output = BridgeResult<T>>,
@@ -505,6 +507,9 @@ impl SshRunner {
         tokio::select! {
             biased;
             session_result = &mut session_future => {
+                if session_result.is_err() {
+                    capture_cancel.cancel();
+                }
                 let captured = capture_future.await;
                 match (session_result, captured) {
                     (Ok(session_result), Ok(captured)) => Ok((session_result, captured)),
@@ -802,7 +807,7 @@ impl SshRunner {
         {
             Ok(result) => result,
             Err(error) => {
-                if session.is_closed() {
+                if !session.is_reusable() {
                     self.drop_session(&request.host, &session).await;
                 }
                 return Err(attach_selected_context(
@@ -2090,7 +2095,7 @@ mod tests {
                 preview_bytes: 1024,
                 max_output_bytes: 1024 * 1024,
             },
-            capture_cancel,
+            capture_cancel.clone(),
         );
         let request = SessionRequest {
             command: "true".to_owned(),
@@ -2115,7 +2120,13 @@ mod tests {
 
         let error = timeout(
             Duration::from_millis(500),
-            runner.execute_with_capture(&session, request, capture, CancellationToken::new()),
+            runner.execute_with_capture(
+                &session,
+                request,
+                capture,
+                CancellationToken::new(),
+                capture_cancel,
+            ),
         )
         .await
         .expect("session failure waited indefinitely for output EOF")

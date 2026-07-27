@@ -81,6 +81,7 @@ struct SessionInner {
     pending: Mutex<HashMap<u64, PendingRequest>>,
     next_id: AtomicU64,
     closed: AtomicBool,
+    retired: AtomicBool,
     process_group: AtomicI32,
     writer_task: Mutex<Option<JoinHandle<()>>>,
     reader_task: Mutex<Option<JoinHandle<()>>>,
@@ -604,6 +605,7 @@ impl HostSession {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
             process_group: AtomicI32::new(process_group),
             writer_task: Mutex::new(None),
             reader_task: Mutex::new(None),
@@ -772,12 +774,17 @@ impl HostSession {
             // close the shared transport and fail unrelated requests. Keep the
             // pending entry until its eventual EXIT (or transport failure) so
             // late frames remain protocol-valid; dropping this receiver simply
-            // makes completion delivery a no-op.
-            Ok(Err(_)) | Err(_) => Err(if timed_out {
-                timeout_error(&self.inner.host, true)
-            } else {
-                cancelled_error(&self.inner.host, true)
-            }),
+            // makes completion delivery a no-op. Do not admit later requests to
+            // a session whose cancellation path is no longer making confirmed
+            // progress.
+            Ok(Err(_)) | Err(_) => {
+                self.inner.retired.store(true, Ordering::Release);
+                Err(if timed_out {
+                    timeout_error(&self.inner.host, true)
+                } else {
+                    cancelled_error(&self.inner.host, true)
+                })
+            }
         }
     }
 
@@ -795,6 +802,10 @@ impl HostSession {
         self.inner.closed.load(Ordering::Acquire)
     }
 
+    pub(crate) fn is_reusable(&self) -> bool {
+        !self.is_closed() && !self.inner.retired.load(Ordering::Acquire)
+    }
+
     #[cfg(test)]
     pub(crate) fn wedged_for_test(host: &str, max_payload: usize, max_output_bytes: u64) -> Self {
         let (tx, mut rx) = mpsc::channel::<Outbound>(64);
@@ -808,6 +819,7 @@ impl HostSession {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
             process_group: AtomicI32::new(0),
             writer_task: Mutex::new(Some(writer_task)),
             reader_task: Mutex::new(None),
@@ -1804,6 +1816,7 @@ mod tests {
                 pending: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 next_id: std::sync::atomic::AtomicU64::new(1),
                 closed: std::sync::atomic::AtomicBool::new(false),
+                retired: std::sync::atomic::AtomicBool::new(false),
                 process_group: std::sync::atomic::AtomicI32::new(0),
                 writer_task: tokio::sync::Mutex::new(None),
                 reader_task: tokio::sync::Mutex::new(None),
