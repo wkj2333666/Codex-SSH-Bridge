@@ -26,6 +26,12 @@ pub const MIN_GLOBAL_SPOOL_QUOTA_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_GLOBAL_SPOOL_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_RETENTION_SERIALIZATION_JOBS: usize = 2;
 pub const MAX_RETENTION_SERIALIZATION_JOBS: usize = 4;
+pub const DEFAULT_EDIT_FLUSH_DELAY_MS: u64 = 30_000;
+pub const MAX_EDIT_FLUSH_DELAY_MS: u64 = 300_000;
+pub const DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES: usize = 16 * 1024;
+pub const MAX_EDIT_FLUSH_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_EDIT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_EDIT_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SPOOL_ENTRIES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +66,9 @@ pub struct Limits {
     pub max_output_bytes: u64,
     pub global_spool_quota_bytes: u64,
     pub retention_serialization_jobs: usize,
+    pub edit_flush_delay_ms: u64,
+    pub edit_flush_threshold_bytes: usize,
+    pub edit_cache_max_bytes: usize,
 }
 
 impl Default for Limits {
@@ -75,6 +84,9 @@ impl Default for Limits {
             max_output_bytes: MAX_OUTPUT_BYTES,
             global_spool_quota_bytes: DEFAULT_GLOBAL_SPOOL_QUOTA_BYTES,
             retention_serialization_jobs: DEFAULT_RETENTION_SERIALIZATION_JOBS,
+            edit_flush_delay_ms: DEFAULT_EDIT_FLUSH_DELAY_MS,
+            edit_flush_threshold_bytes: DEFAULT_EDIT_FLUSH_THRESHOLD_BYTES,
+            edit_cache_max_bytes: DEFAULT_EDIT_CACHE_MAX_BYTES,
         }
     }
 }
@@ -374,6 +386,7 @@ pub fn migrate_v1_text(contents: &str) -> BridgeResult<MigratedV1> {
         ));
     }
     let explicit_aliases = old.hosts.keys().cloned().collect::<Vec<_>>();
+    let defaults = Limits::default();
     let config = Config {
         version: CONFIG_VERSION,
         limits: Limits {
@@ -387,6 +400,9 @@ pub fn migrate_v1_text(contents: &str) -> BridgeResult<MigratedV1> {
             max_output_bytes: old.limits.max_output_bytes,
             global_spool_quota_bytes: old.limits.global_spool_quota_bytes,
             retention_serialization_jobs: old.limits.retention_serialization_jobs,
+            edit_flush_delay_ms: defaults.edit_flush_delay_ms,
+            edit_flush_threshold_bytes: defaults.edit_flush_threshold_bytes,
+            edit_cache_max_bytes: defaults.edit_cache_max_bytes,
         },
         hosts: BTreeMap::new(),
     };
@@ -444,6 +460,26 @@ fn validate_limits(limits: &Limits) -> BridgeResult<()> {
         limits.retention_serialization_jobs,
         MAX_RETENTION_SERIALIZATION_JOBS,
     )?;
+    validate_u64(
+        "edit_flush_delay_ms",
+        limits.edit_flush_delay_ms,
+        MAX_EDIT_FLUSH_DELAY_MS,
+    )?;
+    validate_usize(
+        "edit_flush_threshold_bytes",
+        limits.edit_flush_threshold_bytes,
+        MAX_EDIT_FLUSH_THRESHOLD_BYTES,
+    )?;
+    validate_usize(
+        "edit_cache_max_bytes",
+        limits.edit_cache_max_bytes,
+        MAX_EDIT_CACHE_MAX_BYTES,
+    )?;
+    if limits.edit_flush_threshold_bytes > limits.edit_cache_max_bytes {
+        return Err(BridgeError::invalid_config(
+            "edit_flush_threshold_bytes must not exceed edit_cache_max_bytes",
+        ));
+    }
     Ok(())
 }
 
