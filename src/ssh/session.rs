@@ -794,6 +794,27 @@ impl HostSession {
     pub(crate) fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Acquire)
     }
+
+    #[cfg(test)]
+    pub(crate) fn wedged_for_test(host: &str, max_payload: usize, max_output_bytes: u64) -> Self {
+        let (tx, mut rx) = mpsc::channel::<Outbound>(64);
+        let writer_task = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let inner = Arc::new(SessionInner {
+            host: host.to_owned(),
+            helper_mode: HelperMode::Persistent,
+            max_payload,
+            max_output_bytes,
+            tx,
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
+            process_group: AtomicI32::new(0),
+            writer_task: Mutex::new(Some(writer_task)),
+            reader_task: Mutex::new(None),
+            child_task: Mutex::new(None),
+        });
+        Self { inner }
+    }
 }
 
 async fn write_helper_bytes(

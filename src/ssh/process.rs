@@ -1842,17 +1842,19 @@ mod tests {
         mutation_unknown, render_fixed_command, render_fixed_command_text,
     };
     use crate::capability::parse_probe_output;
+    use crate::capability::{ShellKind, ShellSelection};
     use crate::config::{Config, HostProfile};
     use crate::error::{BridgeError, ErrorCode};
     use crate::output::{CaptureLimits, InternalSpoolOwner, OutputStore};
     use crate::path::RemotePath;
-    use crate::ssh::RuntimePaths;
+    use crate::ssh::{HostSession, RuntimePaths, SessionOutput, SessionRequest};
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::time::{Instant, sleep};
+    use tokio::io::duplex;
+    use tokio::time::{Instant, sleep, timeout};
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -2068,6 +2070,58 @@ mod tests {
         )
         .unwrap();
         (base, runner)
+    }
+
+    #[tokio::test]
+    async fn session_failure_cancels_output_capture_before_waiting_for_eof() {
+        let (_base, runner) = task5_test_runner("/bin/false");
+        let session = Arc::new(HostSession::wedged_for_test(
+            "dev",
+            crate::MAX_FRAME_BYTES,
+            crate::MAX_OUTPUT_BYTES,
+        ));
+        let (stdout_writer, stdout_reader) = duplex(64 * 1024);
+        let (stderr_writer, stderr_reader) = duplex(64 * 1024);
+        let capture_cancel = CancellationToken::new();
+        let capture = runner.output_store.capture(
+            stdout_reader,
+            stderr_reader,
+            CaptureLimits {
+                preview_bytes: 1024,
+                max_output_bytes: 1024 * 1024,
+            },
+            capture_cancel,
+        );
+        let request = SessionRequest {
+            command: "true".to_owned(),
+            cwd: "/".to_owned(),
+            shell: ShellSelection {
+                shell: ShellKind::PosixSh,
+                fallback: false,
+            },
+            login_shell: None,
+            env: BTreeMap::new(),
+            stdin: None,
+            timeout: Duration::from_secs(5),
+            admission_timeout: Duration::from_millis(25),
+            response_timeout: Duration::from_secs(5),
+            stdout_limit: 1024 * 1024,
+            stderr_limit: 1024 * 1024,
+            output: Some(SessionOutput {
+                stdout: stdout_writer,
+                stderr: stderr_writer,
+            }),
+        };
+
+        let error = timeout(
+            Duration::from_millis(500),
+            runner.execute_with_capture(&session, request, capture, CancellationToken::new()),
+        )
+        .await
+        .expect("session failure waited indefinitely for output EOF")
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::CommandTimeout);
+        assert_eq!(error.details.remote_process_may_continue, Some(true));
     }
 
     struct Task5FixedFixture {
