@@ -240,7 +240,7 @@ impl SshEditBackend {
         &self,
         host: &str,
         items: Vec<CommitItem>,
-    ) -> Result<Vec<CommitSuccess>, EditError> {
+    ) -> Result<CommitBatchOutcome, EditError> {
         let prepared = prepare_batch(&items)?;
         let limits = self.runner.config().limits();
         let transport_bytes = render_fixed_command(BATCH_EDIT_SCRIPT, &prepared.args)
