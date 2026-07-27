@@ -8,6 +8,7 @@ on:
       - Cargo.lock
       - Cargo.toml
       - rust-toolchain.toml
+      - .github/scripts/dependency-cache-key.sh
       - .github/workflows/cross-cache.yml
       - .github/workflows/release.yml
   workflow_dispatch:
@@ -54,6 +55,10 @@ jobs:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - name: Compute dependency cache key
+        id: dependency-cache
+        run: echo "key=$(.github/scripts/dependency-cache-key.sh)" >>"$GITHUB_OUTPUT"
+
       - name: Restore pinned Rust toolchain cache
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -69,7 +74,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-${{ steps.dependency-cache.outputs.key }}
           restore-keys: |
             ${{ runner.os }}-rust-deps-${{ env.RUST_TOOLCHAIN }}-
 
@@ -88,7 +93,7 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: target
-          key: ${{ runner.os }}-rust-target-cross-${{ env.RUST_TOOLCHAIN }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-target-cross-${{ env.RUST_TOOLCHAIN }}-${{ matrix.target }}-${{ steps.dependency-cache.outputs.key }}
           restore-keys: |
             ${{ runner.os }}-rust-target-cross-${{ env.RUST_TOOLCHAIN }}-${{ matrix.target }}-
 

@@ -211,7 +211,12 @@ fn ci_and_release_workflows_use_split_caches() {
     assert!(ci.contains("~/.cargo/registry"));
     assert!(ci.contains("~/.cargo/git"));
     assert!(ci.contains("target"));
-    assert!(ci.contains("hashFiles('Cargo.lock')"));
+    assert_eq!(ci.matches("Compute dependency cache key").count(), 2);
+    assert_eq!(
+        ci.matches("steps.dependency-cache.outputs.key").count(),
+        3
+    );
+    assert!(!ci.contains("hashFiles('Cargo.lock')"));
     assert!(!ci.contains("Restore Rust build cache"));
 
     let release = read_text(".github/workflows/release.yml");
@@ -221,6 +226,13 @@ fn ci_and_release_workflows_use_split_caches() {
             .matches("Restore pinned Rust toolchain cache")
             .count(),
         2
+    );
+    assert_eq!(release.matches("Compute dependency cache key").count(), 2);
+    assert_eq!(
+        release
+            .matches("steps.dependency-cache.outputs.key")
+            .count(),
+        4
     );
     assert_eq!(
         release
