@@ -536,8 +536,8 @@ mod tests {
         assert!(
             partitions
                 .iter()
-                .all(|partition| batch_transport_bytes(partition).unwrap() <= two - 1)
+                .all(|partition| batch_transport_bytes(partition).unwrap() < two)
         );
-        assert!(one <= two - 1);
+        assert!(one < two);
     }
 }

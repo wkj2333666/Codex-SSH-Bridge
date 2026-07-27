@@ -27,7 +27,8 @@ use crate::error::{BridgeError, BridgeResult};
 pub(crate) use argv::ValidatedMountpoint;
 pub use argv::{build_ssh_argv, build_sshfs_argv, validate_sshfs_mountpoint};
 pub(crate) use process::{
-    FixedOperationKind, FixedRunRequest, FixedRunResult, RootedPathInputs, render_fixed_command,
+    FixedOperationKind, FixedRunRequest, FixedRunResult, RootedArgumentStride, RootedPathInputs,
+    render_fixed_command,
 };
 pub use process::{RunRequest, RunResult, RunTiming, SshRunner};
 pub(crate) use session::{HostSession, SessionOutput, SessionRequest, SessionResult};
