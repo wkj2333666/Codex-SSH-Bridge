@@ -116,6 +116,7 @@ pub(super) async fn read(
                     stdin: None,
                     rooted_paths: RootedPathInputs {
                         argument_indices: &[0],
+                        argument_stride: None,
                         stdin_nul_paths: false,
                     },
                     required_capabilities: &["read_slice", "stat_printf", "sha256sum"],

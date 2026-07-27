@@ -1108,6 +1108,7 @@ async fn snapshot_file(
                 stdin: None,
                 rooted_paths: RootedPathInputs {
                     argument_indices: &[0],
+                    argument_stride: None,
                     stdin_nul_paths: false,
                 },
                 required_capabilities: &["safe_write"],

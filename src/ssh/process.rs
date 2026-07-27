@@ -93,7 +93,14 @@ pub(crate) enum FixedOperationKind {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RootedPathInputs {
     pub(crate) argument_indices: &'static [usize],
+    pub(crate) argument_stride: Option<RootedArgumentStride>,
     pub(crate) stdin_nul_paths: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RootedArgumentStride {
+    pub(crate) start: usize,
+    pub(crate) step: usize,
 }
 
 #[derive(Clone)]
@@ -1608,6 +1615,18 @@ fn pin_fixed_inputs(
             )
         })?;
         *argument = root_relative_one(configured.as_str(), argument)?;
+    }
+    if let Some(stride) = rooted.argument_stride {
+        if stride.step == 0 || stride.start >= args.len() {
+            return Err(BridgeError::new(
+                ErrorCode::ProtocolError,
+                "fixed rooted argument stride is invalid",
+                false,
+            ));
+        }
+        for argument in args.iter_mut().skip(stride.start).step_by(stride.step) {
+            *argument = root_relative_one(configured.as_str(), argument)?;
+        }
     }
     if rooted.stdin_nul_paths {
         let stdin = stdin.ok_or_else(|| {

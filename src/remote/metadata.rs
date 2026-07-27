@@ -165,6 +165,7 @@ pub(super) async fn list(
                 stdin: None,
                 rooted_paths: RootedPathInputs {
                     argument_indices: &[0],
+                    argument_stride: None,
                     stdin_nul_paths: false,
                 },
                 required_capabilities: &["find_nul", "xargs_nul", "search_bound"],
@@ -315,6 +316,7 @@ pub(super) async fn stat(
                 stdin: Some(stdin),
                 rooted_paths: RootedPathInputs {
                     argument_indices: &[],
+                    argument_stride: None,
                     stdin_nul_paths: true,
                 },
                 required_capabilities: &["stat_printf", "xargs_nul"],

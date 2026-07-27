@@ -306,6 +306,7 @@ pub(super) async fn search(
                 stdin: None,
                 rooted_paths: RootedPathInputs {
                     argument_indices: &[0],
+                    argument_stride: None,
                     stdin_nul_paths: false,
                 },
                 required_capabilities: &["find_nul", "search_bound"],
@@ -480,6 +481,7 @@ pub(super) async fn search(
                 stdin: Some(stdin),
                 rooted_paths: RootedPathInputs {
                     argument_indices: &[],
+                    argument_stride: None,
                     // Candidate paths are already normalized relative to the
                     // session root by the first fixed operation.  They must
                     // not be pinned a second time.

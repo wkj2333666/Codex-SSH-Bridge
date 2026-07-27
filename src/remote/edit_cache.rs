@@ -53,6 +53,8 @@ pub(crate) struct CommitSuccess {
 pub(crate) enum EditErrorKind {
     Transient,
     Conflict,
+    OutcomeUnknown,
+    Permanent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,7 +453,7 @@ impl EditCache {
                         && entry.in_flight == Some(item.generation)
                     {
                         entry.in_flight = None;
-                        if error.kind == EditErrorKind::Conflict {
+                        if error.kind != EditErrorKind::Transient {
                             entry.conflict = Some(error.clone());
                         }
                     }

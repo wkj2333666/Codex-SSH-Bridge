@@ -1006,6 +1006,7 @@ pub(super) async fn execute_preflighted_write_at_root(
         stdin: Some(stdin),
         rooted_paths: RootedPathInputs {
             argument_indices: &[0],
+            argument_stride: None,
             stdin_nul_paths: false,
         },
         required_capabilities: &["safe_write"],
@@ -1095,6 +1096,7 @@ pub(super) async fn execute_preflighted_delete_at_root(
         stdin: None,
         rooted_paths: RootedPathInputs {
             argument_indices: &[0],
+            argument_stride: None,
             stdin_nul_paths: false,
         },
         required_capabilities: &["guarded_delete"],

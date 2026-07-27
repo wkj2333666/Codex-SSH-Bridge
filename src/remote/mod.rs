@@ -24,6 +24,11 @@ use crate::ssh::{FixedRunRequest, FixedRunResult, HelperMode, SshRunner};
     reason = "the cache state machine is wired into RemoteBridge in Task 4"
 )]
 mod edit_cache;
+#[allow(
+    dead_code,
+    reason = "the SSH edit backend is wired into RemoteBridge in Task 4"
+)]
+mod edit_sync;
 mod metadata;
 mod patch;
 mod protocol;
