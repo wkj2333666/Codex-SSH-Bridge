@@ -194,6 +194,14 @@ Errors report factual codes and relevant state without prescribing an action.
 
 All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` headers must use absolute paths (or `/dev/null` for create/delete). `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Bash is never silently changed to sh: if Bash is unavailable, the capability error records that Bash was requested and which shells are available, leaving the next decision to the model. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
+Writes and patches use a bounded per-process in-memory write-back cache.
+Complete cached reads and consecutive edits are local-memory operations after
+the first guarded snapshot. Dirty edits synchronize within 30 seconds, after
+16 KiB of edit payload, before commands and filesystem-wide observations, or
+on clean MCP shutdown. An SSH interruption or abnormal bridge exit can lose an
+unsynchronized edit; a failed synchronization prevents its barrier operation
+from starting.
+
 Operational requests use one persistent SSH session per alias and are
 multiplexed without bridge-defined host or concurrency admission limits.
 Requests remain bounded by frame, read, write, output, and spool limits and are cancellable;

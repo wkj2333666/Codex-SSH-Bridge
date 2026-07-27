@@ -49,7 +49,16 @@ All objects reject unknown fields. MCP paths are absolute remote paths. The brid
 | `remote_write` | `host`, `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
 | `remote_run` | `host`, `command` string, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin` |
 
-`remote_write.mode` is `{"kind":"create"}` or `{"kind":"replace","expected_sha256":"..."}`. `expected_sha256` is nested inside `mode`, never at the request root. UTF-8 and base64 encodings are supported. Prefer `remote_apply_patch` for model-driven edits because it snapshots every base before the first mutation and reports confirmed, unchanged, and outcome-unknown paths.
+`remote_write.mode` is `{"kind":"create"}` or `{"kind":"replace","expected_sha256":"..."}`. `expected_sha256` is nested inside `mode`, never at the request root. UTF-8 and base64 encodings are supported. Prefer `remote_apply_patch` for model-driven edits.
+
+Successful writes and patches may remain briefly in the bridge's bounded
+in-memory edit cache. Complete reads and later edits observe the newest cached
+generation. Synchronization occurs within 30 seconds, at 16 KiB of edit
+payload, before `remote_run`, `remote_stat`, `remote_list`, or `remote_search`,
+and once on clean MCP shutdown. This is bridge-owned; do not track generations
+or invent a flush call. If SSH disconnects or the bridge exits abnormally,
+buffered writes may fail. A synchronization failure prevents the following
+barrier operation from starting.
 
 Search queries are case-sensitive fixed strings, not regular expressions. Unified patch headers must name the same absolute path (or `/dev/null` for create/delete); the bridge accepts conventional `a//absolute/path` and `b//absolute/path` forms as well as direct absolute headers. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
 
@@ -67,7 +76,11 @@ The SSH account's login shell must be able to launch the POSIX dispatcher comman
 
 Use the Bash default normally. Select `sh` only for a POSIX-compatible command; its result includes a syntax warning. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
-Requests are independent and multiplexed over each host session. The bridge has no host count, task window, global concurrency, per-host concurrency, or mutation lock. There is no ordering guarantee for simultaneous writes to the same path. Atomic replace and expected-hash checks remain the protection for individual mutations.
+Requests are multiplexed over each host session. The bridge has no host count,
+task window, global concurrency, or per-host concurrency limit. Same-host edit
+preparation and barrier operations are coordinated, but there is no general
+ordering guarantee for otherwise simultaneous calls. Atomic replace and
+expected-hash checks remain the protection against conflicting remote bases.
 
 Timeout and cancellation send a request-level `CANCEL`. If the dispatcher does not produce an exit result within the grace period, that request reports `remote_process_may_continue: true`; unrelated request IDs remain usable. Never retry a mutation with unknown outcome.
 

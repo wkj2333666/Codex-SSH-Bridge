@@ -101,7 +101,14 @@ All command tools are treated as mutating. A detached or ambiguous remote child 
 
 ## Mutation semantics
 
-`remote_write` provides create or conditional replace. `remote_apply_patch` snapshots every base before the first mutation and executes files in patch order. Results separate confirmed changed paths, confirmed unchanged paths, and outcome-unknown paths. Never automatically retry an unknown outcome.
+`remote_write` provides create or conditional replace. `remote_apply_patch`
+prepares all files against complete guarded snapshots before committing a
+local generation. Dirty generations are held only in bounded process memory
+and later synchronized with base hashes, same-directory temporary files, and
+atomic replacement or guarded deletion. A normal command or filesystem-wide
+observation is blocked until same-host dirty generations synchronize. Process
+loss can lose unsynchronized data, and an unknown remote mutation outcome is
+never retried automatically.
 
 ## Local installation transaction
 

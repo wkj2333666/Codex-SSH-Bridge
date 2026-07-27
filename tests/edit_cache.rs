@@ -1,3 +1,7 @@
+#[allow(
+    dead_code,
+    reason = "the isolated state-machine fixture omits production routing"
+)]
 #[path = "../src/remote/edit_cache.rs"]
 mod edit_cache;
 

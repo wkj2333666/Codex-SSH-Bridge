@@ -23,6 +23,15 @@ The selected dispatcher applies the absolute cwd, requested shell, and timeout
 directly; the bridge does not insert an additional `sh` or GNU `timeout`
 wrapper around the model's command.
 
+Successful `remote_write` and `remote_apply_patch` calls may first update a
+bounded in-memory edit cache. Later complete reads and edits in this task see
+that latest local generation immediately. The bridge synchronizes within 30
+seconds, after 16 KiB of edit payload, before `remote_run`, `remote_stat`,
+`remote_list`, or `remote_search`, and once on clean MCP shutdown. Do not
+manage generations or request a manual flush. If the connection is interrupted
+or the bridge exits abnormally, a buffered write may fail; when synchronization
+fails, the requested barrier command or observation does not run.
+
 ## Default workflow
 
 1. Call `remote_hosts` with `{}`; select one exact alias from `structuredContent.hosts` or the equivalent newline-delimited `content.text`.
@@ -50,7 +59,7 @@ Omit `shell` (or set `shell:"bash"`) for the Bash default. Set `shell:"sh"` expl
 
 Commands that use Bash-only syntax must request Bash explicitly (or rely on the omitted Bash default); the bridge never labels a POSIX `sh` execution as an implicit Bash fallback.
 
-Requests are independent and multiplexed over the host session. The bridge does not impose a host count, task window, global concurrency limit, per-host concurrency limit, or mutation lock. Do not rely on ordering between concurrent calls. A timeout or cancellation targets only its request; if termination is not confirmed, that result reports that the remote process may continue while unrelated request IDs remain usable. Absolute paths are authoritative and are never derived from a Codex task ID or a previous request.
+Requests are multiplexed over the host session. The bridge does not impose a host count, task window, global concurrency limit, or per-host concurrency limit. Buffered edits and filesystem barriers coordinate same-host visibility, but do not rely on ordering between otherwise concurrent calls. A timeout or cancellation targets only its request; if termination is not confirmed, that result reports that the remote process may continue while unrelated request IDs remain usable. Absolute paths are authoritative and are never derived from a Codex task ID or a previous request.
 
 The account/forced login shell must be able to start the POSIX dispatcher. A failed dispatcher handshake is a hard error; never ask the bridge to silently fall back to a one-shot SSH command.
 

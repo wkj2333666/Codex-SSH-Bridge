@@ -101,6 +101,7 @@ pub(crate) struct EditCacheConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(test)]
+#[allow(dead_code, reason = "legacy state-machine test convenience API")]
 pub(crate) enum MutationDisposition {
     Buffered(Generation),
     ImmediateWriteRequired,
@@ -390,6 +391,7 @@ impl EditCache {
     }
 
     #[cfg(test)]
+    #[allow(dead_code, reason = "legacy state-machine test convenience API")]
     pub(crate) async fn mutate(
         self: &Arc<Self>,
         key: CacheKey,
@@ -522,6 +524,7 @@ impl EditCache {
     }
 
     #[cfg(test)]
+    #[allow(dead_code, reason = "state-machine accounting probe")]
     pub(crate) async fn cached_bytes(&self) -> usize {
         self.state.lock().await.cached_bytes
     }

@@ -116,7 +116,18 @@ The native Rust bridge removes interpreter startup from every MCP frame and keep
 
 The bridge still uses the remote Bash or POSIX sh selected by capability probing because commands must execute where the server's tools and data live. Omitted `remote_run.shell` means Bash; `sh` is an explicit retry choice after a Bash capability error. There is no hidden fallback.
 
-The persistent session adds a fixed startup cost once per alias. Acceptance measurements must therefore report `helper_cold`/`helper_warm` separately from `shell_cold`/`shell_warm` on the same fixture. A long command does not block another request until the configured per-host capacity is exhausted; a session transport failure invalidates all pending requests and is not automatically retried.
+## Write-back edit cache
+
+After the first complete guarded snapshot, consecutive complete reads, writes,
+and patches use a bounded in-memory generation. The bridge coalesces final file
+states into one helper mutation request per host flush. Flushes occur at a
+30-second dirty-age bound, a 16 KiB edit-payload threshold, before commands and
+filesystem-wide observations, and on clean MCP shutdown. The default cache
+limit is 16 MiB; clean entries are evicted by LRU, while dirty entries are
+never silently discarded. This removes an SSH round trip from the hot logical
+edit path without presenting an SSHFS tree as local files.
+
+The persistent session adds a fixed startup cost once per alias. Acceptance measurements must therefore report `helper_cold`/`helper_warm` separately from `shell_cold`/`shell_warm` on the same fixture. A long command does not block independent request IDs; a session transport failure invalidates all pending requests and is not automatically retried.
 
 OpenSSH connection reuse is private to one MCP runner. A runner uses a
 five-second `ControlPersist` grace to bridge capability probing and persistent
