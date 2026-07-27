@@ -343,6 +343,26 @@ fn skill_teaches_the_low_burden_default_workflow_in_order() {
 }
 
 #[test]
+fn skill_batches_related_edits_before_remote_barriers() {
+    let skill = read_text("skills/remote-ssh-ops/SKILL.md").to_ascii_lowercase();
+    let workflow = section(&skill, "## default workflow");
+
+    for required in [
+        "one logical change",
+        "use `remote_read` to inspect",
+        "do not use `remote_run` with `cat`, `sed`, `nl`, or `grep`",
+        "meaningful behavior boundary",
+        "do not batch unrelated changes",
+        "red→green",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "default workflow omits edit-batching guidance {required:?}"
+        );
+    }
+}
+
+#[test]
 fn skill_states_remote_shell_output_and_sshfs_boundaries() {
     let skill = read_text("skills/remote-ssh-ops/SKILL.md").to_ascii_lowercase();
     for required in [
