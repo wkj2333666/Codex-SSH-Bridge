@@ -100,6 +100,7 @@ pub(crate) struct EditCacheConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum MutationDisposition {
     Buffered(Generation),
     ImmediateWriteRequired,
@@ -388,6 +389,7 @@ impl EditCache {
         Ok(BatchMutationDisposition::Buffered(generations))
     }
 
+    #[cfg(test)]
     pub(crate) async fn mutate(
         self: &Arc<Self>,
         key: CacheKey,
@@ -519,6 +521,7 @@ impl EditCache {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn cached_bytes(&self) -> usize {
         self.state.lock().await.cached_bytes
     }

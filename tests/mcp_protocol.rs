@@ -8,11 +8,12 @@ use codex_ssh_bridge::mcp::stdio::{
 };
 use codex_ssh_bridge::mcp::{
     CallToolResult, McpServer, ProtocolState, RequestId, SUPPORTED_PROTOCOL_VERSIONS,
-    StrictJsonError, ToolAnnotations, ToolCallContext, ToolDefinition, ToolFuture, ToolService,
-    WireBudget, duplicate_request_id_response, internal_error_response, invalid_params_response,
-    invalid_request_id_response, invalid_request_response, maximum_compact_fallback_result_bytes,
-    method_not_found_response, parse_error_response, parse_strict_json, request_too_large_response,
-    result_response, server_not_initialized_response,
+    ShutdownFuture, StrictJsonError, ToolAnnotations, ToolCallContext, ToolDefinition, ToolFuture,
+    ToolService, WireBudget, duplicate_request_id_response, internal_error_response,
+    invalid_params_response, invalid_request_id_response, invalid_request_response,
+    maximum_compact_fallback_result_bytes, method_not_found_response, parse_error_response,
+    parse_strict_json, request_too_large_response, result_response,
+    server_not_initialized_response,
 };
 use codex_ssh_bridge::{BridgeError, ErrorCode};
 use serde::Serialize;
@@ -473,6 +474,7 @@ struct StubTools {
     entered_notify: Arc<Notify>,
     release: Arc<Semaphore>,
     contexts: Arc<Mutex<Vec<ToolCallContext>>>,
+    shutdowns: Arc<AtomicUsize>,
 }
 
 impl StubTools {
@@ -488,6 +490,7 @@ impl StubTools {
             entered_notify: Arc::new(Notify::new()),
             release: Arc::new(Semaphore::new(0)),
             contexts: Arc::new(Mutex::new(Vec::new())),
+            shutdowns: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -561,6 +564,11 @@ impl ToolService for StubTools {
             }
             unreachable!("the lifecycle owner rejects unknown names")
         })
+    }
+
+    fn shutdown(&self) -> ShutdownFuture<'_> {
+        self.shutdowns.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -3033,6 +3041,21 @@ async fn task7_eof_clean_and_partial_have_exact_precedence() {
     })
     .await
     .expect("test must complete");
+}
+
+#[tokio::test]
+async fn clean_eof_runs_service_shutdown_once_but_partial_eof_does_not() {
+    let clean = Arc::new(StubTools::new());
+    let server = McpServer::new(Arc::clone(&clean), MIN_MCP_FRAME_BYTES).unwrap();
+    let (_, result) = serve_raw(server, Vec::new()).await;
+    assert!(result.is_ok());
+    assert_eq!(clean.shutdowns.load(Ordering::SeqCst), 1);
+
+    let partial = Arc::new(StubTools::new());
+    let server = McpServer::new(Arc::clone(&partial), MIN_MCP_FRAME_BYTES).unwrap();
+    let (_, result) = serve_raw(server, b"{".to_vec()).await;
+    assert_eq!(result.unwrap_err().code, ErrorCode::ProtocolError);
+    assert_eq!(partial.shutdowns.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

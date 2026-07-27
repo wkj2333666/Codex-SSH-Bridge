@@ -188,6 +188,10 @@ impl RemoteBridge {
         Ok(HostsResult { hosts })
     }
 
+    pub async fn shutdown(&self) -> BridgeResult<()> {
+        self.edit_cache.shutdown().await.map_err(edit_bridge_error)
+    }
+
     pub async fn list(
         &self,
         request: ListRequest,

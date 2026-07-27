@@ -25,6 +25,7 @@ use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 const MCP_TASK_CLEANUP_GRACE: Duration = Duration::from_millis(250);
 const MCP_WRITER_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 const MCP_ABORT_DRAIN_GRACE: Duration = Duration::from_millis(250);
+const MCP_SERVICE_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProtocolShape {
@@ -270,6 +271,19 @@ impl<S: ToolService> McpServer<S> {
         }
         active.clear();
         task_ids.clear();
+        let shutdown_error = if !transport_failed && !partial_eof {
+            match tokio::time::timeout(MCP_SERVICE_SHUTDOWN_GRACE, self.service.shutdown()).await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some(BridgeError::new(
+                    ErrorCode::CommandTimeout,
+                    "MCP service shutdown timed out",
+                    false,
+                )),
+            }
+        } else {
+            None
+        };
         drop(sender);
         if writer_observed {
             // `next_owner_event` already consumed the writer result.
@@ -298,6 +312,9 @@ impl<S: ToolService> McpServer<S> {
                 "partial MCP frame at EOF",
                 false,
             ));
+        }
+        if let Some(error) = shutdown_error {
+            return Err(error);
         }
         Ok(())
     }

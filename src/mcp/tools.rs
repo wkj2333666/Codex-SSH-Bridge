@@ -10,7 +10,8 @@ use crate::remote::{
 };
 
 use super::{
-    CallToolResult, ToolAnnotations, ToolCallContext, ToolDefinition, ToolFuture, ToolService,
+    CallToolResult, ShutdownFuture, ToolAnnotations, ToolCallContext, ToolDefinition, ToolFuture,
+    ToolService,
 };
 
 #[derive(Clone)]
@@ -166,6 +167,10 @@ impl ToolService for RemoteMcpTools {
                 }
             }
         })
+    }
+
+    fn shutdown(&self) -> ShutdownFuture<'_> {
+        Box::pin(async move { self.bridge.shutdown().await })
     }
 }
 
