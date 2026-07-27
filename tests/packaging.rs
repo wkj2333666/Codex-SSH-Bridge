@@ -212,10 +212,7 @@ fn ci_and_release_workflows_use_split_caches() {
     assert!(ci.contains("~/.cargo/git"));
     assert!(ci.contains("target"));
     assert_eq!(ci.matches("Compute dependency cache key").count(), 2);
-    assert_eq!(
-        ci.matches("steps.dependency-cache.outputs.key").count(),
-        3
-    );
+    assert_eq!(ci.matches("steps.dependency-cache.outputs.key").count(), 3);
     assert!(!ci.contains("hashFiles('Cargo.lock')"));
     assert!(!ci.contains("Restore Rust build cache"));
 
