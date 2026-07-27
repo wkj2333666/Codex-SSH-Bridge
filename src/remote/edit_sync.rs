@@ -11,8 +11,13 @@ use crate::ssh::{
 };
 
 use super::edit_cache::{
-    CacheKey, CommitItem, CommitSuccess, DesiredState, EditBackend, EditError, EditErrorKind,
-    EditFuture, RemoteBase, RemoteSnapshot,
+    CacheKey, CommitBatchOutcome, CommitFuture, CommitItem, CommitSuccess, DesiredState,
+    EditBackend, EditError, EditErrorKind, EditFuture, RemoteBase, RemoteSnapshot,
+};
+use super::execute_readonly_fixed;
+use super::patch::{
+    FileSnapshot, PATCH_SNAPSHOT_SCRIPT, SNAPSHOT_CAPTURE_METADATA_BYTES, SNAPSHOT_PROTOCOL_BYTES,
+    parse_snapshot_protocol,
 };
 use super::protocol::read_small_stream;
 use super::write::split_parent_basename;
@@ -153,11 +158,82 @@ done
 
 pub(super) struct SshEditBackend {
     runner: Arc<SshRunner>,
+    maximum_snapshot_bytes: usize,
 }
 
 impl SshEditBackend {
-    pub(super) fn new(runner: Arc<SshRunner>) -> Arc<Self> {
-        Arc::new(Self { runner })
+    pub(super) fn new(runner: Arc<SshRunner>, maximum_snapshot_bytes: usize) -> Arc<Self> {
+        Arc::new(Self {
+            runner,
+            maximum_snapshot_bytes,
+        })
+    }
+
+    async fn fetch_snapshot(&self, key: &CacheKey) -> Result<RemoteSnapshot, EditError> {
+        let (parent, basename) = split_parent_basename(&key.path).map_err(map_bridge_error)?;
+        let limits = self.runner.config().limits();
+        let desired_stdout_limit = u64::try_from(self.maximum_snapshot_bytes)
+            .ok()
+            .and_then(|maximum| maximum.checked_add(1))
+            .ok_or_else(|| permanent("snapshot output limit overflowed"))?;
+        let available_stdout = limits
+            .max_output_bytes
+            .checked_sub(SNAPSHOT_CAPTURE_METADATA_BYTES as u64)
+            .filter(|available| *available > 0)
+            .ok_or_else(|| permanent("snapshot protocol reserve exceeds the output limit"))?;
+        let stdout_limit = desired_stdout_limit.min(available_stdout);
+        let snapshot_maximum = usize::try_from(stdout_limit - 1)
+            .map_err(|_| permanent("snapshot output limit is not representable"))?;
+        let snapshot_read_limit = snapshot_maximum
+            .checked_add(1)
+            .ok_or_else(|| permanent("snapshot output limit overflowed"))?;
+        let owner = InternalSpoolOwner::new();
+        let result = execute_readonly_fixed(
+            &self.runner,
+            FixedRunRequest {
+                kind: FixedOperationKind::ReadOnly,
+                host: key.host.clone(),
+                script: PATCH_SNAPSHOT_SCRIPT,
+                args: vec![parent, basename, snapshot_maximum.to_string()],
+                stdin: None,
+                rooted_paths: RootedPathInputs {
+                    argument_indices: &[0],
+                    argument_stride: None,
+                    stdin_nul_paths: false,
+                },
+                required_capabilities: &["safe_write"],
+                stdout_limit,
+                stderr_limit: SNAPSHOT_CAPTURE_METADATA_BYTES as u64,
+                timeout: Duration::from_millis(limits.command_timeout_ms),
+                cleanup: owner.registration(),
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .map_err(map_runner_error)?;
+        let stderr = read_small_stream(&result.output, StreamKind::Stderr, SNAPSHOT_PROTOCOL_BYTES)
+            .await
+            .map_err(map_runner_error)?;
+        let stdout = read_small_stream(&result.output, StreamKind::Stdout, snapshot_read_limit)
+            .await
+            .map_err(map_runner_error)?;
+        drop(owner);
+        match parse_snapshot_protocol(&stderr, stdout, snapshot_maximum)
+            .map_err(map_runner_error)?
+        {
+            FileSnapshot::Missing => Ok(RemoteSnapshot {
+                base: RemoteBase::Missing,
+                desired: DesiredState::Deleted,
+            }),
+            FileSnapshot::Regular {
+                bytes,
+                sha256,
+                mode,
+            } => Ok(RemoteSnapshot {
+                base: RemoteBase::Regular { sha256, mode },
+                desired: DesiredState::Present(Arc::from(bytes)),
+            }),
+        }
     }
 
     async fn commit_partition(
@@ -223,28 +299,44 @@ impl SshEditBackend {
 }
 
 impl EditBackend for SshEditBackend {
-    fn fetch_complete<'a>(&'a self, _key: &'a CacheKey) -> EditFuture<'a, RemoteSnapshot> {
-        Box::pin(async { Err(permanent("edit snapshot backend is not connected")) })
+    fn fetch_complete<'a>(&'a self, key: &'a CacheKey) -> EditFuture<'a, RemoteSnapshot> {
+        Box::pin(async move { self.fetch_snapshot(key).await })
     }
 
-    fn commit_batch<'a>(
-        &'a self,
-        host: &'a str,
-        items: Vec<CommitItem>,
-    ) -> EditFuture<'a, Vec<CommitSuccess>> {
+    fn commit_batch<'a>(&'a self, host: &'a str, items: Vec<CommitItem>) -> CommitFuture<'a> {
         Box::pin(async move {
             if items.is_empty() {
-                return Ok(Vec::new());
+                return successful(Vec::new());
             }
             if items.iter().any(|item| item.key.host != host) {
-                return Err(permanent("batch contains a different SSH host"));
+                return failed(permanent("batch contains a different SSH host"));
             }
-            let partitions = partition_items(items, self.runner.config().limits().max_frame_bytes)?;
+            let partitions =
+                match partition_items(items, self.runner.config().limits().max_frame_bytes) {
+                    Ok(partitions) => partitions,
+                    Err(error) => return failed(error),
+                };
             let mut committed = Vec::new();
             for partition in partitions {
-                committed.extend(self.commit_partition(host, partition).await?);
+                match self.commit_partition(host, partition).await {
+                    Ok(outcome) => {
+                        committed.extend(outcome.successes);
+                        if let Some(error) = outcome.error {
+                            return CommitBatchOutcome {
+                                successes: committed,
+                                error: Some(error),
+                            };
+                        }
+                    }
+                    Err(error) => {
+                        return CommitBatchOutcome {
+                            successes: committed,
+                            error: Some(error),
+                        };
+                    }
+                }
             }
-            Ok(committed)
+            successful(committed)
         })
     }
 }
@@ -335,7 +427,7 @@ fn parse_batch_result(
     stdout: &[u8],
     stderr: &[u8],
     items: &[CommitItem],
-) -> Result<Vec<CommitSuccess>, EditError> {
+) -> Result<CommitBatchOutcome, EditError> {
     if !stderr.is_empty() || stdout.last() != Some(&0) {
         return Err(unknown("batch mutation protocol is incomplete"));
     }
@@ -355,9 +447,12 @@ fn parse_batch_result(
             .strip_prefix(b"STATUS=")
             .ok_or_else(|| unknown("batch mutation status is invalid"))?;
         if status == b"CONFLICT" {
-            return Err(EditError {
-                kind: EditErrorKind::Conflict,
-                message: format!("WRITE_CONFLICT: {}", items[index].key.path),
+            return Ok(CommitBatchOutcome {
+                successes,
+                error: Some(EditError {
+                    kind: EditErrorKind::Conflict,
+                    message: format!("WRITE_CONFLICT: {}", items[index].key.path),
+                }),
             });
         }
         if status != b"CHANGED" && status != b"UNCHANGED" {
@@ -392,7 +487,21 @@ fn parse_batch_result(
     if successes.len() != items.len() {
         return Err(unknown("batch mutation result is incomplete"));
     }
-    Ok(successes)
+    Ok(successful(successes))
+}
+
+fn successful(successes: Vec<CommitSuccess>) -> CommitBatchOutcome {
+    CommitBatchOutcome {
+        successes,
+        error: None,
+    }
+}
+
+fn failed(error: EditError) -> CommitBatchOutcome {
+    CommitBatchOutcome {
+        successes: Vec::new(),
+        error: Some(error),
+    }
 }
 
 fn parse_field_usize(field: &[u8], prefix: &[u8]) -> Result<usize, EditError> {
@@ -498,8 +607,9 @@ mod tests {
              INDEX=1\0STATUS=UNCHANGED\0SHA256=-\0MODE=0\0"
         );
         let parsed = parse_batch_result(output.as_bytes(), b"", &[present, deleted]).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[1].base, RemoteBase::Missing);
+        assert_eq!(parsed.successes.len(), 2);
+        assert_eq!(parsed.successes[1].base, RemoteBase::Missing);
+        assert_eq!(parsed.error, None);
     }
 
     #[test]
@@ -510,13 +620,32 @@ mod tests {
             b"",
             std::slice::from_ref(&present),
         )
-        .unwrap_err();
+        .unwrap();
+        assert!(conflict.successes.is_empty());
+        let conflict = conflict.error.unwrap();
         assert_eq!(conflict.kind, EditErrorKind::Conflict);
         assert!(conflict.message.contains("/repo/a"));
         assert_eq!(
             parse_batch_result(b"", b"", &[present]).unwrap_err().kind,
             EditErrorKind::OutcomeUnknown
         );
+    }
+
+    #[test]
+    fn parser_preserves_the_confirmed_prefix_before_a_conflict() {
+        let first = item("/repo/a", DesiredState::Present(Arc::from(&b"first"[..])));
+        let second = item("/repo/b", DesiredState::Present(Arc::from(&b"second"[..])));
+        let first_hash = format!("{:x}", Sha256::digest(b"first"));
+        let output = format!(
+            "INDEX=0\0STATUS=CHANGED\0SHA256={first_hash}\0MODE=384\0\
+             INDEX=1\0STATUS=CONFLICT\0SHA256=-\0MODE=0\0"
+        );
+
+        let parsed = parse_batch_result(output.as_bytes(), b"", &[first, second]).unwrap();
+
+        assert_eq!(parsed.successes.len(), 1);
+        assert_eq!(parsed.successes[0].key.path, "/repo/a");
+        assert_eq!(parsed.error.unwrap().kind, EditErrorKind::Conflict);
     }
 
     #[test]

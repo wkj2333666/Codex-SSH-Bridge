@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use edit_cache::{
-    CacheKey, CommitItem, CommitSuccess, DesiredState, EditBackend, EditCache, EditCacheConfig,
-    EditError, EditErrorKind, EditFuture, Generation, MutationDisposition, RemoteBase,
-    RemoteSnapshot,
+    CacheKey, CommitBatchOutcome, CommitFuture, CommitItem, CommitSuccess, DesiredState,
+    EditBackend, EditCache, EditCacheConfig, EditError, EditErrorKind, EditFuture, Generation,
+    MutationDisposition, RemoteBase, RemoteSnapshot,
 };
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::advance;
@@ -19,6 +19,7 @@ struct FakeBackend {
     fetches: AtomicUsize,
     commits: Mutex<Vec<Vec<CommitItem>>>,
     outcomes: Mutex<VecDeque<Result<(), EditError>>>,
+    partial_failures: Mutex<VecDeque<(usize, EditError)>>,
     blocked_hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
     commit_started: Notify,
 }
@@ -30,6 +31,7 @@ impl FakeBackend {
             fetches: AtomicUsize::new(0),
             commits: Mutex::new(Vec::new()),
             outcomes: Mutex::new(VecDeque::new()),
+            partial_failures: Mutex::new(VecDeque::new()),
             blocked_hosts: Mutex::new(HashMap::new()),
             commit_started: Notify::new(),
         })
@@ -46,6 +48,13 @@ impl FakeBackend {
 
     fn queue_outcome(&self, outcome: Result<(), EditError>) {
         self.outcomes.lock().unwrap().push_back(outcome);
+    }
+
+    fn queue_partial_failure(&self, successful_items: usize, error: EditError) {
+        self.partial_failures
+            .lock()
+            .unwrap()
+            .push_back((successful_items, error));
     }
 
     fn commit_count(&self) -> usize {
@@ -79,27 +88,40 @@ impl EditBackend for FakeBackend {
         })
     }
 
-    fn commit_batch<'a>(
-        &'a self,
-        host: &'a str,
-        items: Vec<CommitItem>,
-    ) -> EditFuture<'a, Vec<CommitSuccess>> {
+    fn commit_batch<'a>(&'a self, host: &'a str, items: Vec<CommitItem>) -> CommitFuture<'a> {
         Box::pin(async move {
             self.commits.lock().unwrap().push(items.clone());
             self.commit_started.notify_waiters();
             let gate = self.blocked_hosts.lock().unwrap().remove(host);
             if let Some(gate) = gate {
-                let _permit = gate.acquire().await.map_err(|_| EditError {
-                    kind: EditErrorKind::Transient,
-                    message: "fake commit blocked".to_owned(),
-                })?;
+                let Ok(_permit) = gate.acquire().await else {
+                    return CommitBatchOutcome {
+                        successes: Vec::new(),
+                        error: Some(EditError {
+                            kind: EditErrorKind::Transient,
+                            message: "fake commit blocked".to_owned(),
+                        }),
+                    };
+                };
             }
             if let Some(outcome) = self.outcomes.lock().unwrap().pop_front() {
-                outcome?;
+                if let Err(error) = outcome {
+                    return CommitBatchOutcome {
+                        successes: Vec::new(),
+                        error: Some(error),
+                    };
+                }
             }
+            let partial_failure = self.partial_failures.lock().unwrap().pop_front();
+            let successful_items = partial_failure
+                .as_ref()
+                .map_or(items.len(), |(successful, _)| {
+                    (*successful).min(items.len())
+                });
             let mut snapshots = self.snapshots.lock().unwrap();
-            Ok(items
+            let successes = items
                 .into_iter()
+                .take(successful_items)
                 .map(|item| {
                     let base = match &item.desired {
                         DesiredState::Present(bytes) => RemoteBase::Regular {
@@ -124,7 +146,11 @@ impl EditBackend for FakeBackend {
                         base,
                     }
                 })
-                .collect())
+                .collect();
+            CommitBatchOutcome {
+                successes,
+                error: partial_failure.map(|(_, error)| error),
+            }
         })
     }
 }
@@ -272,6 +298,57 @@ async fn conflicts_are_sticky_and_retain_the_latest_local_bytes() {
     assert_eq!(
         cache.lookup_complete(&path).await,
         Some(DesiredState::Present(Arc::from(&b"local"[..])))
+    );
+}
+
+#[tokio::test]
+async fn a_partial_batch_applies_confirmed_successes_and_only_poison_unconfirmed_entries() {
+    let first = key("alpha", "/repo/a.rs");
+    let second = key("alpha", "/repo/b.rs");
+    let backend = FakeBackend::new([
+        (first.clone(), regular(b"first-base")),
+        (second.clone(), regular(b"second-base")),
+    ]);
+    backend.queue_partial_failure(
+        1,
+        EditError {
+            kind: EditErrorKind::Conflict,
+            message: "WRITE_CONFLICT".to_owned(),
+        },
+    );
+    let cache = EditCache::new(config(), backend.clone());
+    cache.load_complete(first.clone()).await.unwrap();
+    cache.load_complete(second.clone()).await.unwrap();
+    cache
+        .mutate(
+            first.clone(),
+            DesiredState::Present(Arc::from(&b"first-local"[..])),
+            1,
+        )
+        .await
+        .unwrap();
+    cache
+        .mutate(
+            second.clone(),
+            DesiredState::Present(Arc::from(&b"second-local"[..])),
+            1,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cache.flush_host("alpha").await.unwrap_err().kind,
+        EditErrorKind::Conflict
+    );
+    assert_eq!(backend.commit_count(), 1);
+    let snapshots = backend.snapshots.lock().unwrap();
+    assert_eq!(
+        snapshots.get(&first).unwrap().desired,
+        DesiredState::Present(Arc::from(&b"first-local"[..]))
+    );
+    assert_eq!(
+        snapshots.get(&second).unwrap().desired,
+        DesiredState::Present(Arc::from(&b"second-base"[..]))
     );
 }
 

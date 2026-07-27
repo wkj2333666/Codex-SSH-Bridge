@@ -20,10 +20,10 @@ const MAX_PATCH_HUNKS: usize = 4_096;
 const MAX_PATCH_BODY_LINES: usize = 100_000;
 const MAX_PATCH_PATH_BYTES: usize = 64 * 1024;
 const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file";
-const SNAPSHOT_PROTOCOL_BYTES: usize = 1024;
-const SNAPSHOT_CAPTURE_METADATA_BYTES: usize = 2048;
+pub(super) const SNAPSHOT_PROTOCOL_BYTES: usize = 1024;
+pub(super) const SNAPSHOT_CAPTURE_METADATA_BYTES: usize = 2048;
 
-const PATCH_SNAPSHOT_SCRIPT: &str = r#"
+pub(super) const PATCH_SNAPSHOT_SCRIPT: &str = r#"
 set -u
 [ "$#" -eq 3 ] || exit 2
 parent=$1
@@ -1023,16 +1023,20 @@ struct ResolvedFilePatch {
 }
 
 #[derive(Debug)]
-enum FileSnapshot {
+pub(super) enum FileSnapshot {
     Missing,
-    Regular { bytes: Vec<u8>, sha256: String },
+    Regular {
+        bytes: Vec<u8>,
+        sha256: String,
+        mode: u32,
+    },
 }
 
 impl FileSnapshot {
     fn base(&self) -> Option<(&[u8], &str)> {
         match self {
             Self::Missing => None,
-            Self::Regular { bytes, sha256 } => Some((bytes, sha256)),
+            Self::Regular { bytes, sha256, .. } => Some((bytes, sha256)),
         }
     }
 
@@ -1162,7 +1166,7 @@ fn snapshot_runner_error(mut error: BridgeError) -> BridgeError {
     error
 }
 
-fn parse_snapshot_protocol(
+pub(super) fn parse_snapshot_protocol(
     stderr: &[u8],
     stdout: Vec<u8>,
     maximum_bytes: usize,
@@ -1237,6 +1241,7 @@ fn parse_snapshot_protocol(
             Ok(FileSnapshot::Regular {
                 bytes: stdout,
                 sha256: sha256.to_owned(),
+                mode,
             })
         }
         _ => Err(snapshot_protocol_error(
@@ -1620,11 +1625,17 @@ mod tests {
         );
         let snapshot =
             super::parse_snapshot_protocol(metadata.as_bytes(), raw.clone(), raw.len()).unwrap();
-        let super::FileSnapshot::Regular { bytes, sha256 } = snapshot else {
+        let super::FileSnapshot::Regular {
+            bytes,
+            sha256,
+            mode,
+        } = snapshot
+        else {
             panic!("success did not produce a regular snapshot");
         };
         assert_eq!(bytes, raw);
         assert_eq!(sha256, hash);
+        assert_eq!(mode, 0o600);
 
         let maximum = 64;
         let declared = vec![b'x'; maximum];

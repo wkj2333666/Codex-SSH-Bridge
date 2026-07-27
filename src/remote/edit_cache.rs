@@ -49,6 +49,12 @@ pub(crate) struct CommitSuccess {
     pub(crate) base: RemoteBase,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommitBatchOutcome {
+    pub(crate) successes: Vec<CommitSuccess>,
+    pub(crate) error: Option<EditError>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EditErrorKind {
     Transient,
@@ -64,14 +70,11 @@ pub(crate) struct EditError {
 }
 
 pub(crate) type EditFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EditError>> + Send + 'a>>;
+pub(crate) type CommitFuture<'a> = Pin<Box<dyn Future<Output = CommitBatchOutcome> + Send + 'a>>;
 
 pub(crate) trait EditBackend: Send + Sync {
     fn fetch_complete<'a>(&'a self, key: &'a CacheKey) -> EditFuture<'a, RemoteSnapshot>;
-    fn commit_batch<'a>(
-        &'a self,
-        host: &'a str,
-        items: Vec<CommitItem>,
-    ) -> EditFuture<'a, Vec<CommitSuccess>>;
+    fn commit_batch<'a>(&'a self, host: &'a str, items: Vec<CommitItem>) -> CommitFuture<'a>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -384,7 +387,7 @@ impl EditCache {
             {
                 return Err(error);
             }
-            let items = host_state
+            let mut items = host_state
                 .entries
                 .iter_mut()
                 .filter_map(|(path, entry)| {
@@ -403,6 +406,7 @@ impl EditCache {
                     })
                 })
                 .collect::<Vec<_>>();
+            items.sort_unstable_by(|left, right| left.key.path.cmp(&right.key.path));
             if items.is_empty() {
                 return Ok(FlushProgress::Clean);
             }
@@ -412,26 +416,27 @@ impl EditCache {
             items
         };
 
-        match self.backend.commit_batch(host, items.clone()).await {
-            Ok(successes) => {
-                let mut state = self.state.lock().await;
-                let host_state = state
-                    .hosts
-                    .get_mut(host)
-                    .expect("flushed host state disappeared");
-                for success in successes {
-                    let Some(entry) = host_state.entries.get_mut(&success.key.path) else {
-                        continue;
-                    };
-                    if entry.in_flight != Some(success.generation) {
-                        continue;
-                    }
-                    entry.base = success.base;
-                    entry.in_flight = None;
-                    if entry.generation == success.generation {
-                        entry.dirty = false;
-                    }
-                }
+        let outcome = self.backend.commit_batch(host, items.clone()).await;
+        let mut state = self.state.lock().await;
+        let host_state = state
+            .hosts
+            .get_mut(host)
+            .expect("flushed host state disappeared");
+        for success in outcome.successes {
+            let Some(entry) = host_state.entries.get_mut(&success.key.path) else {
+                continue;
+            };
+            if entry.in_flight != Some(success.generation) {
+                continue;
+            }
+            entry.base = success.base;
+            entry.in_flight = None;
+            if entry.generation == success.generation {
+                entry.dirty = false;
+            }
+        }
+        match outcome.error {
+            None => {
                 host_state.retry_attempt = 0;
                 host_state.retry_deadline = None;
                 host_state.last_transient = None;
@@ -442,12 +447,7 @@ impl EditCache {
                     FlushProgress::Clean
                 })
             }
-            Err(error) => {
-                let mut state = self.state.lock().await;
-                let host_state = state
-                    .hosts
-                    .get_mut(host)
-                    .expect("failed host state disappeared");
+            Some(error) => {
                 for item in items {
                     if let Some(entry) = host_state.entries.get_mut(&item.key.path)
                         && entry.in_flight == Some(item.generation)
