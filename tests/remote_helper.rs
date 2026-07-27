@@ -190,11 +190,16 @@ fn helper_preserves_streams_and_exit_status() {
     send_request(&mut input, 1, cwd, b"printf out; printf err >&2; exit 7");
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let mut ready = false;
     let mut exit = None;
     for _ in 0..8 {
         let frame = read_next(&mut output);
         assert_eq!(frame.request_id, 1);
         match frame.kind {
+            FrameKind::Ready => {
+                assert!(!ready, "helper sent READY more than once");
+                ready = true;
+            }
             FrameKind::Stdout => stdout.extend_from_slice(&frame.payload),
             FrameKind::Stderr => stderr.extend_from_slice(&frame.payload),
             FrameKind::Exit => {
@@ -204,6 +209,7 @@ fn helper_preserves_streams_and_exit_status() {
             other => panic!("unexpected helper frame {other:?}"),
         }
     }
+    assert!(ready, "helper did not acknowledge request admission");
     assert_eq!(stdout, b"out");
     assert_eq!(stderr, b"err");
     assert_eq!(exit.as_deref(), Some(b"7\n0\n0\n0\n0\n".as_slice()));

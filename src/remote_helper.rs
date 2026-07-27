@@ -140,6 +140,14 @@ where
                             send_error(&shared, spec.request_id, "duplicate-request-id")?;
                             continue;
                         }
+                        send_frame(
+                            &shared,
+                            Frame {
+                                kind: FrameKind::Ready,
+                                request_id: spec.request_id,
+                                payload: Vec::new(),
+                            },
+                        )?;
                         let worker_shared = Arc::clone(&shared);
                         workers.push(thread::spawn(move || {
                             run_request(worker_shared, spec, control);
