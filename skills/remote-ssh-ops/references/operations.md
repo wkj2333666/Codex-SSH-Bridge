@@ -94,8 +94,9 @@ owns a pipe, the bridge completes after a bounded drain grace and reports
 remote management. The stdout/stderr preview is a bounded snapshot and may not
 include output produced after the synchronous request boundary. There is not
 yet a persistent background-job ID. Model-visible inline output is capped at
-32 KiB. When a result is too large, `truncated` is true and `output_ref` is a
-32-character opaque reference.
+32 KiB. Successful result text is available as `structuredContent.output` and
+as matching standard MCP `content.text`. When a result is too large,
+`truncated` is true and `output_ref` is a 32-character opaque reference.
 
 Page it with:
 
@@ -103,7 +104,10 @@ Page it with:
 {"output_ref":"<opaque-ref>","stream":"stdout","offset":0,"max_bytes":262144}
 ```
 
-Use `stream:"stderr"` for retained stderr. Advance by the returned byte offset until EOF. The reference already carries host, root, and shell provenance; do not pass a host. Narrow a query instead of repeatedly fetching unbounded logs.
+Use `stream:"stderr"` for retained stderr. Read the returned `output` and
+advance by `next_offset` until `eof` is true. The reference already carries
+host, root, and shell provenance; do not pass a host. Narrow a query instead of
+repeatedly fetching unbounded logs.
 
 ## Direct CLI
 

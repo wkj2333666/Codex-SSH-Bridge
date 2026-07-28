@@ -18,6 +18,13 @@ troubleshooting or add hosts when either representation contains aliases. Only
 an empty hosts array together with empty text means that no aliases were
 discovered.
 
+Other successful tools expose their model-readable result in
+`structuredContent.output`; standard MCP clients receive the same bounded text
+in `content.text`. Read `output` directly when present: it contains listings,
+stat records, search matches, file bodies, write confirmations, retained
+pages, or labeled stdout/stderr. The remaining structured fields carry only
+state such as `exit_code`, `truncated`, `output_ref`, `next_offset`, and `eof`.
+
 The bridge keeps one local-owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities. On a supported Linux host it verifies or installs a private mode-0700 helper under the remote account's `~/.local/share/codex-ssh-bridge/helpers/<bridge-version>/<target>/helper`; the helper process ends with the SSH session, while the verified file is reused after a bridge restart. Warm requests send one framed command with no per-request `ssh -G`, root observation, installation probe, hash, lock, or upload. Unsupported hosts and pre-request helper failures use the ordered temporary-helper then POSIX-dispatcher fallback. Transport mode remains internal diagnostic data. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
 The selected dispatcher applies the absolute cwd, requested shell, and timeout
 directly; the bridge does not insert an additional `sh` or GNU `timeout`
@@ -37,8 +44,8 @@ fails, the requested barrier command or observation does not run.
 1. Call `remote_hosts` with `{}`; select one exact alias from `structuredContent.hosts` or the equivalent newline-delimited `content.text`.
 2. Discover narrowly with `remote_search`, then inspect the relevant files with `remote_read`. Use `remote_list` when the project location is unknown.
 3. Group closely related edits into one logical change, then make each smallest justified change with `remote_apply_patch`. Use `remote_read` to inspect the latest cached generation. Do not use `remote_run` with `cat`, `sed`, `nl`, or `grep` merely to reread edited files. Inspect partial-progress fields before retrying any failed mutation.
-4. Verify once with `remote_run` at a meaningful behavior boundary. Do not batch unrelated changes or postpone a required RED→GREEN verification. Check `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
-5. When `truncated` is true and `output_ref` is present, page it with `remote_output_read`; do not rerun a command merely to recover omitted output.
+4. Verify once with `remote_run` at a meaningful behavior boundary. Do not batch unrelated changes or postpone a required RED→GREEN verification. Read `output`, then check `exit_code`, truncation, mutation uncertainty, and process-continuation uncertainty when present.
+5. When `truncated` is true and `output_ref` is present, page it with `remote_output_read` and read each page's `output`; do not rerun a command merely to recover omitted output.
 
 ## Tool contract
 

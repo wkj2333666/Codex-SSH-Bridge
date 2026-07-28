@@ -185,10 +185,12 @@ The nine MCP tools are:
 
 The default flow is bounded search/read → unified patch → remote verification.
 Calls are synchronous. Normal results mirror familiar local tools: listings,
-search matches, file bodies, and stdout/stderr appear once as concise text,
-while structured fields contain only state such as `exit_code`, truncation, or
-uncertain outcomes. Model-visible inline data is capped at 32 KiB; oversized
-detail is retained under an opaque `output_ref` and paged with
+search matches, file bodies, and stdout/stderr are exposed as concise
+`structuredContent.output`; matching `content.text` remains available to
+standard MCP clients. Other structured fields contain only state such as
+`exit_code`, truncation, or uncertain outcomes. The logical model-visible
+payload is capped at 32 KiB; oversized detail is retained under an opaque
+`output_ref` and paged with
 `remote_output_read`, so the Agent never needs to reconstruct transport logic.
 Errors report factual codes and relevant state without prescribing an action.
 
