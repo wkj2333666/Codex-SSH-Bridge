@@ -87,6 +87,7 @@ pub async fn hosts(
                 RetainedPresentation {
                     text,
                     structured_content: json!({"hosts":hosts}),
+                    expose_output: false,
                     provenance,
                     output_ref: None,
                     truncated: false,
@@ -116,6 +117,7 @@ pub async fn list(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
+                    expose_output: true,
                     provenance,
                     output_ref: None,
                     truncated,
@@ -144,6 +146,7 @@ pub async fn stat(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
+                    expose_output: true,
                     provenance,
                     output_ref: None,
                     truncated: false,
@@ -173,6 +176,7 @@ pub async fn search(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
+                    expose_output: true,
                     provenance,
                     output_ref: None,
                     truncated,
@@ -210,6 +214,7 @@ pub async fn read(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
+                    expose_output: true,
                     provenance,
                     output_ref: None,
                     truncated,
@@ -267,7 +272,7 @@ pub fn output_read(
             metadata["truncated"] = Value::Bool(true);
             metadata["output_ref"] = Value::String(output_ref.to_owned());
         }
-        if let Some(rendered) = complete_text_result(text, metadata, budget) {
+        if let Some(rendered) = complete_text_result(text, metadata, true, budget) {
             return rendered;
         }
         if inline == 0 {
@@ -280,6 +285,7 @@ pub fn output_read(
                     "output_ref":output_ref,
                 }),
                 false,
+                true,
                 budget,
             );
         }
@@ -302,6 +308,7 @@ pub async fn write(
                 RetainedPresentation {
                     text,
                     structured_content: json!({}),
+                    expose_output: true,
                     provenance,
                     output_ref: None,
                     truncated: false,
@@ -329,6 +336,7 @@ pub async fn apply_patch(
                 RetainedPresentation {
                     text: "Done!".to_owned(),
                     structured_content: json!({}),
+                    expose_output: true,
                     provenance,
                     output_ref: None,
                     truncated: false,
@@ -374,6 +382,7 @@ pub async fn run(
                 RetainedPresentation {
                     text,
                     structured_content: metadata,
+                    expose_output: true,
                     provenance,
                     output_ref: existing_ref,
                     truncated: source_truncated,
@@ -390,6 +399,7 @@ pub async fn run(
 struct RetainedPresentation {
     text: String,
     structured_content: Value,
+    expose_output: bool,
     provenance: RetentionProvenance,
     output_ref: Option<String>,
     truncated: bool,
@@ -405,6 +415,7 @@ async fn render_text_retained(
         && let Some(rendered) = complete_text_result(
             presentation.text.clone(),
             presentation.structured_content.clone(),
+            presentation.expose_output,
             budget,
         )
     {
@@ -424,12 +435,19 @@ async fn render_text_retained(
     if let Some(output_ref) = retained {
         metadata.insert("output_ref".to_owned(), Value::String(output_ref));
     }
-    bounded_text_result(presentation.text, Value::Object(metadata), false, budget)
+    bounded_text_result(
+        presentation.text,
+        Value::Object(metadata),
+        false,
+        presentation.expose_output,
+        budget,
+    )
 }
 
 fn complete_text_result(
     text: String,
     structured_content: Value,
+    expose_output: bool,
     budget: WireBudget,
 ) -> Option<CallToolResult> {
     let maximum = model_budget(budget);
@@ -439,6 +457,11 @@ fn complete_text_result(
     if visible > maximum {
         return None;
     }
+    let structured_content = if expose_output {
+        with_output(structured_content, &text)
+    } else {
+        structured_content
+    };
     let result = CallToolResult {
         content: vec![TextContent::new(text)],
         structured_content,
@@ -451,6 +474,7 @@ fn bounded_text_result(
     text: String,
     structured_content: Value,
     is_error: bool,
+    expose_output: bool,
     budget: WireBudget,
 ) -> CallToolResult {
     let structured_bytes = serde_json::to_vec(&structured_content)
@@ -459,9 +483,14 @@ fn bounded_text_result(
     let text_budget = model_budget(budget).saturating_sub(structured_bytes);
     let mut text = truncate_utf8(&text, text_budget);
     loop {
+        let visible_structured = if expose_output {
+            with_output(structured_content.clone(), &text)
+        } else {
+            structured_content.clone()
+        };
         let result = CallToolResult {
             content: vec![TextContent::new(text.clone())],
-            structured_content: structured_content.clone(),
+            structured_content: visible_structured,
             is_error,
         };
         if serialized_at_most(&result, total_budget(budget)) {
@@ -472,6 +501,12 @@ fn bounded_text_result(
         }
         text = truncate_utf8(&text, text.len() / 2);
     }
+}
+
+fn with_output(structured_content: Value, text: &str) -> Value {
+    let mut structured = object(structured_content);
+    structured.insert("output".to_owned(), Value::String(text.to_owned()));
+    Value::Object(structured)
 }
 
 fn truncate_utf8(value: &str, maximum: usize) -> String {
@@ -677,6 +712,7 @@ fn render_error_borrowed(error: &BridgeError, budget: WireBudget) -> CallToolRes
             error_text(error),
             error_structured(error, false),
             true,
+            false,
             budget,
         )
     })
@@ -815,7 +851,13 @@ async fn render_error_retained(
     if let Some(output_ref) = retained {
         structured.insert("output_ref".to_owned(), Value::String(output_ref));
     }
-    bounded_text_result(error_text(&error), Value::Object(structured), true, budget)
+    bounded_text_result(
+        error_text(&error),
+        Value::Object(structured),
+        true,
+        false,
+        budget,
+    )
 }
 
 fn normalize_progress_controls(details: &mut ErrorDetails) {
@@ -999,12 +1041,12 @@ mod tests {
         let metadata_bytes = serde_json::to_vec(&structured).unwrap().len();
         let exact = "x".repeat(MODEL_INLINE_RESULT_BYTES - metadata_bytes);
         assert!(
-            complete_text_result(exact, structured.clone(), roomy_budget()).is_some(),
+            complete_text_result(exact, structured.clone(), false, roomy_budget()).is_some(),
             "an exact 32 KiB model-visible result must fit"
         );
         let over = "x".repeat(MODEL_INLINE_RESULT_BYTES - metadata_bytes + 1);
         assert!(
-            complete_text_result(over, structured, roomy_budget()).is_none(),
+            complete_text_result(over, structured, false, roomy_budget()).is_none(),
             "one byte over the model-visible limit must be retained"
         );
     }
@@ -1094,7 +1136,11 @@ mod tests {
             )
             .await,
         );
-        assert_eq!(rendered["structuredContent"], json!({"exit_code":0}));
+        assert_eq!(rendered["structuredContent"]["exit_code"], 0);
+        assert_eq!(
+            rendered["structuredContent"]["output"],
+            rendered["content"][0]["text"]
+        );
         assert_eq!(
             text_value(&rendered),
             "stdout:\nok\nwarning:\nselected POSIX sh does not support Bash arrays, [[ ]], source, pipefail, or Bash substitutions; use POSIX syntax, or request Bash and ensure it is installed"

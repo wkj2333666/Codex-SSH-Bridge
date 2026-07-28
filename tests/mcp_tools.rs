@@ -126,11 +126,9 @@ async fn remote_run_nonzero_exit_is_a_failed_result_not_an_mcp_error() {
             rendered.get("isError").is_none() || rendered["isError"] == false,
             "completed command failure must not be an MCP protocol/tool error: {rendered}"
         );
-        assert_eq!(
-            rendered["structuredContent"],
-            json!({"exit_code":exit_status})
-        );
+        assert_eq!(rendered["structuredContent"]["exit_code"], exit_status);
         let text = text_content(&rendered);
+        assert_eq!(rendered["structuredContent"]["output"], text);
         assert!(text.contains(&format!("stdout-{exit_status}")), "{text}");
         assert!(text.contains(&format!("stderr-{exit_status}")), "{text}");
         assert!(text.contains("POSIX sh"), "{text}");
@@ -516,7 +514,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         )
         .await;
     assert_no_diagnostic_success_fields(&listed);
-    assert_eq!(listed["structuredContent"], json!({}));
+    assert_eq!(listed["structuredContent"]["output"], text_content(&listed));
     assert!(text_content(&listed).contains("hostile $(touch SHOULD_NOT_EXIST)\nname.txt"));
 
     let stated = session
@@ -526,7 +524,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         )
         .await;
     assert_no_diagnostic_success_fields(&stated);
-    assert_eq!(stated["structuredContent"], json!({}));
+    assert_eq!(stated["structuredContent"]["output"], text_content(&stated));
     let stat_lines = text_content(&stated).lines().collect::<Vec<_>>();
     assert_eq!(stat_lines.len(), 2);
     assert!(text_content(&stated).contains("missing.txt"));
@@ -538,7 +536,10 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         )
         .await;
     assert_no_diagnostic_success_fields(&searched);
-    assert_eq!(searched["structuredContent"], json!({}));
+    assert_eq!(
+        searched["structuredContent"]["output"],
+        text_content(&searched)
+    );
     assert!(text_content(&searched).contains("$(touch SHOULD_NOT_EXIST)"));
 
     let read = session
@@ -548,7 +549,7 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         )
         .await;
     assert_no_diagnostic_success_fields(&read);
-    assert_eq!(read["structuredContent"], json!({}));
+    assert_eq!(read["structuredContent"]["output"], text_content(&read));
     let read_text = text_content(&read);
     assert!(read_text.contains("UTF8_SURFACE"), "read={read_text}");
     assert!(read_text.contains("/wB/"));
@@ -586,7 +587,10 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         )
         .await;
     assert_no_diagnostic_success_fields(&written);
-    assert_eq!(written["structuredContent"], json!({}));
+    assert_eq!(
+        written["structuredContent"]["output"],
+        text_content(&written)
+    );
     assert!(text_content(&written).starts_with("Wrote "));
 
     let patched = session
@@ -602,7 +606,10 @@ async fn task8_complete_surface_all_nine_tools_are_real_json_rpc_calls() {
         )
         .await;
     assert_no_diagnostic_success_fields(&patched);
-    assert_eq!(patched["structuredContent"], json!({}));
+    assert_eq!(
+        patched["structuredContent"]["output"],
+        text_content(&patched)
+    );
     assert_eq!(text_content(&patched), "Done!");
     let cached = session
         .call(
@@ -652,7 +659,11 @@ async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
         )
         .await;
     assert_eq!(default_bash["isError"], Value::Null, "{default_bash}");
-    assert_eq!(default_bash["structuredContent"], json!({"exit_code":0}));
+    assert_eq!(default_bash["structuredContent"]["exit_code"], 0);
+    assert_eq!(
+        default_bash["structuredContent"]["output"],
+        text_content(&default_bash)
+    );
     assert!(!default_bash.to_string().contains("5.2.15"));
     session.close().await;
 
@@ -665,7 +676,11 @@ async fn task8_shell_surface_reports_bash_default_and_explicit_sh() {
         )
         .await;
     assert_eq!(explicit_sh["isError"], Value::Null, "{explicit_sh}");
-    assert_eq!(explicit_sh["structuredContent"], json!({"exit_code":0}));
+    assert_eq!(explicit_sh["structuredContent"]["exit_code"], 0);
+    assert_eq!(
+        explicit_sh["structuredContent"]["output"],
+        text_content(&explicit_sh)
+    );
     assert!(text_content(&explicit_sh).contains("POSIX sh"));
     session.close().await;
 }
@@ -711,7 +726,8 @@ async fn task8_shell_surface_login_metadata_and_local_timeout_are_explicit() {
             json!({"host":"dev","cwd":"/","command":"printf safe","shell":"login"}),
         )
         .await;
-    assert_eq!(run["structuredContent"], json!({"exit_code":0}));
+    assert_eq!(run["structuredContent"]["exit_code"], 0);
+    assert_eq!(run["structuredContent"]["output"], text_content(&run));
     session.close().await;
 
     let (_runtime, _log, tools) = fake_remote_tools_with_options(remote.path(), false, &[]);
@@ -1247,11 +1263,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
     let read_text = text_content(&read);
     assert!(read_text.contains("UTF8_SENTINEL"));
     assert!(read_text.contains("/wB/"), "binary content must be base64");
-    assert!(
-        !read["structuredContent"]
-            .to_string()
-            .contains("UTF8_SENTINEL")
-    );
+    assert_eq!(read["structuredContent"]["output"], read_text);
 
     let searched = call_json(
         &tools,
@@ -1284,7 +1296,10 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         }),
     )
     .await;
-    assert_eq!(written["structuredContent"], json!({}));
+    assert_eq!(
+        written["structuredContent"]["output"],
+        text_content(&written)
+    );
     assert!(text_content(&written).starts_with("Wrote "));
     assert!(
         !remote.path().join("created.txt").exists(),
@@ -1310,7 +1325,10 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         }),
     )
     .await;
-    assert_eq!(patched["structuredContent"], json!({}));
+    assert_eq!(
+        patched["structuredContent"]["output"],
+        text_content(&patched)
+    );
     assert_eq!(text_content(&patched), "Done!");
     let cached_patch = call_json(
         &tools,
