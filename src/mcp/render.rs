@@ -1102,6 +1102,87 @@ mod tests {
         assert!(!rendered.to_string().contains("persistent"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn codex_structured_run_output_contains_stdout_and_stderr() {
+        let (_runtime, bridge) = bridge_fixture();
+        let rendered = result_value(
+            run(
+                bridge,
+                Ok(RemoteRunResult {
+                    context: context(),
+                    exit_status: 7,
+                    elapsed_ms: 1,
+                    stdout: EncodedOutputPreview {
+                        head: encoded("stdout sentinel"),
+                        tail: encoded("stdout sentinel"),
+                        raw_bytes: 15,
+                        truncated: false,
+                    },
+                    stderr: EncodedOutputPreview {
+                        head: encoded("stderr sentinel"),
+                        tail: encoded("stderr sentinel"),
+                        raw_bytes: 15,
+                        truncated: false,
+                    },
+                    aggregate_bytes: 30,
+                    output_ref: None,
+                    remote_process_may_continue: false,
+                    warnings: Vec::new(),
+                }),
+                roomy_budget(),
+                CancellationToken::new(),
+            )
+            .await,
+        );
+
+        assert_eq!(rendered["structuredContent"]["exit_code"], 7);
+        assert_eq!(
+            rendered["structuredContent"]["output"],
+            "stdout:\nstdout sentinel\nstderr:\nstderr sentinel\nwarning:\nselected POSIX sh does not support Bash arrays, [[ ]], source, pipefail, or Bash substitutions; use POSIX syntax, or request Bash and ensure it is installed"
+        );
+        assert_eq!(
+            rendered["structuredContent"]["output"],
+            rendered["content"][0]["text"]
+        );
+        assert_eq!(rendered.get("isError"), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn codex_structured_read_output_contains_file_body() {
+        let (_runtime, bridge) = bridge_fixture();
+        let rendered = result_value(
+            read(
+                bridge,
+                Ok(ReadResult {
+                    context: context(),
+                    files: vec![ReadEntry::Success {
+                        actual_path: encoded("/srv/root/example.txt"),
+                        relative_path: encoded("example.txt"),
+                        content: encoded("file body sentinel"),
+                        raw_bytes: 18,
+                        sha256: "0".repeat(64),
+                        truncated_before: false,
+                        truncated_after: false,
+                        truncated: false,
+                    }],
+                    returned_raw_bytes: 18,
+                }),
+                roomy_budget(),
+                CancellationToken::new(),
+            )
+            .await,
+        );
+
+        assert_eq!(
+            rendered["structuredContent"]["output"],
+            "file body sentinel"
+        );
+        assert_eq!(
+            rendered["structuredContent"]["output"],
+            rendered["content"][0]["text"]
+        );
+    }
+
     #[test]
     fn task8_error_rendering_roomy_text_preserves_exact_progress_partitions() {
         let mut error = BridgeError::new(ErrorCode::WriteConflict, "patch failed", false);
@@ -1227,6 +1308,10 @@ mod tests {
         assert_eq!(rendered["structuredContent"]["eof"], false);
         assert_eq!(rendered["structuredContent"]["truncated"], true);
         assert!(rendered["structuredContent"].get("aggregate").is_none());
+        assert_eq!(
+            rendered["structuredContent"]["output"],
+            rendered["content"][0]["text"]
+        );
     }
 
     #[test]
