@@ -2369,7 +2369,7 @@ mod tests {
             ("FAKE_SSH_HAS_SAFE_WRITE", "0".to_owned()),
         ]);
         let owner = InternalSpoolOwner::new();
-        let error = fixture
+        let result = fixture
             .runner
             .execute_fixed_once(
                 task5_fixed_request(
@@ -2628,8 +2628,11 @@ mod tests {
                 ),
                 CancellationToken::new(),
             )
-            .await
-            .unwrap_err();
+            .await;
+        let error = match result {
+            Ok(_) => panic!("fixed setup unexpectedly received a fresh connect budget"),
+            Err(error) => error,
+        };
 
         assert_eq!(error.code, ErrorCode::ConnectTimeout);
         assert!(
