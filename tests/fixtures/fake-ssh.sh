@@ -45,6 +45,12 @@ log_call() {
     fi
 }
 
+delay_session_start() {
+    if [ -n "${FAKE_SSH_SESSION_START_SLEEP_SECONDS:-}" ]; then
+        run_fake_sleep "$FAKE_SSH_SESSION_START_SLEEP_SECONDS"
+    fi
+}
+
 emit_bytes() {
     byte_count=$1
     target=$2
@@ -132,6 +138,7 @@ done
 case "$remote_command" in
 	*codex-ssh-dispatcher-1*)
         log_call S "$@"
+        delay_session_start
         CODEX_SSH_BRIDGE_TEST_MODE=1 \
         CODEX_SSH_BRIDGE_TEST_CALL_LOG=${FAKE_SSH_LOG-} \
         CODEX_SSH_LOCAL_FIXED_PATH_ONCE=${FAKE_SSH_LOCAL_FIXED_PATH_ONCE-} \
@@ -140,10 +147,12 @@ case "$remote_command" in
         ;;
 	*codex-ssh-helper-bootstrap-1*)
 		log_call S "$@"
+		delay_session_start
 		exec /bin/sh -c "$remote_command"
 		;;
 	*codex-ssh-persistent-helper-bootstrap-1*)
 		log_call S "$@"
+		delay_session_start
 		if [ "${FAKE_SSH_PERSISTENT_FAIL:-0}" = 1 ]; then
 			printf '%s\n' 'persistent helper fixture failure' >&2
 			exit "${FAKE_SSH_PERSISTENT_FAIL_STATUS:-255}"

@@ -2142,10 +2142,20 @@ mod tests {
     }
 
     fn task5_fixed_fixture(environment: &[(&str, String)]) -> Task5FixedFixture {
+        task5_fixed_fixture_with_limits(environment, crate::config::Limits::default())
+    }
+
+    fn task5_fixed_fixture_with_limits(
+        environment: &[(&str, String)],
+        limits: crate::config::Limits,
+    ) -> Task5FixedFixture {
         let base = tempfile::TempDir::new().unwrap();
         let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
         let output = Arc::new(OutputStore::new(&runtime).unwrap());
-        let mut config = Config::default();
+        let mut config = Config {
+            limits,
+            ..Config::default()
+        };
         config.hosts.insert(
             "dev".to_owned(),
             HostProfile {
@@ -2585,5 +2595,50 @@ mod tests {
         assert_eq!(error.details.mutation_may_have_applied, Some(true));
         assert!(task5_call_count(&setup_log, "C") <= 1);
         assert_eq!(task5_internal_spool_file_count(&fixture.runtime), 0);
+    }
+
+    #[tokio::test]
+    async fn fixed_setup_consumes_one_connect_budget_across_probe_and_session_start() {
+        let logs = tempfile::TempDir::new().unwrap();
+        let log = logs.path().join("fixed-connect-budget.log");
+        let limits = crate::config::Limits {
+            connect_timeout_ms: 300,
+            ..crate::config::Limits::default()
+        };
+        let fixture = task5_fixed_fixture_with_limits(
+            &[
+                ("FAKE_SSH_LOG", log.display().to_string()),
+                ("FAKE_SSH_PROBE_SLEEP_SECONDS", "0.2".to_owned()),
+                ("FAKE_SSH_SESSION_START_SLEEP_SECONDS", "0.2".to_owned()),
+            ],
+            limits,
+        );
+        let owner = InternalSpoolOwner::new();
+
+        let started = Instant::now();
+        let error = fixture
+            .runner
+            .execute_fixed_once(
+                task5_fixed_request(
+                    FixedOperationKind::ReadOnly,
+                    Duration::from_secs(2),
+                    owner.registration(),
+                    16,
+                    16,
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ConnectTimeout);
+        assert!(
+            started.elapsed() < Duration::from_millis(600),
+            "fixed setup exceeded one connect budget plus bounded cleanup: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(task5_call_count(&log, "P"), 1);
+        assert_eq!(task5_call_count(&log, "S"), 1);
+        assert_eq!(task5_call_count(&log, "C"), 0);
     }
 }

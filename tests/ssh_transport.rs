@@ -2628,6 +2628,47 @@ async fn five_commands_are_not_head_of_line_blocked() {
 }
 
 #[tokio::test]
+async fn run_setup_consumes_one_connect_budget_across_probe_and_session_start() {
+    let controls = TempDir::new().unwrap();
+    let log = controls.path().join("calls.log");
+    let limits = Limits {
+        connect_timeout_ms: 300,
+        ..Limits::default()
+    };
+    let fixture = task3_runner(
+        &["dev"],
+        limits,
+        Duration::from_secs(600),
+        &[
+            ("FAKE_SSH_LOG", log.display().to_string()),
+            ("FAKE_SSH_PROBE_SLEEP_SECONDS", "0.2".to_owned()),
+            ("FAKE_SSH_SESSION_START_SLEEP_SECONDS", "0.2".to_owned()),
+        ],
+    );
+
+    let started = Instant::now();
+    let error = fixture
+        .runner
+        .execute(
+            request("dev", ShellRequest::Sh, Duration::from_secs(2)),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::ConnectTimeout);
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "setup exceeded one connect budget plus bounded cleanup: {:?}",
+        started.elapsed()
+    );
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(calls.lines().any(|line| line == "P"));
+    assert!(calls.lines().any(|line| line == "S"));
+    assert!(!calls.lines().any(|line| line == "C"));
+}
+
+#[tokio::test]
 async fn unconfirmed_cancellation_retires_the_session_before_follow_up() {
     let log_dir = TempDir::new().unwrap();
     let log = log_dir.path().join("calls.log");
