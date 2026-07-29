@@ -2396,7 +2396,7 @@ mod tests {
         let owner = InternalSpoolOwner::new();
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let result = fixture
+        let error = fixture
             .runner
             .execute_fixed_once(
                 task5_fixed_request(
