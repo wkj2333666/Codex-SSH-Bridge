@@ -41,7 +41,7 @@ pub(crate) struct SessionRequest {
     pub(crate) env: std::collections::BTreeMap<String, Option<String>>,
     pub(crate) stdin: Option<Vec<u8>>,
     pub(crate) timeout: Duration,
-    pub(crate) admission_timeout: Duration,
+    pub(crate) admission_deadline: Instant,
     pub(crate) response_timeout: Duration,
     pub(crate) stdout_limit: u64,
     pub(crate) stderr_limit: u64,
@@ -630,7 +630,6 @@ impl HostSession {
         cancel: CancellationToken,
     ) -> BridgeResult<SessionResult> {
         let started = Instant::now();
-        let send_deadline = started + request.admission_timeout;
         let request_id = self.inner.next_request_id()?;
         let _request_profile = crate::bridge_profile_span!(crate::profile::ProfileEvent {
             phase: "session_request",
@@ -692,7 +691,7 @@ impl HostSession {
         let send = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(cancelled_error(&self.inner.host, false)),
-            result = timeout_at(send_deadline, self.inner.send(Outbound { frames })) => {
+            result = timeout_at(request.admission_deadline, self.inner.send(Outbound { frames })) => {
                 match result {
                     Ok(result) => result,
                     Err(_) => Err(timeout_error(&self.inner.host, false)),
@@ -708,7 +707,6 @@ impl HostSession {
         // Request admission includes the local writer queue, transport, and
         // complete remote request decoding. The remote READY frame is the
         // boundary at which command execution (and its watchdog) begins.
-        let admission_deadline = Instant::now() + request.admission_timeout;
         tokio::select! {
             biased;
             result = &mut receiver => {
@@ -720,7 +718,7 @@ impl HostSession {
             () = cancel.cancelled() => {
                 return self.abort_request(request_id, &mut receiver, false).await;
             }
-            () = tokio::time::sleep_until(admission_deadline) => {
+            () = tokio::time::sleep_until(request.admission_deadline) => {
                 return self.abort_request(request_id, &mut receiver, true).await;
             }
         }
@@ -1569,7 +1567,7 @@ mod tests {
             env: BTreeMap::new(),
             stdin: None,
             timeout,
-            admission_timeout: timeout,
+            admission_deadline: Instant::now() + timeout,
             response_timeout: timeout,
             stdout_limit: 1024,
             stderr_limit: 1024,
