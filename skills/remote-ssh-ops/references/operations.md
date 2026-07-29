@@ -45,6 +45,9 @@ All objects reject unknown fields. MCP paths are absolute remote paths. The brid
 | `remote_search` | `host`, `query`, absolute `path` | `globs`, `max_results`, `binary` |
 | `remote_read` | `host`, `paths` array | `start_line`, `max_lines`, `max_bytes` |
 | `remote_output_read` | `output_ref`, `stream` | `offset`, `max_bytes` |
+| `remote_edit_status` | `host` | none |
+| `remote_sync_edits` | `host` | none |
+| `remote_discard_edits` | `host` | none |
 | `remote_apply_patch` | `host`, unified `patch` | none |
 | `remote_write` | `host`, `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
 | `remote_run` | `host`, `command` string, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin` |
@@ -55,10 +58,13 @@ Successful writes and patches may remain briefly in the bridge's bounded
 in-memory edit cache. Complete reads and later edits observe the newest cached
 generation. Synchronization occurs within 30 seconds, at 16 KiB of edit
 payload, before `remote_run`, `remote_stat`, `remote_list`, or `remote_search`,
-and once on clean MCP shutdown. This is bridge-owned; do not track generations
-or invent a flush call. If SSH disconnects or the bridge exits abnormally,
-buffered writes may fail. A synchronization failure prevents the following
-barrier operation from starting.
+and once on clean MCP shutdown. This is bridge-owned during the normal edit
+path; do not track generations or add extra synchronization calls. If SSH
+disconnects or the bridge exits abnormally, buffered writes may fail. A
+synchronization failure prevents the following barrier operation from starting.
+For uncertain buffered edits, use `remote_edit_status` to inspect local facts,
+`remote_sync_edits` to retry synchronization, or `remote_discard_edits` to drop
+the local uncertain cache before observing the remote state again.
 
 Search queries are case-sensitive fixed strings, not regular expressions. Unified patch headers must name the same absolute path (or `/dev/null` for create/delete); the bridge accepts conventional `a//absolute/path` and `b//absolute/path` forms as well as direct absolute headers. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
 

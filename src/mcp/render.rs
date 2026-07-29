@@ -8,10 +8,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{BridgeError, ErrorCode, ErrorDetails};
 use crate::remote::{
-    AggregateKind, ApplyPatchResult, EncodedValue, HostsResult, ListResult, OutputReadResult,
-    ReadEntry, ReadResult, RemoteBridge, RemoteContext, RemoteFileKind, RemoteRunResult,
-    RetentionProvenance, SearchResult, ShellMetadata, ShellName, StatEntry, StatResult,
-    ValueEncoding, WriteResult,
+    AggregateKind, ApplyPatchResult, DiscardEditsResult, EditStatusResult, EncodedValue,
+    HostsResult, ListResult, OutputReadResult, ReadEntry, ReadResult, RemoteBridge, RemoteContext,
+    RemoteFileKind, RemoteRunResult, RetentionProvenance, SearchResult, ShellMetadata, ShellName,
+    StatEntry, StatResult, SyncEditsResult, ValueEncoding, WriteResult,
 };
 
 use super::{CallToolResult, TextContent, WireBudget};
@@ -293,6 +293,78 @@ pub fn output_read(
     }
 }
 
+pub fn edit_status(
+    result: Result<EditStatusResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => {
+            let text = edit_status_text(&result);
+            let structured = json!({
+                "pending_paths": result.pending_paths,
+                "outcome_unknown_paths": result.outcome_unknown_paths,
+                "pending_payload_bytes": result.pending_payload_bytes,
+                "cached_bytes": result.cached_bytes,
+            });
+            complete_text_result(text, structured.clone(), true, budget)
+                .unwrap_or_else(|| compact_result(structured, false))
+        }
+        Err(error) => render_error(error, budget),
+    }
+}
+
+pub fn sync_edits(
+    result: Result<SyncEditsResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => {
+            let text = format!(
+                "Synchronized edits for {}\npending_paths: {}\noutcome_unknown_paths: {}\npending_payload_bytes: {}",
+                result.host,
+                result.pending_paths.len(),
+                result.outcome_unknown_paths.len(),
+                result.pending_payload_bytes
+            );
+            let structured = json!({
+                "pending_paths": result.pending_paths,
+                "outcome_unknown_paths": result.outcome_unknown_paths,
+                "pending_payload_bytes": result.pending_payload_bytes,
+            });
+            complete_text_result(text, structured.clone(), true, budget)
+                .unwrap_or_else(|| compact_result(structured, false))
+        }
+        Err(error) => render_error(error, budget),
+    }
+}
+
+pub fn discard_edits(
+    result: Result<DiscardEditsResult, BridgeError>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(result) => {
+            let text = format!(
+                "Discarded edits for {}\ndiscarded_paths: {}\ndiscarded_payload_bytes: {}\nhad_outcome_unknown: {}",
+                result.host,
+                result.discarded_paths.len(),
+                result.discarded_payload_bytes,
+                result.had_outcome_unknown
+            );
+            let structured = json!({
+                "discarded_paths": result.discarded_paths,
+                "discarded_payload_bytes": result.discarded_payload_bytes,
+                "had_outcome_unknown": result.had_outcome_unknown,
+                "pending_paths": result.pending_paths,
+                "outcome_unknown_paths": result.outcome_unknown_paths,
+            });
+            complete_text_result(text, structured.clone(), true, budget)
+                .unwrap_or_else(|| compact_result(structured, false))
+        }
+        Err(error) => render_error(error, budget),
+    }
+}
+
 pub async fn write(
     bridge: Arc<RemoteBridge>,
     result: Result<WriteResult, BridgeError>,
@@ -536,6 +608,17 @@ fn encoded_bytes_text(bytes: &[u8], preferred: ValueEncoding) -> String {
     format!(
         "base64:{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+fn edit_status_text(result: &EditStatusResult) -> String {
+    format!(
+        "Edit cache for {}\npending_paths: {}\noutcome_unknown_paths: {}\npending_payload_bytes: {}\ncached_bytes: {}",
+        result.host,
+        result.pending_paths.len(),
+        result.outcome_unknown_paths.len(),
+        result.pending_payload_bytes,
+        result.cached_bytes
     )
 }
 

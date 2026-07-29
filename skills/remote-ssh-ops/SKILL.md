@@ -35,9 +35,13 @@ bounded in-memory edit cache. Later complete reads and edits in this task see
 that latest local generation immediately. The bridge synchronizes within 30
 seconds, after 16 KiB of edit payload, before `remote_run`, `remote_stat`,
 `remote_list`, or `remote_search`, and once on clean MCP shutdown. Do not
-manage generations or request a manual flush. If the connection is interrupted
-or the bridge exits abnormally, a buffered write may fail; when synchronization
-fails, the requested barrier command or observation does not run.
+manage generations or request extra synchronization during normal editing. If
+the connection is interrupted or the bridge exits abnormally, a buffered write
+may fail; when synchronization fails, the requested barrier command or
+observation does not run. If the bridge reports uncertain buffered edits, call
+`remote_edit_status` for facts. Use `remote_sync_edits` when preserving the
+cached edit is intended, or `remote_discard_edits` when restoring observation
+of the remote state is more important.
 
 ## Default workflow
 
@@ -54,6 +58,9 @@ fails, the requested barrier command or observation does not run.
 - `remote_search`: `{host, query, path, globs?, max_results?, binary?}`; `path` must be absolute. `query` is a case-sensitive literal, not a regex. Use `globs`, not invented exclude or kind fields.
 - `remote_read`: `{host, paths:[...], start_line?, max_lines?, max_bytes?}`; reads are line-based and bounded.
 - `remote_output_read`: `{output_ref, stream:"stdout"|"stderr", offset?, max_bytes?}`; do not add a host.
+- `remote_edit_status`: `{host}`; inspects local buffered edit state without touching the remote host.
+- `remote_sync_edits`: `{host}`; retries synchronization of buffered edits for one host.
+- `remote_discard_edits`: `{host}`; discards local buffered or uncertain edits for one host.
 - `remote_apply_patch`: `{host, patch}`; patch headers must use absolute paths (or `/dev/null`), with no cwd field.
 - `remote_write`: `{host, path, content, encoding, mode}`. Prefer patching. For replacement, supply the observed SHA-256 when available.
 - `remote_run`: `{host, command, cwd, shell?, timeout_ms?, stdin?}`; `cwd` must be absolute. `command` is one shell command string. For an HTTP server, viewer, or other long-lived process, explicitly detach it from stdin/stdout/stderr and its request process group; do not leave an ad-hoc background job inheriting bridge pipes. stdin is an object `{encoding:"utf8"|"base64", value}`.

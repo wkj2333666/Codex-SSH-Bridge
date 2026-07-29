@@ -241,6 +241,68 @@ impl RemoteBridge {
         self.edit_cache.shutdown().await.map_err(edit_bridge_error)
     }
 
+    pub async fn edit_status(&self, request: EditStatusRequest) -> BridgeResult<EditStatusResult> {
+        self.runner
+            .config()
+            .require_discovered_alias(&request.host)?;
+        let status = self.edit_cache.host_status(&request.host).await;
+        Ok(EditStatusResult {
+            remote: true,
+            host: request.host,
+            pending_paths: status.pending_paths,
+            outcome_unknown_paths: status.outcome_unknown_paths,
+            pending_payload_bytes: status.pending_payload_bytes,
+            cached_bytes: status.cached_bytes,
+        })
+    }
+
+    pub async fn sync_edits(&self, request: SyncEditsRequest) -> BridgeResult<SyncEditsResult> {
+        self.runner
+            .config()
+            .require_discovered_alias(&request.host)?;
+        let _guard = self.edit_cache.begin_barrier(&request.host).await;
+        if let Err(error) = self
+            .edit_cache
+            .retry_outcome_unknown_host(&request.host)
+            .await
+        {
+            let error = edit_bridge_error(error);
+            return Err(match self.edit_backend.context_for(&request.host).await {
+                Some(context) => attach_remote_context(error, &context),
+                None => error,
+            });
+        }
+        let status = self.edit_cache.host_status(&request.host).await;
+        Ok(SyncEditsResult {
+            remote: true,
+            host: request.host,
+            pending_paths: status.pending_paths,
+            outcome_unknown_paths: status.outcome_unknown_paths,
+            pending_payload_bytes: status.pending_payload_bytes,
+        })
+    }
+
+    pub async fn discard_edits(
+        &self,
+        request: DiscardEditsRequest,
+    ) -> BridgeResult<DiscardEditsResult> {
+        self.runner
+            .config()
+            .require_discovered_alias(&request.host)?;
+        let _guard = self.edit_cache.begin_barrier(&request.host).await;
+        let discarded = self.edit_cache.discard_host_edits(&request.host).await;
+        let status = self.edit_cache.host_status(&request.host).await;
+        Ok(DiscardEditsResult {
+            remote: true,
+            host: request.host,
+            discarded_paths: discarded.discarded_paths,
+            discarded_payload_bytes: discarded.discarded_payload_bytes,
+            had_outcome_unknown: discarded.had_outcome_unknown,
+            pending_paths: status.pending_paths,
+            outcome_unknown_paths: status.outcome_unknown_paths,
+        })
+    }
+
     pub async fn list(
         &self,
         request: ListRequest,
@@ -858,6 +920,21 @@ pub struct ApplyPatchRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditStatusRequest {
+    pub host: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncEditsRequest {
+    pub host: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardEditsRequest {
+    pub host: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GuardedDeleteRequest {
     pub host: String,
     pub path: String,
@@ -1122,6 +1199,36 @@ pub struct ApplyPatchResult {
     #[serde(flatten)]
     pub context: RemoteContext,
     pub changed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EditStatusResult {
+    pub remote: bool,
+    pub host: String,
+    pub pending_paths: Vec<String>,
+    pub outcome_unknown_paths: Vec<String>,
+    pub pending_payload_bytes: usize,
+    pub cached_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SyncEditsResult {
+    pub remote: bool,
+    pub host: String,
+    pub pending_paths: Vec<String>,
+    pub outcome_unknown_paths: Vec<String>,
+    pub pending_payload_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiscardEditsResult {
+    pub remote: bool,
+    pub host: String,
+    pub discarded_paths: Vec<String>,
+    pub discarded_payload_bytes: usize,
+    pub had_outcome_unknown: bool,
+    pub pending_paths: Vec<String>,
+    pub outcome_unknown_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

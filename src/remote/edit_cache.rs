@@ -156,6 +156,21 @@ pub(crate) struct EditCache {
     state: Mutex<CacheState>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostEditStatus {
+    pub(crate) pending_paths: Vec<String>,
+    pub(crate) outcome_unknown_paths: Vec<String>,
+    pub(crate) pending_payload_bytes: usize,
+    pub(crate) cached_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscardHostEdits {
+    pub(crate) discarded_paths: Vec<String>,
+    pub(crate) discarded_payload_bytes: usize,
+    pub(crate) had_outcome_unknown: bool,
+}
+
 struct CacheState {
     hosts: HashMap<String, HostState>,
     cached_bytes: usize,
@@ -539,6 +554,113 @@ impl EditCache {
                 FlushProgress::Clean => return Ok(()),
                 FlushProgress::More => {}
             }
+        }
+    }
+
+    pub(crate) async fn host_status(&self, host: &str) -> HostEditStatus {
+        let state = self.state.lock().await;
+        let Some(host_state) = state.hosts.get(host) else {
+            return HostEditStatus {
+                pending_paths: Vec::new(),
+                outcome_unknown_paths: Vec::new(),
+                pending_payload_bytes: 0,
+                cached_bytes: state.cached_bytes,
+            };
+        };
+        let mut pending_paths = Vec::new();
+        let mut outcome_unknown_paths = Vec::new();
+        let mut pending_payload_bytes = 0usize;
+        for (path, entry) in &host_state.entries {
+            let pending = entry.dirty || entry.in_flight.is_some() || entry.conflict.is_some();
+            if pending {
+                pending_paths.push(path.clone());
+                pending_payload_bytes =
+                    pending_payload_bytes.saturating_add(desired_size(&entry.desired));
+            }
+            if entry
+                .conflict
+                .as_ref()
+                .is_some_and(|error| error.kind == EditErrorKind::OutcomeUnknown)
+            {
+                outcome_unknown_paths.push(path.clone());
+            }
+        }
+        pending_paths.sort_unstable();
+        outcome_unknown_paths.sort_unstable();
+        HostEditStatus {
+            pending_paths,
+            outcome_unknown_paths,
+            pending_payload_bytes,
+            cached_bytes: state.cached_bytes,
+        }
+    }
+
+    pub(crate) async fn retry_outcome_unknown_host(&self, host: &str) -> Result<(), EditError> {
+        {
+            let mut state = self.state.lock().await;
+            if let Some(host_state) = state.hosts.get_mut(host) {
+                for entry in host_state.entries.values_mut() {
+                    if entry
+                        .conflict
+                        .as_ref()
+                        .is_some_and(|error| error.kind == EditErrorKind::OutcomeUnknown)
+                    {
+                        entry.conflict = None;
+                        entry.dirty = true;
+                    }
+                }
+            }
+        }
+        self.flush_host(host).await
+    }
+
+    pub(crate) async fn discard_host_edits(&self, host: &str) -> DiscardHostEdits {
+        let mut state = self.state.lock().await;
+        let Some(host_state) = state.hosts.get_mut(host) else {
+            return DiscardHostEdits {
+                discarded_paths: Vec::new(),
+                discarded_payload_bytes: 0,
+                had_outcome_unknown: false,
+            };
+        };
+        let mut discarded_paths = Vec::new();
+        let mut discarded_payload_bytes = 0usize;
+        let mut removed_cache_bytes = 0usize;
+        let mut had_outcome_unknown = false;
+        host_state.entries.retain(|path, entry| {
+            let pending = entry.dirty || entry.in_flight.is_some() || entry.conflict.is_some();
+            if !pending {
+                return true;
+            }
+            discarded_paths.push(path.clone());
+            discarded_payload_bytes =
+                discarded_payload_bytes.saturating_add(desired_size(&entry.desired));
+            removed_cache_bytes = removed_cache_bytes.saturating_add(desired_size(&entry.desired));
+            had_outcome_unknown |= entry
+                .conflict
+                .as_ref()
+                .is_some_and(|error| error.kind == EditErrorKind::OutcomeUnknown);
+            false
+        });
+        discarded_paths.sort_unstable();
+        if discarded_paths.is_empty() {
+            return DiscardHostEdits {
+                discarded_paths,
+                discarded_payload_bytes: 0,
+                had_outcome_unknown,
+            };
+        }
+        host_state.dirty_payload_bytes = 0;
+        host_state.first_dirty_deadline = None;
+        host_state.retry_deadline = None;
+        host_state.retry_attempt = 0;
+        host_state.last_transient = None;
+        host_state.runtime.changed.notify_waiters();
+        state.cached_bytes = state.cached_bytes.saturating_sub(removed_cache_bytes);
+        DiscardHostEdits {
+            discarded_paths,
+            discarded_payload_bytes,
+            had_outcome_unknown,
         }
     }
 

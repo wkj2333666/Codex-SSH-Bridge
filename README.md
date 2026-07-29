@@ -177,11 +177,11 @@ Use $remote-ssh-ops to inspect the devbox repository, patch the timeout bug, and
 Use $remote-ssh-ops to search devbox logs without downloading unbounded output.
 ```
 
-The nine MCP tools are:
+The twelve MCP tools are:
 
 | Read-oriented | Mutation/command |
 |---|---|
-| `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read` | `remote_apply_patch`, `remote_write`, `remote_run` |
+| `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read`, `remote_edit_status` | `remote_apply_patch`, `remote_write`, `remote_run`, `remote_sync_edits`, `remote_discard_edits` |
 
 The default flow is bounded search/read → unified patch → remote verification.
 Calls are synchronous. Normal results mirror familiar local tools: listings,
@@ -202,7 +202,10 @@ the first guarded snapshot. Dirty edits synchronize within 30 seconds, after
 16 KiB of edit payload, before commands and filesystem-wide observations, or
 on clean MCP shutdown. An SSH interruption or abnormal bridge exit can lose an
 unsynchronized edit; a failed synchronization prevents its barrier operation
-from starting.
+from starting. If a host enters an uncertain edit state, inspect the local
+cache with `remote_edit_status`, retry synchronization with `remote_sync_edits`,
+or discard the local uncertain edits with `remote_discard_edits` before
+observing the remote state again.
 
 Operational requests use one persistent SSH session per alias and are
 multiplexed without bridge-defined host or concurrency admission limits.

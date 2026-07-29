@@ -194,6 +194,13 @@ fn config() -> EditCacheConfig {
     }
 }
 
+fn config_with_flush_threshold(flush_threshold_bytes: usize) -> EditCacheConfig {
+    EditCacheConfig {
+        flush_threshold_bytes,
+        ..config()
+    }
+}
+
 #[tokio::test]
 async fn complete_fetch_is_cached_but_a_partial_miss_does_not_create_an_entry() {
     let path = key("alpha", "/repo/a.rs");
@@ -314,6 +321,83 @@ async fn conflicts_are_sticky_and_retain_the_latest_local_bytes() {
     assert_eq!(
         cache.lookup_complete(&path).await,
         Some(DesiredState::Present(Arc::from(&b"local"[..])))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn outcome_unknown_can_be_inspected_and_discarded_without_restarting() {
+    let path = key("alpha", "/repo/a.rs");
+    let local: Arc<[u8]> = vec![b'x'; 66 * 1024].into();
+    let backend = FakeBackend::new([(path.clone(), regular(b"base"))]);
+    backend.queue_outcome(Err(EditError {
+        kind: EditErrorKind::OutcomeUnknown,
+        code: None,
+        message: "MUTATION_OUTCOME_UNKNOWN".to_owned(),
+    }));
+    let cache = EditCache::new(config_with_flush_threshold(128 * 1024), backend.clone());
+    cache.load_complete(path.clone()).await.unwrap();
+    cache
+        .mutate(path.clone(), DesiredState::Present(local), 66 * 1024)
+        .await
+        .unwrap();
+
+    let first = cache.flush_host("alpha").await.unwrap_err();
+    assert_eq!(first.kind, EditErrorKind::OutcomeUnknown);
+    let status = cache.host_status("alpha").await;
+    assert_eq!(status.pending_paths, vec!["/repo/a.rs"]);
+    assert_eq!(status.outcome_unknown_paths, vec!["/repo/a.rs"]);
+    assert_eq!(status.pending_payload_bytes, 66 * 1024);
+
+    let discarded = cache.discard_host_edits("alpha").await;
+    assert_eq!(discarded.discarded_paths, vec!["/repo/a.rs"]);
+    assert_eq!(discarded.discarded_payload_bytes, 66 * 1024);
+    assert!(discarded.had_outcome_unknown);
+    assert_eq!(cache.host_status("alpha").await.pending_paths.len(), 0);
+    assert_eq!(cache.lookup_complete(&path).await, None);
+
+    cache.flush_host("alpha").await.unwrap();
+    assert_eq!(backend.commit_count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn outcome_unknown_can_be_retried_without_restarting() {
+    let path = key("alpha", "/repo/a.rs");
+    let backend = FakeBackend::new([(path.clone(), regular(b"base"))]);
+    backend.queue_outcome(Err(EditError {
+        kind: EditErrorKind::OutcomeUnknown,
+        code: None,
+        message: "MUTATION_OUTCOME_UNKNOWN".to_owned(),
+    }));
+    let cache = EditCache::new(config(), backend.clone());
+    cache.load_complete(path.clone()).await.unwrap();
+    cache
+        .mutate(
+            path.clone(),
+            DesiredState::Present(Arc::from(&b"local"[..])),
+            1,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cache.flush_host("alpha").await.unwrap_err().kind,
+        EditErrorKind::OutcomeUnknown
+    );
+    cache.retry_outcome_unknown_host("alpha").await.unwrap();
+    assert_eq!(backend.commit_count(), 2);
+    assert_eq!(
+        cache.host_status("alpha").await.pending_paths,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        backend
+            .snapshots
+            .lock()
+            .unwrap()
+            .get(&path)
+            .unwrap()
+            .desired,
+        DesiredState::Present(Arc::from(&b"local"[..]))
     );
 }
 

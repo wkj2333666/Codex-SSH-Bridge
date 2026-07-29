@@ -5,8 +5,9 @@ use serde_json::{Value, json};
 
 use crate::output::StreamKind;
 use crate::remote::{
-    ApplyPatchRequest, ListRequest, OutputReadRequest, ReadRequest, RemoteBridge, RemoteRunRequest,
-    RunShell, RunStdin, SearchRequest, StatRequest, WriteEncoding, WriteMode, WriteRequest,
+    ApplyPatchRequest, DiscardEditsRequest, EditStatusRequest, ListRequest, OutputReadRequest,
+    ReadRequest, RemoteBridge, RemoteRunRequest, RunShell, RunStdin, SearchRequest, StatRequest,
+    SyncEditsRequest, WriteEncoding, WriteMode, WriteRequest,
 };
 
 use super::{
@@ -118,6 +119,30 @@ impl ToolService for RemoteMcpTools {
                         )
                         .await;
                     super::render::output_read(&output_ref, result, wire_budget)
+                }
+                ParsedToolArguments::EditStatus(arguments) => {
+                    let result = bridge
+                        .edit_status(EditStatusRequest {
+                            host: arguments.host,
+                        })
+                        .await;
+                    super::render::edit_status(result, wire_budget)
+                }
+                ParsedToolArguments::SyncEdits(arguments) => {
+                    let result = bridge
+                        .sync_edits(SyncEditsRequest {
+                            host: arguments.host,
+                        })
+                        .await;
+                    super::render::sync_edits(result, wire_budget)
+                }
+                ParsedToolArguments::DiscardEdits(arguments) => {
+                    let result = bridge
+                        .discard_edits(DiscardEditsRequest {
+                            host: arguments.host,
+                        })
+                        .await;
+                    super::render::discard_edits(result, wire_budget)
                 }
                 ParsedToolArguments::ApplyPatch(arguments) => {
                     let result = bridge
@@ -306,6 +331,27 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
                 &["output_ref", "stream"],
             ),
             annotations(true, false, true, false),
+        ),
+        definition(
+            "remote_edit_status",
+            "Inspect remote edit cache",
+            "Inspect local buffered edit state for one SSH alias without touching the remote host.",
+            object(json!({"host": host_schema()}), &["host"]),
+            annotations(true, false, true, false),
+        ),
+        definition(
+            "remote_sync_edits",
+            "Synchronize remote edit cache",
+            "Retry synchronization of buffered edits for one SSH alias. If synchronization fails, the barrier command or observation still does not run.",
+            object(json!({"host": host_schema()}), &["host"]),
+            annotations(false, true, false, true),
+        ),
+        definition(
+            "remote_discard_edits",
+            "Discard remote edit cache",
+            "Discard local buffered or uncertain edits for one SSH alias so later observations fetch the remote state again.",
+            object(json!({"host": host_schema()}), &["host"]),
+            annotations(false, true, false, false),
         ),
         definition(
             "remote_apply_patch",
@@ -497,6 +543,27 @@ struct OutputReadArgs {
 #[allow(dead_code, reason = "Task 7 consumes the typed arguments")]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EditStatusArgs {
+    host: String,
+}
+
+#[allow(dead_code, reason = "Task 7 consumes the typed arguments")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyncEditsArgs {
+    host: String,
+}
+
+#[allow(dead_code, reason = "Task 7 consumes the typed arguments")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscardEditsArgs {
+    host: String,
+}
+
+#[allow(dead_code, reason = "Task 7 consumes the typed arguments")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplyPatchArgs {
     host: String,
     patch: String,
@@ -577,6 +644,9 @@ enum ParsedToolArguments {
     Search(SearchArgs),
     Read(ReadArgs),
     OutputRead(OutputReadArgs),
+    EditStatus(EditStatusArgs),
+    SyncEdits(SyncEditsArgs),
+    DiscardEdits(DiscardEditsArgs),
     ApplyPatch(ApplyPatchArgs),
     Write(WriteArgs),
     Run(RunArgs),
@@ -603,6 +673,9 @@ fn parse_tool_arguments(
         "remote_search" => deserialize(arguments).map(ParsedToolArguments::Search),
         "remote_read" => deserialize(arguments).map(ParsedToolArguments::Read),
         "remote_output_read" => deserialize(arguments).map(ParsedToolArguments::OutputRead),
+        "remote_edit_status" => deserialize(arguments).map(ParsedToolArguments::EditStatus),
+        "remote_sync_edits" => deserialize(arguments).map(ParsedToolArguments::SyncEdits),
+        "remote_discard_edits" => deserialize(arguments).map(ParsedToolArguments::DiscardEdits),
         "remote_apply_patch" => deserialize(arguments).map(ParsedToolArguments::ApplyPatch),
         "remote_write" => deserialize(arguments).map(ParsedToolArguments::Write),
         "remote_run" => deserialize(arguments).map(ParsedToolArguments::Run),
@@ -664,6 +737,9 @@ fn validate_parsed_arguments(
             }
             validate_optional_range(arguments.max_bytes, 1, 1_048_576)
         }
+        ParsedToolArguments::EditStatus(arguments) => validate_host(&arguments.host),
+        ParsedToolArguments::SyncEdits(arguments) => validate_host(&arguments.host),
+        ParsedToolArguments::DiscardEdits(arguments) => validate_host(&arguments.host),
         ParsedToolArguments::ApplyPatch(arguments) => {
             validate_host(&arguments.host)?;
             validate_chars(&arguments.patch, 1, 4_194_304)
@@ -817,6 +893,9 @@ mod tests {
                 "remote_output_read",
                 json!({"output_ref":"a".repeat(32), "stream":"stdout"}),
             ),
+            ("remote_edit_status", json!({"host":"dev"})),
+            ("remote_sync_edits", json!({"host":"dev"})),
+            ("remote_discard_edits", json!({"host":"dev"})),
             (
                 "remote_apply_patch",
                 json!({"host":"dev", "patch":"*** Begin Patch\n*** End Patch"}),
@@ -871,6 +950,9 @@ mod tests {
                 json!({"output_ref":"a".repeat(32)}),
                 json!({"output_ref":"a".repeat(32), "stream":1}),
             ),
+            ("remote_edit_status", json!({}), json!({"host":1})),
+            ("remote_sync_edits", json!({}), json!({"host":1})),
+            ("remote_discard_edits", json!({}), json!({"host":1})),
             (
                 "remote_apply_patch",
                 json!({"host":"dev"}),
@@ -911,6 +993,9 @@ mod tests {
                 "remote_output_read",
                 json!({"output_ref":"a".repeat(32), "stream":"stdout"}),
             ),
+            ("remote_edit_status", json!({"host":"dev"})),
+            ("remote_sync_edits", json!({"host":"dev"})),
+            ("remote_discard_edits", json!({"host":"dev"})),
             ("remote_apply_patch", json!({"host":"dev", "patch":"patch"})),
             (
                 "remote_write",
@@ -1015,6 +1100,15 @@ mod tests {
             "remote_apply_patch",
             json!({"host":"dev", "patch":"x".repeat(4_194_305)}),
         );
+
+        for host in [
+            "".to_owned(),
+            "-dev".to_owned(),
+            "dev!".to_owned(),
+            "a".repeat(129),
+        ] {
+            assert_invalid("remote_edit_status", json!({"host":host}));
+        }
 
         assert_invalid(
             "remote_write",

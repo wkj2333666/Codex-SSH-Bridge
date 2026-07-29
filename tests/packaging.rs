@@ -4,13 +4,16 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-const EXPECTED_TOOLS: [&str; 9] = [
+const EXPECTED_TOOLS: [&str; 12] = [
     "remote_hosts",
     "remote_list",
     "remote_stat",
     "remote_search",
     "remote_read",
     "remote_output_read",
+    "remote_edit_status",
+    "remote_sync_edits",
+    "remote_discard_edits",
     "remote_apply_patch",
     "remote_write",
     "remote_run",
@@ -423,8 +426,10 @@ fn skill_states_buffered_edit_durability_without_burdening_the_agent() {
         "clean mcp shutdown",
         "buffered write may fail",
         "do not manage generations",
-        "do not",
-        "manual flush",
+        "remote_edit_status",
+        "remote_sync_edits",
+        "remote_discard_edits",
+        "normal editing",
     ] {
         assert!(
             skill.contains(required),
