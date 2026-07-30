@@ -144,7 +144,6 @@ pub(crate) struct NativeSearchRunResult {
     pub shell: ShellSelection,
     pub helper_mode: HelperMode,
     pub output: Vec<u8>,
-    pub elapsed_ms: u64,
 }
 
 pub struct SshRunner {
@@ -560,7 +559,6 @@ impl SshRunner {
             shell,
             helper_mode: session.helper_mode(),
             output: result.stdout,
-            elapsed_ms: result.elapsed_ms,
         }))
     }
 
