@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
 use crate::output::{InternalSpoolOwner, StreamKind};
-use crate::ssh::{FixedOperationKind, FixedRunRequest, RootedPathInputs};
+use crate::ssh::{FixedOperationKind, FixedRunRequest, NativeSearchRunRequest, RootedPathInputs};
 
 use super::protocol::{SpoolCursor, context, encode_bytes, protocol_error, read_small_stream};
 use super::{
@@ -374,6 +374,47 @@ pub(super) async fn search(
             .command_timeout_ms
             .min(MAX_SEARCH_OPERATION_TIMEOUT_MS),
     );
+    if let Some(result) = runner
+        .execute_native_search(
+            NativeSearchRunRequest {
+                host: request.host.clone(),
+                root: request.path.as_str().to_owned(),
+                query: request.query.as_bytes().to_vec(),
+                globs: request.globs.clone(),
+                max_results: request.max_results.saturating_add(1),
+                binary: request.binary,
+                timeout: search_timeout,
+                stdout_limit: limits.max_output_bytes.min(limits.max_frame_bytes as u64),
+            },
+            cancel.clone(),
+        )
+        .await?
+    {
+        let (mut matches, lookahead) = parse_native_search_records(
+            &result.output,
+            request.path.as_str().as_bytes(),
+            request.max_results.saturating_add(1),
+        )?;
+        matches.sort_by(|left, right| {
+            decoded_path(&left.relative_path)
+                .cmp(&decoded_path(&right.relative_path))
+                .then(left.line.cmp(&right.line))
+                .then(left.column.cmp(&right.column))
+        });
+        let truncated = lookahead || matches.len() > request.max_results;
+        matches.truncate(request.max_results);
+        return Ok(SearchResult {
+            context: context(
+                request.host,
+                result.capability.physical_root.clone(),
+                &result.shell,
+                result.helper_mode,
+            ),
+            engine: SearchEngine::Native,
+            matches,
+            truncated,
+        });
+    }
     let owner = InternalSpoolOwner::new();
     let candidates_result = bridge
         .execute_readonly_fixed(
@@ -649,6 +690,75 @@ pub(super) async fn search(
         matches,
         truncated,
     })
+}
+
+fn parse_native_search_records(
+    bytes: &[u8],
+    display_root: &[u8],
+    retain: usize,
+) -> BridgeResult<(Vec<SearchMatch>, bool)> {
+    const HEADER_BYTES: usize = 5 + 4 + 8 + 8 + 4;
+    let mut offset = 0usize;
+    let mut matches = Vec::new();
+    let mut lookahead = false;
+    while offset < bytes.len() {
+        let header_end = offset
+            .checked_add(HEADER_BYTES)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| protocol_error("native search record is truncated"))?;
+        let header = &bytes[offset..header_end];
+        if &header[..5] != b"CXSM1" {
+            return Err(protocol_error("native search record magic is invalid"));
+        }
+        let path_length = u32::from_le_bytes(
+            header[5..9]
+                .try_into()
+                .map_err(|_| protocol_error("native search path length is invalid"))?,
+        ) as usize;
+        let line = u64::from_le_bytes(
+            header[9..17]
+                .try_into()
+                .map_err(|_| protocol_error("native search line is invalid"))?,
+        );
+        let column = u64::from_le_bytes(
+            header[17..25]
+                .try_into()
+                .map_err(|_| protocol_error("native search column is invalid"))?,
+        );
+        let content_length = u32::from_le_bytes(
+            header[25..29]
+                .try_into()
+                .map_err(|_| protocol_error("native search content length is invalid"))?,
+        ) as usize;
+        if line == 0 || column == 0 {
+            return Err(protocol_error(
+                "native search line and column must be positive",
+            ));
+        }
+        let path_end = header_end
+            .checked_add(path_length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| protocol_error("native search path is truncated"))?;
+        let content_end = path_end
+            .checked_add(content_length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| protocol_error("native search content is truncated"))?;
+        let actual = &bytes[header_end..path_end];
+        let relative = relative(display_root, actual)?;
+        if matches.len() < retain {
+            matches.push(SearchMatch {
+                actual_path: encode_bytes(actual),
+                relative_path: encode_bytes(relative),
+                line,
+                column,
+                content: encode_bytes(&bytes[path_end..content_end]),
+            });
+        } else {
+            lookahead = true;
+        }
+        offset = content_end;
+    }
+    Ok((matches, lookahead))
 }
 
 async fn search_complete_grep_tree(

@@ -5,14 +5,16 @@
 //! process groups, and a few worker threads on the remote machine.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::remote_helper_protocol::{Frame, FrameKind, read_frame, write_frame};
 
@@ -81,7 +83,22 @@ impl RequestControl {
 }
 
 #[derive(Debug)]
-struct RequestSpec {
+enum RequestSpec {
+    Command(CommandSpec),
+    Search(SearchSpec),
+}
+
+impl RequestSpec {
+    fn request_id(&self) -> u64 {
+        match self {
+            Self::Command(spec) => spec.request_id,
+            Self::Search(spec) => spec.request_id,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CommandSpec {
     request_id: u64,
     shell: String,
     cwd: PathBuf,
@@ -91,6 +108,18 @@ struct RequestSpec {
     timeout: Duration,
     stdout_limit: u64,
     stderr_limit: u64,
+}
+
+#[derive(Debug)]
+struct SearchSpec {
+    request_id: u64,
+    root: PathBuf,
+    query: Vec<u8>,
+    globs: Vec<String>,
+    max_results: usize,
+    binary: bool,
+    timeout: Duration,
+    stdout_limit: u64,
 }
 
 pub fn run<R, W>(mut reader: R, writer: W, config: HelperConfig) -> io::Result<()>
@@ -130,7 +159,7 @@ where
                         let control = Arc::new(RequestControl::new());
                         let duplicate = {
                             let mut requests = shared.requests.lock().map_err(lock_error)?;
-                            match requests.entry(spec.request_id) {
+                            match requests.entry(spec.request_id()) {
                                 std::collections::hash_map::Entry::Vacant(entry) => {
                                     entry.insert(Arc::clone(&control));
                                     false
@@ -139,14 +168,14 @@ where
                             }
                         };
                         if duplicate {
-                            send_error(&shared, spec.request_id, "duplicate-request-id")?;
+                            send_error(&shared, spec.request_id(), "duplicate-request-id")?;
                             continue;
                         }
                         send_frame(
                             &shared,
                             Frame {
                                 kind: FrameKind::Ready,
-                                request_id: spec.request_id,
+                                request_id: spec.request_id(),
                                 payload: Vec::new(),
                             },
                         )?;
@@ -258,6 +287,14 @@ fn read_request<R: Read>(
     max_frame_bytes: usize,
 ) -> Result<RequestSpec, String> {
     let fields = parse_metadata(&open.payload)?;
+    if fields.get("operation").map(String::as_str) == Some("search") {
+        ensure_search_fields(&fields)?;
+        return read_search_request(reader, open, fields, max_frame_bytes);
+    }
+    if fields.contains_key("operation") {
+        return Err("invalid-open-metadata".to_owned());
+    }
+    ensure_command_fields(&fields)?;
     let shell = required_field(&fields, "shell")?.to_owned();
     let cwd_length = parse_length(&fields, "cwd_length")?;
     let command_length = parse_length(&fields, "command_length")?;
@@ -289,7 +326,7 @@ fn read_request<R: Read>(
     } else {
         read_data(reader, &open, stdin_length, max_frame_bytes)?
     };
-    Ok(RequestSpec {
+    Ok(RequestSpec::Command(CommandSpec {
         request_id: open.request_id,
         shell,
         cwd: PathBuf::from(cwd),
@@ -299,7 +336,96 @@ fn read_request<R: Read>(
         timeout: Duration::from_millis(timeout_ms),
         stdout_limit,
         stderr_limit,
-    })
+    }))
+}
+
+fn ensure_command_fields(fields: &BTreeMap<String, String>) -> Result<(), String> {
+    const REQUIRED: &[&str] = &[
+        "shell",
+        "cwd_length",
+        "command_length",
+        "stdin_length",
+        "timeout_ms",
+        "stdout_limit",
+        "stderr_limit",
+    ];
+    if REQUIRED.iter().any(|key| !fields.contains_key(*key))
+        || fields
+            .keys()
+            .any(|key| !REQUIRED.contains(&key.as_str()) && key != "login_shell")
+    {
+        return Err("invalid-open-metadata".to_owned());
+    }
+    Ok(())
+}
+
+fn ensure_search_fields(fields: &BTreeMap<String, String>) -> Result<(), String> {
+    const REQUIRED: &[&str] = &[
+        "operation",
+        "root_length",
+        "query_length",
+        "globs_length",
+        "max_results",
+        "binary",
+        "timeout_ms",
+        "stdout_limit",
+        "stderr_limit",
+    ];
+    if fields.len() != REQUIRED.len() || REQUIRED.iter().any(|key| !fields.contains_key(*key)) {
+        return Err("invalid-open-metadata".to_owned());
+    }
+    Ok(())
+}
+
+fn read_search_request<R: Read>(
+    reader: &mut R,
+    open: Frame,
+    fields: BTreeMap<String, String>,
+    max_frame_bytes: usize,
+) -> Result<RequestSpec, String> {
+    let root_length = parse_length(&fields, "root_length")?;
+    let query_length = parse_length(&fields, "query_length")?;
+    let globs_length = parse_length(&fields, "globs_length")?;
+    let max_results = parse_length(&fields, "max_results")?;
+    let binary = match required_field(&fields, "binary")? {
+        "0" => false,
+        "1" => true,
+        _ => return Err("invalid-open-metadata".to_owned()),
+    };
+    let timeout = Duration::from_millis(parse_u64(&fields, "timeout_ms")?);
+    let stdout_limit = parse_u64(&fields, "stdout_limit")?;
+    let _stderr_limit = parse_u64(&fields, "stderr_limit")?;
+    let root = String::from_utf8(read_data(reader, &open, root_length, max_frame_bytes)?)
+        .map_err(|_| "root-is-not-utf8".to_owned())?;
+    if root.as_bytes().contains(&0) {
+        return Err("invalid-search-root".to_owned());
+    }
+    let query = read_data(reader, &open, query_length, max_frame_bytes)?;
+    if query.is_empty() {
+        return Err("invalid-search-query".to_owned());
+    }
+    let glob_bytes = read_data(reader, &open, globs_length, max_frame_bytes)?;
+    let mut globs = Vec::new();
+    for glob in glob_bytes.split(|byte| *byte == 0) {
+        if glob.is_empty() {
+            continue;
+        }
+        let glob = std::str::from_utf8(glob)
+            .map_err(|_| "search-glob-is-not-utf8".to_owned())?
+            .to_owned();
+        validate_glob(&glob)?;
+        globs.push(glob);
+    }
+    Ok(RequestSpec::Search(SearchSpec {
+        request_id: open.request_id,
+        root: PathBuf::from(root),
+        query,
+        globs,
+        max_results,
+        binary,
+        timeout,
+        stdout_limit,
+    }))
 }
 
 fn read_data<R: Read>(
@@ -333,9 +459,15 @@ fn parse_metadata(payload: &[u8]) -> Result<BTreeMap<String, String>, String> {
         if !matches!(
             key,
             "shell"
+                | "operation"
                 | "cwd_length"
                 | "command_length"
                 | "stdin_length"
+                | "root_length"
+                | "query_length"
+                | "globs_length"
+                | "max_results"
+                | "binary"
                 | "login_shell"
                 | "timeout_ms"
                 | "stdout_limit"
@@ -376,10 +508,10 @@ where
     W: Write + Send + 'static,
 {
     if let Err(message) = execute_request(&shared, &spec, &control) {
-        let _ = send_error(&shared, spec.request_id, &message);
+        let _ = send_error(&shared, spec.request_id(), &message);
     }
     if let Ok(mut requests) = shared.requests.lock() {
-        requests.remove(&spec.request_id);
+        requests.remove(&spec.request_id());
     }
 }
 
@@ -391,6 +523,12 @@ fn execute_request<W>(
 where
     W: Write + Send + 'static,
 {
+    let RequestSpec::Command(spec) = spec else {
+        let RequestSpec::Search(spec) = spec else {
+            unreachable!()
+        };
+        return execute_search(shared, spec, control);
+    };
     let mut command = match spec.shell.as_str() {
         "bash" => {
             let mut command = Command::new("bash");
@@ -592,6 +730,362 @@ where
     // detaching the blocked readers without retaining the request worker.
     control.process_group.store(0, Ordering::Release);
     Ok(())
+}
+
+fn execute_search<W>(
+    shared: &Arc<Shared<W>>,
+    spec: &SearchSpec,
+    control: &Arc<RequestControl>,
+) -> Result<(), String>
+where
+    W: Write + Send + 'static,
+{
+    let metadata = std::fs::metadata(&spec.root).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => "search-root-not-found".to_owned(),
+        io::ErrorKind::PermissionDenied => "search-root-permission-denied".to_owned(),
+        _ => "search-root-metadata-failed".to_owned(),
+    })?;
+    if !metadata.is_dir() {
+        return Err("search-root-not-directory".to_owned());
+    }
+    let globs = compile_globs(&spec.globs)?;
+    let started = Instant::now();
+    let deadline = (!spec.timeout.is_zero()).then(|| started + spec.timeout);
+    let mut paths = vec![spec.root.clone()];
+    let mut stdout_seen = 0u64;
+    let mut stdout_truncated = false;
+    let mut matched = 0usize;
+    let mut timed_out = false;
+
+    while let Some(directory) = paths.pop() {
+        if control.cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            timed_out = true;
+            break;
+        }
+        let mut entries = std::fs::read_dir(&directory)
+            .map_err(|_| "search-directory-read-failed".to_owned())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "search-directory-read-failed".to_owned())?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries.into_iter().rev() {
+            if control.cancelled.load(Ordering::Acquire) {
+                break;
+            }
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "search-entry-metadata-failed".to_owned())?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                paths.push(entry.path());
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(&spec.root)
+                .map_err(|_| "search-path-escaped-root".to_owned())?
+                .to_owned();
+            if !matches_globs(&globs, &spec.globs, &relative) {
+                continue;
+            }
+            let outcome = search_file(
+                &entry.path(),
+                &spec.query,
+                spec.binary,
+                spec.max_results.saturating_sub(matched),
+                usize::try_from(spec.stdout_limit.saturating_sub(stdout_seen))
+                    .unwrap_or(usize::MAX),
+                control,
+                deadline,
+            )?;
+            timed_out |= outcome.timed_out;
+            if outcome.output_truncated {
+                stdout_truncated = true;
+            }
+            for found in outcome.matches {
+                let record =
+                    encode_search_match(&entry.path(), found.line, found.column, &found.content)?;
+                let record_len = u64::try_from(record.len()).unwrap_or(u64::MAX);
+                if record_len > spec.stdout_limit.saturating_sub(stdout_seen) {
+                    stdout_truncated = true;
+                    break;
+                }
+                send_stream_frame(
+                    shared,
+                    Frame {
+                        kind: FrameKind::Stdout,
+                        request_id: spec.request_id,
+                        payload: record,
+                    },
+                    &control.cancelled,
+                )
+                .map_err(|_| "search-output-write-failed".to_owned())?;
+                stdout_seen = stdout_seen.saturating_add(record_len);
+                matched = matched.saturating_add(1);
+                if matched >= spec.max_results {
+                    break;
+                }
+            }
+            if matched >= spec.max_results || stdout_truncated || timed_out {
+                break;
+            }
+        }
+        if matched >= spec.max_results || stdout_truncated || timed_out {
+            break;
+        }
+    }
+
+    let cancelled = control.cancelled.load(Ordering::Acquire);
+    let status = if cancelled { 130 } else { 0 };
+    let payload = format!(
+        "{status}\n{}\n0\n0\n{}\n",
+        u8::from(stdout_truncated),
+        u8::from(timed_out)
+    )
+    .into_bytes();
+    send_frame(
+        shared,
+        Frame {
+            kind: FrameKind::Exit,
+            request_id: spec.request_id,
+            payload,
+        },
+    )
+    .map_err(|_| "search-exit-write-failed".to_owned())
+}
+
+fn validate_glob(glob: &str) -> Result<(), String> {
+    GlobBuilder::new(glob)
+        .literal_separator(true)
+        .build()
+        .map(|_| ())
+        .map_err(|_| "invalid-search-glob".to_owned())
+}
+
+fn compile_globs(globs: &[String]) -> Result<GlobSet, String> {
+    let mut builder = GlobSetBuilder::new();
+    for glob in globs {
+        builder.add(
+            GlobBuilder::new(glob)
+                .literal_separator(true)
+                .build()
+                .map_err(|_| "invalid-search-glob".to_owned())?,
+        );
+    }
+    builder
+        .build()
+        .map_err(|_| "invalid-search-glob".to_owned())
+}
+
+fn matches_globs(globs: &GlobSet, patterns: &[String], relative: &Path) -> bool {
+    patterns.is_empty()
+        || globs.is_match(relative)
+        || relative
+            .file_name()
+            .is_some_and(|name| globs.is_match(Path::new(name)))
+}
+
+struct FileSearchOutcome {
+    matches: Vec<FoundMatch>,
+    output_truncated: bool,
+    timed_out: bool,
+}
+
+struct FoundMatch {
+    line: u64,
+    column: u64,
+    content: Vec<u8>,
+}
+
+fn search_file(
+    path: &Path,
+    query: &[u8],
+    binary: bool,
+    max_results: usize,
+    content_budget: usize,
+    control: &RequestControl,
+    deadline: Option<Instant>,
+) -> Result<FileSearchOutcome, String> {
+    if max_results == 0 {
+        return Ok(FileSearchOutcome {
+            matches: Vec::new(),
+            output_truncated: false,
+            timed_out: false,
+        });
+    }
+    let file = std::fs::File::open(path).map_err(|error| match error.kind() {
+        io::ErrorKind::PermissionDenied => "search-file-permission-denied".to_owned(),
+        _ => "search-file-open-failed".to_owned(),
+    })?;
+    let mut reader = BufReader::with_capacity(STREAM_BUFFER_BYTES, file);
+    let prefix = kmp_prefix(query);
+    let mut matches = Vec::new();
+    let mut line = Vec::new();
+    let mut line_number = 1u64;
+    let mut line_bytes = 0usize;
+    let mut match_state = 0usize;
+    let mut first_column = None;
+    let mut binary_file = false;
+    let mut output_truncated = false;
+    let mut timed_out = false;
+    let per_line_limit = content_budget.min(u32::MAX as usize);
+
+    loop {
+        if control.cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            timed_out = true;
+            break;
+        }
+        let buffer = reader
+            .fill_buf()
+            .map_err(|_| "search-file-read-failed".to_owned())?;
+        if buffer.is_empty() {
+            if line_bytes > 0 {
+                finish_search_line(
+                    &mut matches,
+                    line_number,
+                    first_column,
+                    &line,
+                    line_bytes,
+                    per_line_limit,
+                    max_results,
+                    &mut output_truncated,
+                );
+            }
+            break;
+        }
+        let consumed = buffer.len();
+        for &byte in buffer {
+            if byte == 0 {
+                binary_file = true;
+            }
+            if byte == b'\n' {
+                finish_search_line(
+                    &mut matches,
+                    line_number,
+                    first_column,
+                    &line,
+                    line_bytes,
+                    per_line_limit,
+                    max_results,
+                    &mut output_truncated,
+                );
+                if binary && (matches.len() >= max_results || output_truncated) {
+                    break;
+                }
+                line.clear();
+                line_bytes = 0;
+                line_number = line_number.saturating_add(1);
+                match_state = 0;
+                first_column = None;
+                continue;
+            }
+            if line.len() < per_line_limit {
+                line.push(byte);
+            }
+            line_bytes = line_bytes.saturating_add(1);
+            while match_state > 0 && query[match_state] != byte {
+                match_state = prefix[match_state - 1];
+            }
+            if query[match_state] == byte {
+                match_state += 1;
+                if match_state == query.len() {
+                    first_column.get_or_insert(line_bytes.saturating_sub(query.len()) + 1);
+                    match_state = prefix[match_state - 1];
+                }
+            }
+        }
+        reader.consume(consumed);
+        if binary && (matches.len() >= max_results || output_truncated) {
+            break;
+        }
+    }
+    if binary_file && !binary {
+        matches.clear();
+        output_truncated = false;
+    }
+    Ok(FileSearchOutcome {
+        matches,
+        output_truncated,
+        timed_out,
+    })
+}
+
+fn finish_search_line(
+    matches: &mut Vec<FoundMatch>,
+    line: u64,
+    column: Option<usize>,
+    content: &[u8],
+    actual_length: usize,
+    limit: usize,
+    max_results: usize,
+    output_truncated: &mut bool,
+) {
+    let Some(column) = column else { return };
+    if matches.len() >= max_results {
+        return;
+    }
+    if actual_length > limit {
+        *output_truncated = true;
+        return;
+    }
+    matches.push(FoundMatch {
+        line,
+        column: u64::try_from(column).unwrap_or(u64::MAX),
+        content: content.to_vec(),
+    });
+}
+
+fn kmp_prefix(query: &[u8]) -> Vec<usize> {
+    let mut prefix = vec![0; query.len()];
+    let mut matched = 0usize;
+    for index in 1..query.len() {
+        while matched > 0 && query[index] != query[matched] {
+            matched = prefix[matched - 1];
+        }
+        if query[index] == query[matched] {
+            matched += 1;
+            prefix[index] = matched;
+        }
+    }
+    prefix
+}
+
+fn encode_search_match(
+    relative: &Path,
+    line: u64,
+    column: u64,
+    content: &[u8],
+) -> Result<Vec<u8>, String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = relative.as_os_str().as_bytes();
+    let path_length = u32::try_from(path.len()).map_err(|_| "search-path-too-long".to_owned())?;
+    let content_length =
+        u32::try_from(content.len()).map_err(|_| "search-line-too-long".to_owned())?;
+    let capacity = 5usize
+        .checked_add(4 + 8 + 8 + 4)
+        .and_then(|length| length.checked_add(path.len()))
+        .and_then(|length| length.checked_add(content.len()))
+        .ok_or_else(|| "search-record-too-large".to_owned())?;
+    let mut record = Vec::with_capacity(capacity);
+    record.extend_from_slice(b"CXSM1");
+    record.extend_from_slice(&path_length.to_le_bytes());
+    record.extend_from_slice(&line.to_le_bytes());
+    record.extend_from_slice(&column.to_le_bytes());
+    record.extend_from_slice(&content_length.to_le_bytes());
+    record.extend_from_slice(path);
+    record.extend_from_slice(content);
+    Ok(record)
 }
 
 fn write_stdin(mut stdin: ChildStdin, input: &[u8]) -> bool {

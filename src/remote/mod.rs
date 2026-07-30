@@ -1142,6 +1142,7 @@ pub struct ReadResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchEngine {
+    Native,
     Rg,
     Grep,
 }

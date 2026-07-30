@@ -24,8 +24,8 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    HelperMode, HostSession, RuntimePaths, SessionOutput, SessionRequest, SessionResult, SshPolicy,
-    build_ssh_argv, build_ssh_g_argv,
+    HelperMode, HostSession, RuntimePaths, SessionAction, SessionOutput, SessionRequest,
+    SessionResult, SshPolicy, build_ssh_argv, build_ssh_g_argv,
 };
 use crate::capability::{
     CAPABILITY_PROBE_SCRIPT, Capability, CapabilityCache, ShellKind, ShellRequest, ShellSelection,
@@ -125,6 +125,26 @@ pub(crate) struct FixedRunResult {
     pub output: InternalCapturedOutput,
     pub elapsed_ms: u64,
     pub remote_process_may_continue: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct NativeSearchRunRequest {
+    pub host: String,
+    pub root: String,
+    pub query: Vec<u8>,
+    pub globs: Vec<String>,
+    pub max_results: usize,
+    pub binary: bool,
+    pub timeout: Duration,
+    pub stdout_limit: u64,
+}
+
+pub(crate) struct NativeSearchRunResult {
+    pub capability: Arc<Capability>,
+    pub shell: ShellSelection,
+    pub helper_mode: HelperMode,
+    pub output: Vec<u8>,
+    pub elapsed_ms: u64,
 }
 
 pub struct SshRunner {
@@ -313,12 +333,14 @@ impl SshRunner {
             .execute_with_capture(
                 &session,
                 SessionRequest {
-                    command: request.command,
-                    cwd,
-                    shell: shell.clone(),
-                    login_shell,
+                    action: SessionAction::Command {
+                        command: request.command,
+                        cwd,
+                        shell: shell.clone(),
+                        login_shell,
+                        stdin: request.stdin,
+                    },
                     env: BTreeMap::new(),
-                    stdin: request.stdin,
                     timeout: command_timeout,
                     admission_deadline: setup_deadline,
                     response_timeout,
@@ -415,6 +437,131 @@ impl SshRunner {
 
     pub(crate) fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub(crate) async fn execute_native_search(
+        &self,
+        request: NativeSearchRunRequest,
+        cancel: CancellationToken,
+    ) -> BridgeResult<Option<NativeSearchRunResult>> {
+        self.config.require_discovered_alias(&request.host)?;
+        let limits = self.config.limits();
+        if request.stdout_limit == 0 || request.stdout_limit > limits.max_output_bytes {
+            return Err(BridgeError::new(
+                ErrorCode::RequestTooLarge,
+                "native search output limit is invalid",
+                false,
+            ));
+        }
+        let setup_deadline = connect_deadline(limits.connect_timeout_ms);
+        let initializer = self.initializer(&request.host).await;
+        let initialize_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
+            guard = initializer.lock() => guard,
+            () = tokio::time::sleep_until(setup_deadline) => {
+                return Err(connect_wait_timeout(
+                    &request.host,
+                    "SSH host initialization wait timed out",
+                ));
+            }
+        };
+        let initialize_timeout_ms = remaining_connect_timeout_ms(setup_deadline, &request.host)?;
+        let (policy, capability) = tokio::time::timeout_at(
+            setup_deadline,
+            self.initialize_host(
+                &request.host,
+                crate::REMOTE_OPERATION_ROOT,
+                initialize_timeout_ms,
+                &cancel,
+            ),
+        )
+        .await
+        .map_err(|_| connect_wait_timeout(&request.host, "SSH host initialization timed out"))??;
+        drop(initialize_guard);
+        let shell = select_shell(&capability, ShellRequest::Auto)?;
+        let (session, _) = self
+            .session_for_host(
+                &policy,
+                &request.host,
+                limits,
+                &capability,
+                setup_deadline,
+                &cancel,
+            )
+            .await
+            .map_err(|error| {
+                attach_selected_context(error, &request.host, &capability.physical_root, &shell)
+            })?;
+        if session.helper_mode() == HelperMode::Shell {
+            return Ok(None);
+        }
+        let response_timeout = request
+            .timeout
+            .checked_add(REMOTE_TIMEOUT_RETURN_GRACE)
+            .ok_or_else(|| BridgeError::invalid_argument("search timeout is too large"))?;
+        let result = session
+            .execute(
+                SessionRequest {
+                    action: SessionAction::Search {
+                        root: request.root.clone(),
+                        query: request.query.clone(),
+                        globs: request.globs.clone(),
+                        max_results: request.max_results,
+                        binary: request.binary,
+                    },
+                    env: BTreeMap::new(),
+                    timeout: request.timeout,
+                    admission_deadline: setup_deadline,
+                    response_timeout,
+                    stdout_limit: request.stdout_limit,
+                    stderr_limit: 1024,
+                    output: None,
+                },
+                cancel,
+            )
+            .await
+            .map_err(|error| {
+                map_native_search_error(error, &request.host, &capability.physical_root, &shell)
+            })?;
+        if result.timed_out {
+            return Err(attach_selected_context(
+                BridgeError::new(ErrorCode::CommandTimeout, "remote search timed out", false),
+                &request.host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
+        if result.stdout_truncated || result.stderr_truncated {
+            return Err(attach_selected_context(
+                BridgeError::new(
+                    ErrorCode::OutputLimit,
+                    "remote search output exceeded the configured limit",
+                    false,
+                ),
+                &request.host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
+        if result.status != 0 {
+            let mut error =
+                BridgeError::new(ErrorCode::RemoteExit, "remote native search failed", false);
+            error.details.exit_status = Some(result.status);
+            return Err(attach_selected_context(
+                error,
+                &request.host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
+        Ok(Some(NativeSearchRunResult {
+            capability,
+            shell,
+            helper_mode: session.helper_mode(),
+            output: result.stdout,
+            elapsed_ms: result.elapsed_ms,
+        }))
     }
 
     async fn session_for_host(
@@ -800,12 +947,14 @@ impl SshRunner {
         let session_result = match session
             .execute(
                 SessionRequest {
-                    command: remote_command,
-                    cwd: root.clone(),
-                    shell: shell.clone(),
-                    login_shell: None,
+                    action: SessionAction::Command {
+                        command: remote_command,
+                        cwd: root.clone(),
+                        shell: shell.clone(),
+                        login_shell: None,
+                        stdin: request.stdin,
+                    },
                     env: BTreeMap::new(),
-                    stdin: request.stdin,
                     timeout: command_timeout,
                     admission_deadline: setup_deadline,
                     response_timeout,
@@ -1365,6 +1514,27 @@ fn attach_selected_context(
     error
 }
 
+fn map_native_search_error(
+    error: BridgeError,
+    host: &str,
+    physical_root: &str,
+    shell: &ShellSelection,
+) -> BridgeError {
+    let mapped = match error.message.as_str() {
+        "search-root-not-found" => BridgeError::new(ErrorCode::NotFound, "path not found", false),
+        "search-root-not-directory" => {
+            BridgeError::new(ErrorCode::NotDirectory, "path is not a directory", false)
+        }
+        "search-root-permission-denied"
+        | "search-directory-read-failed"
+        | "search-file-permission-denied" => {
+            BridgeError::new(ErrorCode::PermissionDenied, "permission denied", false)
+        }
+        _ => error,
+    };
+    attach_selected_context(mapped, host, physical_root, shell)
+}
+
 impl FixedOperationKind {
     fn after_spawn_error(self, error: BridgeError) -> BridgeError {
         match self {
@@ -1864,7 +2034,7 @@ mod tests {
     use crate::error::{BridgeError, ErrorCode};
     use crate::output::{CaptureLimits, InternalSpoolOwner, OutputStore};
     use crate::path::RemotePath;
-    use crate::ssh::{HostSession, RuntimePaths, SessionOutput, SessionRequest};
+    use crate::ssh::{HostSession, RuntimePaths, SessionAction, SessionOutput, SessionRequest};
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -2110,15 +2280,17 @@ mod tests {
             capture_cancel.clone(),
         );
         let request = SessionRequest {
-            command: "true".to_owned(),
-            cwd: "/".to_owned(),
-            shell: ShellSelection {
-                shell: ShellKind::PosixSh,
-                fallback: false,
+            action: SessionAction::Command {
+                command: "true".to_owned(),
+                cwd: "/".to_owned(),
+                shell: ShellSelection {
+                    shell: ShellKind::PosixSh,
+                    fallback: false,
+                },
+                login_shell: None,
+                stdin: None,
             },
-            login_shell: None,
             env: BTreeMap::new(),
-            stdin: None,
             timeout: Duration::from_secs(5),
             admission_deadline: Instant::now() + Duration::from_millis(25),
             response_timeout: Duration::from_secs(5),

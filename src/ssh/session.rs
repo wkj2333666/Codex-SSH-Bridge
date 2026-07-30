@@ -34,18 +34,32 @@ const STARTUP_CLEANUP_GRACE: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub(crate) struct SessionRequest {
-    pub(crate) command: String,
-    pub(crate) cwd: String,
-    pub(crate) shell: ShellSelection,
-    pub(crate) login_shell: Option<String>,
+    pub(crate) action: SessionAction,
     pub(crate) env: std::collections::BTreeMap<String, Option<String>>,
-    pub(crate) stdin: Option<Vec<u8>>,
     pub(crate) timeout: Duration,
     pub(crate) admission_deadline: Instant,
     pub(crate) response_timeout: Duration,
     pub(crate) stdout_limit: u64,
     pub(crate) stderr_limit: u64,
     pub(crate) output: Option<SessionOutput>,
+}
+
+#[derive(Debug)]
+pub(crate) enum SessionAction {
+    Command {
+        command: String,
+        cwd: String,
+        shell: ShellSelection,
+        login_shell: Option<String>,
+        stdin: Option<Vec<u8>>,
+    },
+    Search {
+        root: String,
+        query: Vec<u8>,
+        globs: Vec<String>,
+        max_results: usize,
+        binary: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -1263,14 +1277,60 @@ fn build_request_frames(
             "per-request environment overrides are not supported by this dispatcher",
         ));
     }
-    if request.cwd.as_bytes().contains(&0) || request.command.as_bytes().contains(&0) {
+    match &request.action {
+        SessionAction::Command {
+            command,
+            cwd,
+            shell,
+            login_shell,
+            stdin,
+        } => build_command_request_frames(
+            request_id,
+            request,
+            command,
+            cwd,
+            shell,
+            login_shell.as_deref(),
+            stdin.as_deref().unwrap_or_default(),
+            max_payload,
+        ),
+        SessionAction::Search {
+            root,
+            query,
+            globs,
+            max_results,
+            binary,
+        } => build_search_request_frames(
+            request_id,
+            request,
+            root,
+            query,
+            globs,
+            *max_results,
+            *binary,
+            max_payload,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_command_request_frames(
+    request_id: u64,
+    request: &SessionRequest,
+    command: &str,
+    cwd: &str,
+    shell: &ShellSelection,
+    login_shell: Option<&str>,
+    stdin: &[u8],
+    max_payload: usize,
+) -> BridgeResult<Vec<Frame>> {
+    if cwd.as_bytes().contains(&0) || command.as_bytes().contains(&0) {
         return Err(BridgeError::invalid_argument(
             "NUL is not representable in a session cwd or command",
         ));
     }
-    let cwd = request.cwd.as_bytes();
-    let command = request.command.as_bytes();
-    let stdin = request.stdin.as_deref().unwrap_or_default();
+    let cwd = cwd.as_bytes();
+    let command = command.as_bytes();
     for (name, bytes) in [
         ("cwd", cwd.len()),
         ("command", command.len()),
@@ -1284,11 +1344,11 @@ fn build_request_frames(
             ));
         }
     }
-    let (shell, login_shell) = match &request.shell.shell {
+    let (shell, login_shell) = match &shell.shell {
         ShellKind::Bash { .. } => ("bash", ""),
         ShellKind::PosixSh => ("sh", ""),
         ShellKind::Login => {
-            let login_shell = request.login_shell.as_deref().ok_or_else(|| {
+            let login_shell = login_shell.ok_or_else(|| {
                 BridgeError::new(
                     ErrorCode::RemoteCapabilityMissing,
                     "remote account login shell was not supplied to the SSH session",
@@ -1344,6 +1404,86 @@ fn build_request_frames(
         });
     }
     Ok(frames)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_search_request_frames(
+    request_id: u64,
+    request: &SessionRequest,
+    root: &str,
+    query: &[u8],
+    globs: &[String],
+    max_results: usize,
+    binary: bool,
+    max_payload: usize,
+) -> BridgeResult<Vec<Frame>> {
+    if root.as_bytes().contains(&0) || query.is_empty() {
+        return Err(BridgeError::invalid_argument(
+            "native search root must not contain NUL and query must not be empty",
+        ));
+    }
+    let mut glob_bytes = Vec::new();
+    for glob in globs {
+        if glob.as_bytes().contains(&0) {
+            return Err(BridgeError::invalid_argument(
+                "native search glob must not contain NUL",
+            ));
+        }
+        glob_bytes.extend_from_slice(glob.as_bytes());
+        glob_bytes.push(0);
+    }
+    for (name, bytes) in [
+        ("root", root.len()),
+        ("query", query.len()),
+        ("globs", glob_bytes.len()),
+    ] {
+        if bytes > max_payload {
+            return Err(BridgeError::new(
+                ErrorCode::RequestTooLarge,
+                format!("session search {name} exceeds the configured frame limit"),
+                false,
+            ));
+        }
+    }
+    let metadata = format!(
+        "operation=search\nroot_length={}\nquery_length={}\nglobs_length={}\nmax_results={max_results}\nbinary={}\ntimeout_ms={}\nstdout_limit={}\nstderr_limit={}\n",
+        root.len(),
+        query.len(),
+        glob_bytes.len(),
+        u8::from(binary),
+        request.timeout.as_millis(),
+        request.stdout_limit,
+        request.stderr_limit,
+    );
+    if metadata.len() > max_payload {
+        return Err(BridgeError::new(
+            ErrorCode::RequestTooLarge,
+            "session search metadata exceeds the configured frame limit",
+            false,
+        ));
+    }
+    Ok(vec![
+        Frame {
+            kind: FrameKind::Open,
+            request_id,
+            payload: metadata.into_bytes(),
+        },
+        Frame {
+            kind: FrameKind::Data,
+            request_id,
+            payload: root.as_bytes().to_vec(),
+        },
+        Frame {
+            kind: FrameKind::Data,
+            request_id,
+            payload: query.to_vec(),
+        },
+        Frame {
+            kind: FrameKind::Data,
+            request_id,
+            payload: glob_bytes,
+        },
+    ])
 }
 
 fn parse_exit(payload: &[u8]) -> Result<(i32, bool, bool, bool, bool), String> {
@@ -1498,8 +1638,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ConnectionRuntime, ConnectionStart, HostSession, Outbound, SessionInner, SessionOutput,
-        SessionRequest, parse_exit, valid_handshake,
+        ConnectionRuntime, ConnectionStart, HostSession, Outbound, SessionAction, SessionInner,
+        SessionOutput, SessionRequest, parse_exit, valid_handshake,
     };
     use crate::capability::{ShellKind, ShellSelection};
     use crate::config::EffectiveLimits;
@@ -1557,15 +1697,17 @@ mod tests {
 
     fn request(command: &str, timeout: Duration) -> SessionRequest {
         SessionRequest {
-            command: command.to_owned(),
-            cwd: "/tmp".to_owned(),
-            shell: ShellSelection {
-                shell: ShellKind::PosixSh,
-                fallback: false,
+            action: SessionAction::Command {
+                command: command.to_owned(),
+                cwd: "/tmp".to_owned(),
+                shell: ShellSelection {
+                    shell: ShellKind::PosixSh,
+                    fallback: false,
+                },
+                login_shell: None,
+                stdin: None,
             },
-            login_shell: None,
             env: BTreeMap::new(),
-            stdin: None,
             timeout,
             admission_deadline: Instant::now() + timeout,
             response_timeout: timeout,
