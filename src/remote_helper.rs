@@ -907,6 +907,7 @@ struct FoundMatch {
     content: Vec<u8>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_file(
     path: &Path,
     query: &[u8],
