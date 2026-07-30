@@ -2331,8 +2331,10 @@ fn retention_models_fixture(
         root.push(format!("root-{index:02}-{}", "r".repeat(224)));
         std::fs::create_dir(&root).unwrap();
     }
+    let search_root = root.join("search-model");
+    std::fs::create_dir(&search_root).unwrap();
     let search_line = format!("needle {}\n", "s".repeat(2_992));
-    std::fs::write(root.join("search.txt"), search_line.repeat(500)).unwrap();
+    std::fs::write(search_root.join("search.txt"), search_line.repeat(500)).unwrap();
     for index in 0..1_000 {
         let name = format!("list-{index:04}-{}", "l".repeat(180));
         std::fs::write(root.join(name), b"x").unwrap();
@@ -2380,7 +2382,7 @@ fn retention_models_fixture(
         json!({"host":"dev","path":root,"max_entries":1_000}),
         json!({"host":"dev","paths":stat_paths}),
         json!({
-            "host":"dev","query":"needle","path":root,"max_results":500
+            "host":"dev","query":"needle","path":search_root,"max_results":500
         }),
     )
 }
