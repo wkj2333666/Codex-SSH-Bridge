@@ -11,13 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use edit_cache::{
-    BatchMutationDisposition, CacheKey, CommitBatchOutcome, CommitFuture, CommitItem,
-    CommitSuccess, DesiredState, EditBackend, EditCache, EditCacheConfig, EditError, EditErrorKind,
-    EditFuture, Generation, LoadEntryDisposition, MutationDisposition, PreparedEdit, RemoteBase,
-    RemoteSnapshot,
+    BarrierWaitError, BatchMutationDisposition, CacheKey, CommitBatchOutcome, CommitFuture,
+    CommitItem, CommitSuccess, DesiredState, EditBackend, EditCache, EditCacheConfig, EditError,
+    EditErrorKind, EditFuture, Generation, LoadEntryDisposition, MutationDisposition, PreparedEdit,
+    RemoteBase, RemoteSnapshot,
 };
 use tokio::sync::{Notify, Semaphore};
-use tokio::time::advance;
+use tokio::time::{advance, timeout};
+use tokio_util::sync::CancellationToken;
 
 struct FakeBackend {
     snapshots: Mutex<HashMap<CacheKey, RemoteSnapshot>>,
@@ -616,6 +617,61 @@ async fn a_blocked_host_does_not_block_another_hosts_threshold_flush() {
     assert_eq!(backend.commits.lock().unwrap()[1][0].key.host, "beta");
     release.add_permits(1);
     cache.flush_host("alpha").await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_a_barrier_wait_does_not_abandon_or_duplicate_the_inflight_commit() {
+    let path = key("alpha", "/repo/a.rs");
+    let backend = FakeBackend::new([(path.clone(), regular(b"base"))]);
+    let release = backend.block_host("alpha");
+    let cache = EditCache::new(config(), backend.clone());
+    cache.load_complete(path.clone()).await.unwrap();
+    cache
+        .mutate(path, DesiredState::Present(Arc::from(&b"local"[..])), 1)
+        .await
+        .unwrap();
+
+    let first_cancel = CancellationToken::new();
+    let first = {
+        let cache = Arc::clone(&cache);
+        let cancel = first_cancel.clone();
+        tokio::spawn(async move {
+            cache
+                .flush_barrier("alpha", cancel, Duration::from_secs(5))
+                .await
+        })
+    };
+    backend.wait_for_commits(1).await;
+    first_cancel.cancel();
+    assert_eq!(
+        timeout(Duration::from_millis(100), first)
+            .await
+            .expect("cancelled barrier wait did not return")
+            .unwrap()
+            .unwrap_err(),
+        BarrierWaitError::Cancelled
+    );
+
+    let second = {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move {
+            cache
+                .flush_barrier("alpha", CancellationToken::new(), Duration::from_secs(5))
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(!second.is_finished());
+    assert_eq!(backend.commit_count(), 1);
+
+    release.add_permits(1);
+    timeout(Duration::from_secs(1), second)
+        .await
+        .expect("surviving barrier did not observe the completed commit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(backend.commit_count(), 1);
+    assert!(cache.host_status("alpha").await.pending_paths.is_empty());
 }
 
 #[tokio::test]
