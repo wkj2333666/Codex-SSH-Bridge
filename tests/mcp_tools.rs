@@ -2331,12 +2331,12 @@ fn retention_models_fixture(
         root.push(format!("root-{index:02}-{}", "r".repeat(224)));
         std::fs::create_dir(&root).unwrap();
     }
+    let search_line = format!("needle {}\n", "s".repeat(2_992));
+    std::fs::write(root.join("search.txt"), search_line.repeat(500)).unwrap();
     for index in 0..1_000 {
         let name = format!("list-{index:04}-{}", "l".repeat(180));
         std::fs::write(root.join(name), b"x").unwrap();
     }
-    let search_line = format!("needle {}\n", "s".repeat(2_992));
-    std::fs::write(root.join("search.txt"), search_line.repeat(500)).unwrap();
     let stat_paths = (0..256)
         .map(|index| root.join(format!("missing-{index:03}-{}", "p".repeat(2_000))))
         .collect::<Vec<_>>();
