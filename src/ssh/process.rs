@@ -2023,7 +2023,7 @@ fn elapsed_ms(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChildSpec, FixedOperationKind, Phase, SshRunner, capability_probe_command,
+        ChildSpec, FixedOperationKind, Phase, SessionPool, SshRunner, capability_probe_command,
         mutation_unknown, render_fixed_command, render_fixed_command_text,
     };
     use crate::capability::parse_probe_output;
@@ -2041,6 +2041,29 @@ mod tests {
     use tokio::io::duplex;
     use tokio::time::{Instant, sleep, timeout};
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn an_active_session_is_not_shared_with_a_concurrent_request() {
+        let pool = SessionPool::default();
+        let session = Arc::new(HostSession::wedged_for_test(
+            "dev",
+            crate::MAX_FRAME_BYTES,
+            crate::MAX_OUTPUT_BYTES,
+        ));
+        let first = pool.insert_leased("dev", Arc::clone(&session)).await;
+
+        assert!(
+            pool.lease_idle("dev").await.is_none(),
+            "a concurrent request reused an active SSH transport"
+        );
+
+        drop(first);
+        let reused = pool
+            .lease_idle("dev")
+            .await
+            .expect("the released warm session was not reusable");
+        assert!(Arc::ptr_eq(reused.session(), &session));
+    }
 
     #[test]
     fn capability_probe_command_binds_hostile_root_as_positional_one() {
