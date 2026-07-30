@@ -1842,6 +1842,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepted_cancel_without_exit_closes_the_wedged_session_within_grace() {
+        let session = HostSession::wedged_for_test("test-host", 4096, 4096);
+        let started = Instant::now();
+        let error = session
+            .execute(
+                request("printf never-ready", Duration::from_millis(25)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CommandTimeout);
+        assert_eq!(error.details.remote_process_may_continue, Some(true));
+        assert!(session.is_closed());
+        assert!(session.inner.pending.lock().await.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "accepted-cancel recovery took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
     async fn dispatcher_chunks_streams_to_the_configured_frame_limit() {
         let temp = TempDir::new().unwrap();
         let mut limits = limits();
