@@ -1206,8 +1206,17 @@ async fn zero_output_rss_child() {
         observations.push(resident_kib());
     }
 
+    let cleanup_started = Instant::now();
+    let cleanup_deadline = cleanup_started + Duration::from_secs(1);
+    let final_fds = loop {
+        let observed = proc_entry_count("/proc/self/fd");
+        if observed <= baseline_fds + 4 || Instant::now() >= cleanup_deadline {
+            break observed;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let cleanup_ms = cleanup_started.elapsed().as_millis();
     let final_rss = resident_kib();
-    let final_fds = proc_entry_count("/proc/self/fd");
     let final_threads = proc_entry_count("/proc/self/task");
     let total_growth = final_rss.saturating_sub(baseline_rss);
     let tail = &observations[observations.len() - 5..];
@@ -1217,7 +1226,7 @@ async fn zero_output_rss_child() {
         .unwrap()
         .saturating_sub(*tail.iter().min().unwrap());
     eprintln!(
-        "Task11 zero-output RSS: requests={} concurrency={CONCURRENCY} baseline={baseline_rss} KiB final={final_rss} KiB growth={total_growth} KiB tail_growth={tail_growth} KiB fds={baseline_fds}->{final_fds} threads={baseline_threads}->{final_threads}",
+        "Task11 zero-output RSS: requests={} concurrency={CONCURRENCY} baseline={baseline_rss} KiB final={final_rss} KiB growth={total_growth} KiB tail_growth={tail_growth} KiB fds={baseline_fds}->{final_fds} cleanup_ms={cleanup_ms} threads={baseline_threads}->{final_threads}",
         CONCURRENCY * ROUNDS
     );
     assert!(
