@@ -1843,6 +1843,10 @@ mod tests {
         let request_start = temp.path().join("request-start");
         let environment = BTreeMap::from([
             (
+                OsString::from("CODEX_SSH_BRIDGE_TEST_MODE"),
+                OsString::from("1"),
+            ),
+            (
                 OsString::from("FAKE_SSH_REQUEST_START_FILE"),
                 request_start.as_os_str().to_owned(),
             ),
