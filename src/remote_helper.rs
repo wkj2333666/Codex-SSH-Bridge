@@ -352,7 +352,7 @@ fn ensure_command_fields(fields: &BTreeMap<String, String>) -> Result<(), String
     if REQUIRED.iter().any(|key| !fields.contains_key(*key))
         || fields
             .keys()
-            .any(|key| !REQUIRED.contains(&key.as_str()) && key != "login_shell")
+            .any(|key| !REQUIRED.contains(&key.as_str()) && key.as_str() != "login_shell")
     {
         return Err("invalid-open-metadata".to_owned());
     }
