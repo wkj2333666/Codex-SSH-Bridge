@@ -383,6 +383,18 @@ exit 0"
             fi
             ;;
     esac
+    if [ -n "${CODEX_SSH_BRIDGE_TEST_MODE-}" ] &&
+       [ -n "${FAKE_SSH_REQUEST_START_FILE-}" ]; then
+        : >"$FAKE_SSH_REQUEST_START_FILE"
+        request_start_delay=${FAKE_SSH_REQUEST_START_DELAY_SECONDS-0}
+        case "$request_start_delay" in
+            ''|*[!0-9.]*|*.*.*) request_start_delay=0 ;;
+        esac
+        sleep "$request_start_delay"
+    fi
+    if [ -e "$run_dir/cancelled" ]; then
+        run_command='exit 130'
+    fi
     setsid sh -c '
         run_cwd=$1
         run_shell=$2
@@ -418,6 +430,10 @@ exit 0"
             *) break ;;
         esac
     done
+    if [ -e "$run_dir/cancelled" ]; then
+        kill -TERM -"$run_pid" 2>/dev/null || true
+        setsid sh -c 'sleep 0.05; kill -KILL -"$1" 2>/dev/null || true' codex-ssh-killer "$run_pid" &
+    fi
     if [ -n "${CODEX_SSH_BRIDGE_TEST_MODE-}" ] &&
        [ -n "${FAKE_SSH_CHILD_PID_FILE-}" ]; then
         printf '%s\n' "$run_pid" >"$FAKE_SSH_CHILD_PID_FILE" 2>/dev/null || true
@@ -678,6 +694,9 @@ while read_frame; do
         OPEN) handle_open "$frame_id" "$frame_path" || exit 74; rm -f "$frame_path" ;;
         CANCEL)
             cancel_dir=$BASE/$frame_id
+            if [ -d "$cancel_dir" ]; then
+                : >"$cancel_dir/cancelled"
+            fi
             if [ -f "$cancel_dir/pid" ]; then
                 cancel_pid=$(cat "$cancel_dir/pid" 2>/dev/null || true)
                 case "$cancel_pid" in

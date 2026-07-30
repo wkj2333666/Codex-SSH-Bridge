@@ -1840,13 +1840,24 @@ mod tests {
     #[tokio::test]
     async fn host_session_cancels_one_request_without_blocking_another() {
         let temp = TempDir::new().unwrap();
+        let request_start = temp.path().join("request-start");
+        let environment = BTreeMap::from([
+            (
+                OsString::from("FAKE_SSH_REQUEST_START_FILE"),
+                request_start.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("FAKE_SSH_REQUEST_START_DELAY_SECONDS"),
+                OsString::from("0.05"),
+            ),
+        ]);
         let session = Arc::new(
             HostSession::connect_with(
                 policy(),
                 "test-host".to_owned(),
                 limits(),
                 OsString::from(fake_ssh(&temp)),
-                BTreeMap::new(),
+                environment,
                 CancellationToken::new(),
             )
             .await
@@ -1865,7 +1876,13 @@ mod tests {
                     .await
             })
         };
-        sleep(Duration::from_millis(50)).await;
+        timeout(Duration::from_secs(1), async {
+            while !request_start.exists() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("request did not reach the pre-PID cancellation window");
         cancel.cancel();
         let quick = timeout(
             Duration::from_secs(2),
