@@ -768,15 +768,15 @@ impl HostSession {
             } else {
                 cancelled_error(&self.inner.host, false)
             }),
-            // Cancellation is request-scoped. A slow command teardown must not
-            // close the shared transport and fail unrelated requests. Keep the
-            // pending entry until its eventual EXIT (or transport failure) so
-            // late frames remain protocol-valid; dropping this receiver simply
-            // makes completion delivery a no-op. Do not admit later requests to
-            // a session whose cancellation path is no longer making confirmed
-            // progress.
+            // Cancellation is request-scoped only while the dispatcher confirms
+            // it promptly. If an accepted CANCEL does not produce an EXIT, the
+            // shared transport is no longer making provable progress; keeping
+            // it around leaves later requests queued behind a wedged session.
             Ok(Err(_)) | Err(_) => {
                 self.inner.retired.store(true, Ordering::Release);
+                self.inner
+                    .transport_failure(transport_error(&self.inner.host, true))
+                    .await;
                 Err(if timed_out {
                     timeout_error(&self.inner.host, true)
                 } else {
