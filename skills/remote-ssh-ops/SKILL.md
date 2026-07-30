@@ -55,7 +55,7 @@ of the remote state is more important.
 
 - `remote_list`: `{host, path, depth?, include_hidden?, max_entries?}`; `path` must be an absolute remote path.
 - `remote_stat`: `{host, paths:[...]}`; `paths` is plural.
-- `remote_search`: `{host, query, path, globs?, max_results?, binary?}`; `path` must be absolute. `query` is a case-sensitive literal, not a regex. Use `globs`, not invented exclude or kind fields.
+- `remote_search`: `{host, query, path, globs?, max_results?, binary?}`; `path` must be absolute. `query` is a case-sensitive literal, not a regex. A glob without `/` matches basenames at any depth; a glob with `/` is relative to `path`. Use `globs`, not invented exclude or kind fields.
 - `remote_read`: `{host, paths:[...], start_line?, max_lines?, max_bytes?}`; reads are line-based and bounded.
 - `remote_output_read`: `{output_ref, stream:"stdout"|"stderr", offset?, max_bytes?}`; do not add a host.
 - `remote_edit_status`: `{host}`; inspects local buffered edit state without touching the remote host.
