@@ -494,6 +494,18 @@ async fn render_text_retained(
         return rendered;
     }
 
+    if presentation.text.is_empty() {
+        let mut metadata = object(presentation.structured_content);
+        metadata.insert("truncated".to_owned(), Value::Bool(true));
+        return bounded_text_result(
+            presentation.text,
+            Value::Object(metadata),
+            false,
+            presentation.expose_output,
+            budget,
+        );
+    }
+
     let retained = match presentation.output_ref {
         Some(output_ref) => Some(output_ref),
         None => bridge

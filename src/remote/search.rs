@@ -380,10 +380,14 @@ pub(super) async fn search(
             .checked_add(1)
             .ok_or_else(|| protocol_error("search candidate count overflowed"))
             .map_err(&attach_candidates)?;
-        if candidates.len() < 10_001
-            && (request.globs.is_empty()
-                || globs.is_match(Path::new(&OsString::from_vec(relative.to_vec()))))
-        {
+        let relative = OsString::from_vec(relative.to_vec());
+        let relative = Path::new(&relative);
+        let matches_glob = request.globs.is_empty()
+            || globs.is_match(relative)
+            || relative
+                .file_name()
+                .is_some_and(|name| globs.is_match(Path::new(name)));
+        if candidates.len() < 10_001 && matches_glob {
             candidates.push(pinned_path);
         }
     }
