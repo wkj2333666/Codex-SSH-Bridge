@@ -8121,6 +8121,46 @@ async fn search_basename_glob_matches_nested_files_like_local_search() {
 }
 
 #[tokio::test]
+async fn search_finds_the_only_match_after_the_old_candidate_prefix_bound() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let prefix = remote.path().join("prefix");
+    std::fs::create_dir(&prefix).unwrap();
+    let padding = "x".repeat(180);
+    for index in 0..700 {
+        std::fs::write(prefix.join(format!("{index:04}-{padding}.txt")), b"").unwrap();
+    }
+    let target = remote.path().join("tail.py");
+    std::fs::write(&target, b"CODEX_SEARCH_TAIL_SENTINEL = True\n").unwrap();
+    let (_runtime, _runner, bridge) = fixture(remote.path(), false);
+
+    let result = bridge
+        .search(
+            SearchRequest {
+                host: "dev".into(),
+                query: "CODEX_SEARCH_TAIL_SENTINEL".into(),
+                path: Some(remote.path().to_str().unwrap().into()),
+                globs: vec!["*.py".into()],
+                max_results: Some(10),
+                binary: Some(false),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.matches.len(), 1, "{result:?}");
+    assert_eq!(
+        result.matches[0].actual_path.value,
+        target.to_str().unwrap()
+    );
+    assert_eq!(result.matches[0].relative_path.value, "tail.py");
+    assert!(
+        !result.truncated,
+        "a complete one-match search must not report a candidate-prefix truncation"
+    );
+}
+
+#[tokio::test]
 async fn search_quote_amplification_over_frame_is_request_too_large() {
     let remote = tempfile::TempDir::new().unwrap();
     std::fs::write(remote.path().join("candidate"), b"x\n").unwrap();
