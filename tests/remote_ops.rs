@@ -7894,7 +7894,16 @@ async fn search_globs_are_slash_aware_for_star_question_class_and_double_star() 
     for rg in [false, true] {
         let (_runtime, _runner, bridge) = fixture(remote.path(), rg);
         for (glob, expected) in [
-            ("*.txt", vec!["root.txt"]),
+            (
+                "*.txt",
+                vec![
+                    "nested/a.txt",
+                    "nested/ab.txt",
+                    "nested/b.txt",
+                    "nested/c.txt",
+                    "root.txt",
+                ],
+            ),
             (
                 "nested/?.txt",
                 vec!["nested/a.txt", "nested/b.txt", "nested/c.txt"],
