@@ -249,6 +249,63 @@ fn helper_searches_natively_and_returns_structured_matches() {
 }
 
 #[test]
+fn cancelling_native_search_keeps_the_helper_reusable() {
+    let temp = tempfile::tempdir().unwrap();
+    let large = std::fs::File::create(temp.path().join("large.bin")).unwrap();
+    large.set_len(64 * 1024 * 1024).unwrap();
+    drop(large);
+    let root = temp.path().as_os_str().as_encoded_bytes();
+    let mut child = helper_child();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let _ = read_next(&mut output);
+
+    send_search_request(&mut input, 1, root, b"not-present", b"");
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Cancel,
+            request_id: 1,
+            payload: Vec::new(),
+        },
+    );
+    let cancelled = loop {
+        let frame = read_next(&mut output);
+        assert_eq!(frame.request_id, 1);
+        if frame.kind == FrameKind::Exit {
+            break frame.payload;
+        }
+    };
+    assert_eq!(cancelled, b"130\n0\n0\n0\n0\n");
+
+    let cwd = temp.path().as_os_str().as_encoded_bytes();
+    send_request(&mut input, 2, cwd, b"printf reusable");
+    let mut stdout = Vec::new();
+    let follow_up = loop {
+        let frame = read_next(&mut output);
+        assert_eq!(frame.request_id, 2);
+        match frame.kind {
+            FrameKind::Stdout => stdout.extend_from_slice(&frame.payload),
+            FrameKind::Exit => break frame.payload,
+            _ => {}
+        }
+    };
+    assert_eq!(stdout, b"reusable");
+    assert_eq!(follow_up, b"0\n0\n0\n0\n0\n");
+
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn helper_marks_its_own_watchdog_timeout_explicitly() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().as_os_str().as_encoded_bytes();
