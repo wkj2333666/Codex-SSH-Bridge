@@ -136,6 +136,118 @@ fn send_request_with_options(
     );
 }
 
+fn send_search_request(
+    writer: &mut impl Write,
+    request_id: u64,
+    root: &[u8],
+    query: &[u8],
+    globs: &[u8],
+) {
+    let metadata = format!(
+        concat!(
+            "operation=search\n",
+            "root_length={}\n",
+            "query_length={}\n",
+            "globs_length={}\n",
+            "max_results=10\n",
+            "binary=0\n",
+            "timeout_ms=2000\n",
+            "stdout_limit=65536\n",
+            "stderr_limit=1024\n",
+        ),
+        root.len(),
+        query.len(),
+        globs.len(),
+    );
+    send_frame(
+        writer,
+        Frame {
+            kind: FrameKind::Open,
+            request_id,
+            payload: metadata.into_bytes(),
+        },
+    );
+    for payload in [root, query, globs] {
+        send_frame(
+            writer,
+            Frame {
+                kind: FrameKind::Data,
+                request_id,
+                payload: payload.to_vec(),
+            },
+        );
+    }
+}
+
+fn decode_search_match(payload: &[u8]) -> (&[u8], u64, u64, &[u8]) {
+    const HEADER_BYTES: usize = 5 + 4 + 8 + 8 + 4;
+    assert!(payload.len() >= HEADER_BYTES, "short search match record");
+    assert_eq!(&payload[..5], b"CXSM1");
+    let path_bytes = u32::from_le_bytes(payload[5..9].try_into().unwrap()) as usize;
+    let line = u64::from_le_bytes(payload[9..17].try_into().unwrap());
+    let column = u64::from_le_bytes(payload[17..25].try_into().unwrap());
+    let content_bytes = u32::from_le_bytes(payload[25..29].try_into().unwrap()) as usize;
+    assert_eq!(
+        payload.len(),
+        HEADER_BYTES + path_bytes + content_bytes,
+        "search record lengths do not match its frame"
+    );
+    let path_end = HEADER_BYTES + path_bytes;
+    (
+        &payload[HEADER_BYTES..path_end],
+        line,
+        column,
+        &payload[path_end..],
+    )
+}
+
+#[test]
+fn helper_searches_natively_and_returns_structured_matches() {
+    let temp = tempfile::tempdir().unwrap();
+    let nested = temp.path().join("src");
+    std::fs::create_dir(&nested).unwrap();
+    let target = nested.join("tail.py");
+    std::fs::write(&target, b"needle here\n").unwrap();
+    std::fs::write(nested.join("ignored.txt"), b"needle ignored\n").unwrap();
+    let root = temp.path().as_os_str().as_encoded_bytes();
+    let mut child = helper_child();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let _ = read_next(&mut output);
+
+    send_search_request(&mut input, 1, root, b"needle", b"*.py\0");
+    let mut ready = false;
+    let mut matches = Vec::new();
+    let exit = loop {
+        let frame = read_next(&mut output);
+        assert_eq!(frame.request_id, 1);
+        match frame.kind {
+            FrameKind::Ready => ready = true,
+            FrameKind::Stdout => matches.push(frame.payload),
+            FrameKind::Exit => break frame.payload,
+            other => panic!("unexpected native search frame {other:?}"),
+        }
+    };
+
+    assert!(ready, "helper did not admit the native search");
+    assert_eq!(matches.len(), 1);
+    let (path, line, column, content) = decode_search_match(&matches[0]);
+    assert_eq!(path, target.as_os_str().as_encoded_bytes());
+    assert_eq!((line, column), (1, 1));
+    assert_eq!(content, b"needle here");
+    assert_eq!(exit, b"0\n0\n0\n0\n0\n");
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
 #[test]
 fn helper_marks_its_own_watchdog_timeout_explicitly() {
     let temp = tempfile::tempdir().unwrap();
