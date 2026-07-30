@@ -777,10 +777,15 @@ impl HostSession {
             });
         }
         match timeout(CANCEL_GRACE, receiver).await {
-            Ok(Ok(_result)) => Err(if timed_out {
-                timeout_error(&self.inner.host, false)
+            Ok(Ok(Ok(result))) => Err(if timed_out {
+                timeout_error(&self.inner.host, result.remote_process_may_continue)
             } else {
-                cancelled_error(&self.inner.host, false)
+                cancelled_error(&self.inner.host, result.remote_process_may_continue)
+            }),
+            Ok(Ok(Err(_))) => Err(if timed_out {
+                timeout_error(&self.inner.host, true)
+            } else {
+                cancelled_error(&self.inner.host, true)
             }),
             // Cancellation is request-scoped only while the dispatcher confirms
             // it promptly. If an accepted CANCEL does not produce an EXIT, the

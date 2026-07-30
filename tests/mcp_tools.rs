@@ -2205,8 +2205,8 @@ async fn task8_cancel_process_mcp_reaches_group_under_250ms_and_service_recovers
     let error = direct.await.unwrap().unwrap_err();
     assert_eq!(
         error.details.remote_process_may_continue,
-        Some(true),
-        "forced cancellation must preserve unknown remote-process state"
+        Some(false),
+        "pre-PID cancellation must preserve the dispatcher's confirmed exit state"
     );
     eprintln!(
         "MCP cancellation release sample: total={cancel_elapsed:?} process_poll={process_elapsed:?}"
