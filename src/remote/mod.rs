@@ -4,6 +4,7 @@
 )]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -44,6 +45,7 @@ const MAX_GLOB_BYTES: usize = 4 * 1024;
 const DEFAULT_START_LINE: u64 = 1;
 const DEFAULT_MAX_LINES: u64 = 2_000;
 const MAX_LINES: u64 = 100_000;
+const MAX_EDIT_BARRIER_WAIT: Duration = Duration::from_secs(30);
 
 pub(crate) const POSIX_SH_WARNING: &str = "selected POSIX sh does not support Bash arrays, [[ ]], source, pipefail, or Bash substitutions; use POSIX syntax, or request Bash and ensure it is installed";
 
@@ -309,7 +311,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<ListResult> {
         let resolved = resolve_list(self.runner.config(), request)?;
-        self.edit_barrier(&resolved.host).await?;
+        self.edit_barrier(&resolved.host, cancel.clone()).await?;
         metadata::list(self, resolved, cancel).await
     }
 
@@ -319,7 +321,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<StatResult> {
         let resolved = resolve_stat(self.runner.config(), request)?;
-        self.edit_barrier(&resolved.host).await?;
+        self.edit_barrier(&resolved.host, cancel.clone()).await?;
         metadata::stat(self, resolved, cancel).await
     }
 
@@ -338,7 +340,7 @@ impl RemoteBridge {
         cancel: CancellationToken,
     ) -> BridgeResult<SearchResult> {
         let resolved = resolve_search(self.runner.config(), request)?;
-        self.edit_barrier(&resolved.host).await?;
+        self.edit_barrier(&resolved.host, cancel.clone()).await?;
         search::search(self, resolved, cancel).await
     }
 
@@ -351,7 +353,7 @@ impl RemoteBridge {
             .config()
             .require_discovered_alias(&request.host)?;
         let host = request.host.clone();
-        self.edit_barrier(&host).await?;
+        self.edit_barrier(&host, cancel.clone()).await?;
         let result = run::run(self, request, cancel).await?;
         self.edit_cache.invalidate_clean_host(&host).await;
         Ok(result)
@@ -527,10 +529,30 @@ impl RemoteBridge {
         })
     }
 
-    async fn edit_barrier(&self, host: &str) -> BridgeResult<()> {
-        let _guard = self.edit_cache.begin_barrier(host).await;
-        if let Err(error) = self.edit_cache.flush_host(host).await {
-            let error = edit_bridge_error(error);
+    async fn edit_barrier(&self, host: &str, cancel: CancellationToken) -> BridgeResult<()> {
+        if let Err(error) = self
+            .edit_cache
+            .flush_barrier(host, cancel, MAX_EDIT_BARRIER_WAIT)
+            .await
+        {
+            let error = match error {
+                edit_cache::BarrierWaitError::Cancelled => BridgeError::new(
+                    ErrorCode::Cancelled,
+                    "remote operation was cancelled while buffered edits were synchronizing",
+                    false,
+                ),
+                edit_cache::BarrierWaitError::TimedOut => {
+                    let mut error = BridgeError::new(
+                        ErrorCode::CommandTimeout,
+                        "timed out waiting for buffered edits to synchronize",
+                        false,
+                    );
+                    error.details.host = Some(host.to_owned());
+                    error.details.mutation_may_have_applied = Some(true);
+                    error
+                }
+                edit_cache::BarrierWaitError::Edit(error) => edit_bridge_error(error),
+            };
             return Err(match self.edit_backend.context_for(host).await {
                 Some(context) => attach_remote_context(error, &context),
                 None => error,

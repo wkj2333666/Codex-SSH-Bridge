@@ -674,6 +674,55 @@ async fn cancelling_a_barrier_wait_does_not_abandon_or_duplicate_the_inflight_co
     assert!(cache.host_status("alpha").await.pending_paths.is_empty());
 }
 
+#[tokio::test(start_paused = true)]
+async fn timing_out_a_barrier_wait_does_not_abandon_or_duplicate_the_inflight_commit() {
+    let path = key("alpha", "/repo/a.rs");
+    let backend = FakeBackend::new([(path.clone(), regular(b"base"))]);
+    let release = backend.block_host("alpha");
+    let cache = EditCache::new(config(), backend.clone());
+    cache.load_complete(path.clone()).await.unwrap();
+    cache
+        .mutate(path, DesiredState::Present(Arc::from(&b"local"[..])), 1)
+        .await
+        .unwrap();
+
+    let first = {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move {
+            cache
+                .flush_barrier("alpha", CancellationToken::new(), Duration::from_secs(5))
+                .await
+        })
+    };
+    backend.wait_for_commits(1).await;
+    advance(Duration::from_secs(5)).await;
+    assert_eq!(
+        first.await.expect("timed barrier task failed").unwrap_err(),
+        BarrierWaitError::TimedOut
+    );
+    assert_eq!(backend.commit_count(), 1);
+
+    let second = {
+        let cache = Arc::clone(&cache);
+        tokio::spawn(async move {
+            cache
+                .flush_barrier("alpha", CancellationToken::new(), Duration::from_secs(5))
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(!second.is_finished());
+    assert_eq!(backend.commit_count(), 1);
+
+    release.add_permits(1);
+    second
+        .await
+        .expect("surviving barrier task failed")
+        .unwrap();
+    assert_eq!(backend.commit_count(), 1);
+    assert!(cache.host_status("alpha").await.pending_paths.is_empty());
+}
+
 #[tokio::test]
 async fn a_same_host_barrier_excludes_new_local_generations_until_released() {
     let path = key("alpha", "/repo/a.rs");

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CacheKey {
@@ -119,6 +120,13 @@ pub(crate) struct EditError {
     pub(crate) kind: EditErrorKind,
     pub(crate) code: Option<EditErrorCode>,
     pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BarrierWaitError {
+    Cancelled,
+    TimedOut,
+    Edit(EditError),
 }
 
 pub(crate) type EditFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EditError>> + Send + 'a>>;
@@ -554,6 +562,45 @@ impl EditCache {
                 FlushProgress::Clean => return Ok(()),
                 FlushProgress::More => {}
             }
+        }
+    }
+
+    pub(crate) async fn flush_barrier(
+        self: &Arc<Self>,
+        host: &str,
+        cancel: CancellationToken,
+        maximum_wait: Duration,
+    ) -> Result<(), BarrierWaitError> {
+        let deadline = Instant::now() + maximum_wait;
+        let runtime = self.host_runtime(host).await;
+        let preparation = Arc::clone(&runtime.preparation);
+        let guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(BarrierWaitError::Cancelled),
+            () = tokio::time::sleep_until(deadline) => {
+                return Err(BarrierWaitError::TimedOut);
+            }
+            guard = preparation.lock_owned() => guard,
+        };
+        let cache = Arc::clone(self);
+        let host = host.to_owned();
+        let mut flush = tokio::spawn(async move {
+            let _guard = guard;
+            cache.flush_host(&host).await
+        });
+        tokio::select! {
+            biased;
+            result = &mut flush => {
+                result
+                    .map_err(|_| {
+                        BarrierWaitError::Edit(permanent_error(
+                            "edit synchronization worker failed",
+                        ))
+                    })?
+                    .map_err(BarrierWaitError::Edit)
+            }
+            () = cancel.cancelled() => Err(BarrierWaitError::Cancelled),
+            () = tokio::time::sleep_until(deadline) => Err(BarrierWaitError::TimedOut),
         }
     }
 
