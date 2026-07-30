@@ -143,6 +143,17 @@ fn send_search_request(
     query: &[u8],
     globs: &[u8],
 ) {
+    send_search_request_with_timeout(writer, request_id, root, query, globs, 2_000);
+}
+
+fn send_search_request_with_timeout(
+    writer: &mut impl Write,
+    request_id: u64,
+    root: &[u8],
+    query: &[u8],
+    globs: &[u8],
+    timeout_ms: u64,
+) {
     let metadata = format!(
         concat!(
             "operation=search\n",
@@ -151,13 +162,14 @@ fn send_search_request(
             "globs_length={}\n",
             "max_results=10\n",
             "binary=0\n",
-            "timeout_ms=2000\n",
+            "timeout_ms={}\n",
             "stdout_limit=65536\n",
             "stderr_limit=1024\n",
         ),
         root.len(),
         query.len(),
         globs.len(),
+        timeout_ms,
     );
     send_frame(
         writer,
@@ -236,6 +248,46 @@ fn helper_searches_natively_and_returns_structured_matches() {
     assert_eq!((line, column), (1, 1));
     assert_eq!(content, b"needle here");
     assert_eq!(exit, b"0\n0\n0\n0\n0\n");
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn native_search_scans_large_unmatched_files_within_its_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let large = std::fs::File::create(temp.path().join("large.py")).unwrap();
+    large.set_len(512 * 1024 * 1024).unwrap();
+    drop(large);
+    let root = temp.path().as_os_str().as_encoded_bytes();
+    let mut child = helper_child();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let _ = read_next(&mut output);
+
+    let started = Instant::now();
+    send_search_request_with_timeout(&mut input, 1, root, b"not-present", b"*.py\0", 3_000);
+    let exit = loop {
+        let frame = read_next(&mut output);
+        assert_eq!(frame.request_id, 1);
+        if frame.kind == FrameKind::Exit {
+            break frame.payload;
+        }
+    };
+
+    assert_eq!(
+        exit,
+        b"0\n0\n0\n0\n0\n",
+        "native search exceeded its own 3s scan deadline after {:?}",
+        started.elapsed()
+    );
     send_frame(
         &mut input,
         Frame {
