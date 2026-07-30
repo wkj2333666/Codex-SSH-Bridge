@@ -9,6 +9,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::SystemTime;
@@ -147,11 +148,13 @@ pub(crate) struct NativeSearchRunResult {
 }
 
 struct SessionSlot {
+    host: Arc<str>,
     session: Arc<HostSession>,
     leased: AtomicBool,
 }
 
 struct SessionLease {
+    pool: Arc<SessionPool>,
     slot: Arc<SessionSlot>,
 }
 
@@ -171,18 +174,21 @@ impl std::ops::Deref for SessionLease {
 
 impl Drop for SessionLease {
     fn drop(&mut self) {
-        self.slot.leased.store(false, Ordering::Release);
+        self.pool.release(&self.slot);
     }
 }
 
 #[derive(Default)]
 struct SessionPool {
-    hosts: Mutex<HashMap<String, Vec<Arc<SessionSlot>>>>,
+    hosts: StdMutex<HashMap<Arc<str>, Vec<Arc<SessionSlot>>>>,
 }
 
 impl SessionPool {
-    async fn lease_idle(&self, host: &str) -> Option<SessionLease> {
-        let mut hosts = self.hosts.lock().await;
+    fn lease_idle(self: &Arc<Self>, host: &str) -> Option<SessionLease> {
+        let mut hosts = self
+            .hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let slots = hosts.get_mut(host)?;
         slots.retain(|slot| slot.session.is_reusable());
         for slot in slots {
@@ -192,6 +198,7 @@ impl SessionPool {
                 .is_ok()
             {
                 return Some(SessionLease {
+                    pool: Arc::clone(self),
                     slot: Arc::clone(slot),
                 });
             }
@@ -199,22 +206,53 @@ impl SessionPool {
         None
     }
 
-    async fn insert_leased(&self, host: &str, session: Arc<HostSession>) -> SessionLease {
+    fn insert_leased(self: &Arc<Self>, host: &str, session: Arc<HostSession>) -> SessionLease {
+        let host = Arc::<str>::from(host);
         let slot = Arc::new(SessionSlot {
+            host: Arc::clone(&host),
             session,
             leased: AtomicBool::new(true),
         });
         self.hosts
             .lock()
-            .await
-            .entry(host.to_owned())
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(host)
             .or_default()
             .push(Arc::clone(&slot));
-        SessionLease { slot }
+        SessionLease {
+            pool: Arc::clone(self),
+            slot,
+        }
     }
 
-    async fn remove(&self, host: &str, expected: &Arc<HostSession>) {
-        let mut hosts = self.hosts.lock().await;
+    fn release(&self, released: &Arc<SessionSlot>) {
+        let mut hosts = self
+            .hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(slots) = hosts.get_mut(released.host.as_ref()) else {
+            return;
+        };
+        released.leased.store(false, Ordering::Release);
+        let retain_released = released.session.is_reusable()
+            && !slots.iter().any(|slot| {
+                !Arc::ptr_eq(slot, released)
+                    && slot.session.is_reusable()
+                    && !slot.leased.load(Ordering::Acquire)
+            });
+        slots.retain(|slot| {
+            slot.session.is_reusable() && (retain_released || !Arc::ptr_eq(slot, released))
+        });
+        if slots.is_empty() {
+            hosts.remove(released.host.as_ref());
+        }
+    }
+
+    fn remove(&self, host: &str, expected: &Arc<HostSession>) {
+        let mut hosts = self
+            .hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(slots) = hosts.get_mut(host) else {
             return;
         };
@@ -236,7 +274,7 @@ pub struct SshRunner {
     policies: Mutex<HashMap<String, Arc<SshPolicy>>>,
     identities: Mutex<HashMap<String, String>>,
     initializers: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    sessions: SessionPool,
+    sessions: Arc<SessionPool>,
 }
 
 impl SshRunner {
@@ -281,7 +319,7 @@ impl SshRunner {
             policies: Mutex::new(HashMap::new()),
             identities: Mutex::new(HashMap::new()),
             initializers: Mutex::new(HashMap::new()),
-            sessions: SessionPool::default(),
+            sessions: Arc::new(SessionPool::default()),
         })
     }
 
@@ -436,7 +474,7 @@ impl SshRunner {
             Ok(result) => result,
             Err(error) => {
                 if !session.is_reusable() {
-                    self.drop_session(&request.host, session.session()).await;
+                    self.drop_session(&request.host, session.session());
                 }
                 return Err(attach_selected_context(
                     error,
@@ -648,7 +686,7 @@ impl SshRunner {
         setup_deadline: Instant,
         cancel: &CancellationToken,
     ) -> BridgeResult<(SessionLease, bool)> {
-        if let Some(session) = self.sessions.lease_idle(host).await {
+        if let Some(session) = self.sessions.lease_idle(host) {
             return Ok((session, true));
         }
         let connect_profile = crate::bridge_profile_span!(crate::profile::ProfileEvent {
@@ -674,11 +712,11 @@ impl SshRunner {
             .await?,
         );
         drop(connect_profile);
-        Ok((self.sessions.insert_leased(host, session).await, false))
+        Ok((self.sessions.insert_leased(host, session), false))
     }
 
-    async fn drop_session(&self, host: &str, expected: &Arc<HostSession>) {
-        self.sessions.remove(host, expected).await;
+    fn drop_session(&self, host: &str, expected: &Arc<HostSession>) {
+        self.sessions.remove(host, expected);
     }
 
     async fn execute_with_capture<T, F>(
@@ -1006,7 +1044,7 @@ impl SshRunner {
             Ok(result) => result,
             Err(error) => {
                 if !session.is_reusable() {
-                    self.drop_session(&request.host, session.session()).await;
+                    self.drop_session(&request.host, session.session());
                 }
                 return Err(attach_selected_context(
                     request.kind.after_spawn_error(error),
@@ -2083,25 +2121,53 @@ mod tests {
 
     #[tokio::test]
     async fn an_active_session_is_not_shared_with_a_concurrent_request() {
-        let pool = SessionPool::default();
+        let pool = Arc::new(SessionPool::default());
         let session = Arc::new(HostSession::wedged_for_test(
             "dev",
             crate::MAX_FRAME_BYTES,
             crate::MAX_OUTPUT_BYTES,
         ));
-        let first = pool.insert_leased("dev", Arc::clone(&session)).await;
+        let first = pool.insert_leased("dev", Arc::clone(&session));
 
         assert!(
-            pool.lease_idle("dev").await.is_none(),
+            pool.lease_idle("dev").is_none(),
             "a concurrent request reused an active SSH transport"
         );
 
         drop(first);
         let reused = pool
             .lease_idle("dev")
-            .await
             .expect("the released warm session was not reusable");
         assert!(Arc::ptr_eq(reused.session(), &session));
+    }
+
+    #[tokio::test]
+    async fn concurrent_sessions_retain_only_one_warm_transport() {
+        let pool = Arc::new(SessionPool::default());
+        let first_session = Arc::new(HostSession::wedged_for_test(
+            "dev",
+            crate::MAX_FRAME_BYTES,
+            crate::MAX_OUTPUT_BYTES,
+        ));
+        let second_session = Arc::new(HostSession::wedged_for_test(
+            "dev",
+            crate::MAX_FRAME_BYTES,
+            crate::MAX_OUTPUT_BYTES,
+        ));
+        let first = pool.insert_leased("dev", Arc::clone(&first_session));
+        let second = pool.insert_leased("dev", Arc::clone(&second_session));
+
+        drop(first);
+        drop(second);
+
+        let retained = pool
+            .lease_idle("dev")
+            .expect("one released session should remain warm");
+        assert!(Arc::ptr_eq(retained.session(), &first_session));
+        assert!(
+            pool.lease_idle("dev").is_none(),
+            "the pool retained a second idle transport"
+        );
     }
 
     #[test]
