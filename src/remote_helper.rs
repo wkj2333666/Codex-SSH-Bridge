@@ -1023,6 +1023,7 @@ fn search_file(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_search_line(
     matches: &mut Vec<FoundMatch>,
     line: u64,
