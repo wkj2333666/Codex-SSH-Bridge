@@ -971,7 +971,6 @@ fn search_file(
             break;
         }
         let consumed = buffer.len();
-        binary_file |= memchr(0, buffer).is_some();
         let mut segment_start = 0usize;
         for newline in memchr_iter(b'\n', buffer) {
             scan_search_segment(
@@ -1025,6 +1024,11 @@ fn search_file(
             break;
         }
     }
+    if !binary && !matches.is_empty() && !timed_out {
+        let binary_check = file_contains_nul(path, control, deadline)?;
+        binary_file = binary_check.contains_nul;
+        timed_out |= binary_check.timed_out;
+    }
     if binary_file && !binary {
         matches.clear();
         output_truncated = false;
@@ -1034,6 +1038,51 @@ fn search_file(
         output_truncated,
         timed_out,
     })
+}
+
+struct BinaryCheck {
+    contains_nul: bool,
+    timed_out: bool,
+}
+
+fn file_contains_nul(
+    path: &Path,
+    control: &RequestControl,
+    deadline: Option<Instant>,
+) -> Result<BinaryCheck, String> {
+    let file = std::fs::File::open(path).map_err(|_| "search-file-open-failed".to_owned())?;
+    let mut reader = BufReader::with_capacity(STREAM_BUFFER_BYTES, file);
+    loop {
+        if control.cancelled.load(Ordering::Acquire) {
+            return Ok(BinaryCheck {
+                contains_nul: false,
+                timed_out: false,
+            });
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(BinaryCheck {
+                contains_nul: false,
+                timed_out: true,
+            });
+        }
+        let buffer = reader
+            .fill_buf()
+            .map_err(|_| "search-file-read-failed".to_owned())?;
+        if buffer.is_empty() {
+            return Ok(BinaryCheck {
+                contains_nul: false,
+                timed_out: false,
+            });
+        }
+        let consumed = buffer.len();
+        if memchr(0, buffer).is_some() {
+            return Ok(BinaryCheck {
+                contains_nul: true,
+                timed_out: false,
+            });
+        }
+        reader.consume(consumed);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

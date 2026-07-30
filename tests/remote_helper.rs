@@ -261,6 +261,42 @@ fn helper_searches_natively_and_returns_structured_matches() {
 }
 
 #[test]
+fn native_search_omits_binary_files_after_a_literal_match() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("binary.py"), b"needle\0binary\n").unwrap();
+    let root = temp.path().as_os_str().as_encoded_bytes();
+    let mut child = helper_child();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let _ = read_next(&mut output);
+
+    send_search_request(&mut input, 1, root, b"needle", b"*.py\0");
+    let mut matches = 0;
+    let exit = loop {
+        let frame = read_next(&mut output);
+        assert_eq!(frame.request_id, 1);
+        match frame.kind {
+            FrameKind::Stdout => matches += 1,
+            FrameKind::Exit => break frame.payload,
+            _ => {}
+        }
+    };
+
+    assert_eq!(matches, 0);
+    assert_eq!(exit, b"0\n0\n0\n0\n0\n");
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn native_search_scans_large_unmatched_files_within_its_deadline() {
     let temp = tempfile::tempdir().unwrap();
     let large = std::fs::File::create(temp.path().join("large.py")).unwrap();
