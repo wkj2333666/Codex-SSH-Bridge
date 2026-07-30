@@ -8085,6 +8085,33 @@ async fn search_from_configured_filesystem_root_derives_relative_paths() {
 }
 
 #[tokio::test]
+async fn search_basename_glob_matches_nested_files_like_local_search() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let nested = remote.path().join("src");
+    std::fs::create_dir(&nested).unwrap();
+    let file = nested.join("module.py");
+    std::fs::write(&file, b"import json\n").unwrap();
+    let (_runtime, _runner, bridge) = fixture(remote.path(), false);
+    let result = bridge
+        .search(
+            SearchRequest {
+                host: "dev".into(),
+                query: "import".into(),
+                path: Some(remote.path().to_str().unwrap().into()),
+                globs: vec!["*.py".into()],
+                max_results: Some(10),
+                binary: Some(false),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.matches.len(), 1, "{result:?}");
+    assert_eq!(result.matches[0].actual_path.value, file.to_str().unwrap());
+    assert_eq!(result.matches[0].relative_path.value, "src/module.py");
+}
+
+#[tokio::test]
 async fn search_quote_amplification_over_frame_is_request_too_large() {
     let remote = tempfile::TempDir::new().unwrap();
     std::fs::write(remote.path().join("candidate"), b"x\n").unwrap();

@@ -1631,6 +1631,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_truncated_search_does_not_retain_an_empty_output() {
+        let (_runtime, bridge) = bridge_fixture();
+        let rendered = result_value(
+            search(
+                Arc::clone(&bridge),
+                Ok(SearchResult {
+                    context: context(),
+                    engine: SearchEngine::Grep,
+                    matches: vec![],
+                    truncated: true,
+                }),
+                roomy_budget(),
+                CancellationToken::new(),
+            )
+            .await,
+        );
+        assert_eq!(text_value(&rendered), "");
+        assert_eq!(rendered["structuredContent"]["output"], "");
+        assert_eq!(rendered["structuredContent"]["truncated"], true);
+        assert!(rendered["structuredContent"].get("output_ref").is_none());
+    }
+
+    #[tokio::test]
     async fn retained_success_pages_are_the_original_presentation_not_internal_json() {
         let (_runtime, bridge) = bridge_fixture();
         let hosts = (0..8_000)
