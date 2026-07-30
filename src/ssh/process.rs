@@ -240,6 +240,9 @@ impl SessionPool {
                     && slot.session.is_reusable()
                     && !slot.leased.load(Ordering::Acquire)
             });
+        if !retain_released && released.session.is_reusable() {
+            released.session.retire_idle();
+        }
         slots.retain(|slot| {
             slot.session.is_reusable() && (retain_released || !Arc::ptr_eq(slot, released))
         });
@@ -2164,6 +2167,10 @@ mod tests {
             .lease_idle("dev")
             .expect("one released session should remain warm");
         assert!(Arc::ptr_eq(retained.session(), &first_session));
+        assert!(
+            !second_session.is_reusable(),
+            "the excess idle transport was not retired"
+        );
         assert!(
             pool.lease_idle("dev").is_none(),
             "the pool retained a second idle transport"

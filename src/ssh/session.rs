@@ -823,6 +823,13 @@ impl HostSession {
         !self.is_closed() && !self.inner.retired.load(Ordering::Acquire)
     }
 
+    pub(crate) fn retire_idle(&self) {
+        self.inner.retired.store(true, Ordering::Release);
+        if !self.inner.closed.swap(true, Ordering::AcqRel) {
+            terminate_process_group(self.inner.process_group.load(Ordering::Acquire));
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn wedged_for_test(host: &str, max_payload: usize, max_output_bytes: u64) -> Self {
         let (tx, mut rx) = mpsc::channel::<Outbound>(64);
