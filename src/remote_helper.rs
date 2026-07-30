@@ -935,7 +935,8 @@ fn search_file(
     let mut binary_file = false;
     let mut output_truncated = false;
     let mut timed_out = false;
-    let per_line_limit = content_budget.min(u32::MAX as usize);
+    let content_budget = content_budget.min(u32::MAX as usize);
+    let mut retained_content = 0usize;
 
     loop {
         if control.cancelled.load(Ordering::Acquire) {
@@ -956,7 +957,8 @@ fn search_file(
                     first_column,
                     &line,
                     line_bytes,
-                    per_line_limit,
+                    content_budget,
+                    &mut retained_content,
                     max_results,
                     &mut output_truncated,
                 );
@@ -975,7 +977,8 @@ fn search_file(
                     first_column,
                     &line,
                     line_bytes,
-                    per_line_limit,
+                    content_budget,
+                    &mut retained_content,
                     max_results,
                     &mut output_truncated,
                 );
@@ -989,7 +992,7 @@ fn search_file(
                 first_column = None;
                 continue;
             }
-            if line.len() < per_line_limit {
+            if line.len() < content_budget.saturating_sub(retained_content) {
                 line.push(byte);
             }
             line_bytes = line_bytes.saturating_add(1);
@@ -1026,7 +1029,8 @@ fn finish_search_line(
     column: Option<usize>,
     content: &[u8],
     actual_length: usize,
-    limit: usize,
+    content_budget: usize,
+    retained_content: &mut usize,
     max_results: usize,
     output_truncated: &mut bool,
 ) {
@@ -1034,10 +1038,11 @@ fn finish_search_line(
     if matches.len() >= max_results {
         return;
     }
-    if actual_length > limit {
+    if actual_length > content_budget.saturating_sub(*retained_content) {
         *output_truncated = true;
         return;
     }
+    *retained_content = (*retained_content).saturating_add(actual_length);
     matches.push(FoundMatch {
         line,
         column: u64::try_from(column).unwrap_or(u64::MAX),
