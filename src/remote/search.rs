@@ -279,6 +279,88 @@ if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
 "#,
 );
 
+const GREP_TREE_SCRIPT: &str = concat!(
+    r#"
+query=$1
+root=$2
+limit=$3
+shift 3
+"#,
+    bounded_sentinel!(),
+    r#"
+codex_grep_file=$(mktemp /tmp/codex-sentinel-grep.XXXXXX 2>/dev/null) || exit 2
+codex_grep_binary=$(mktemp /tmp/codex-sentinel-grep-binary.XXXXXX 2>/dev/null) || {
+    rm -f -- "$codex_grep_file"
+    exit 2
+}
+codex_grep_out=$(mktemp /tmp/codex-sentinel-grep-out.XXXXXX 2>/dev/null) || {
+    rm -f -- "$codex_grep_file" "$codex_grep_binary"
+    exit 2
+}
+codex_grep_expected=$(mktemp /tmp/codex-sentinel-grep-expected.XXXXXX 2>/dev/null) || {
+    rm -f -- "$codex_grep_file" "$codex_grep_binary" "$codex_grep_out"
+    exit 2
+}
+cleanup_probe() {
+    rm -f -- "$codex_grep_file" "$codex_grep_binary" "$codex_grep_out" "$codex_grep_expected"
+}
+trap cleanup_probe EXIT HUP INT TERM
+printf 'needle\n' >"$codex_grep_file" || exit 2
+printf 'before\000needle\n' >"$codex_grep_binary" || exit 2
+grep -IHnZ -F -- needle "$codex_grep_file" "$codex_grep_binary" >"$codex_grep_out" 2>/dev/null
+codex_grep_status=$?
+if [ "$codex_grep_status" -gt 1 ]; then exit 2; fi
+{ printf '%s\000' "$codex_grep_file"; printf '1:needle\n'; } >"$codex_grep_expected" || exit 2
+grep -IHnZ -F -- absent "$codex_grep_file" >/dev/null 2>&1
+codex_grep_empty=$?
+if [ "$codex_grep_empty" -gt 1 ]; then exit 2; fi
+if [ "$codex_grep_status" -ne 0 ] || [ "$codex_grep_empty" -ne 1 ] ||
+   ! cmp -s "$codex_grep_expected" "$codex_grep_out"; then
+    printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=grep_nul\000' >&2
+    exit 0
+fi
+cleanup_probe
+trap - EXIT HUP INT TERM
+if [ ! -e "$root" ] && [ ! -L "$root" ]; then printf 'NOT_FOUND\000' >&2; exit 0; fi
+if [ ! -d "$root" ]; then printf 'NOT_DIRECTORY\000' >&2; exit 0; fi
+if [ ! -r "$root" ]; then printf 'PERMISSION_DENIED\000' >&2; exit 0; fi
+umask 077
+scratch=$(mktemp -d /tmp/codex-ssh-search.XXXXXX) || exit 2
+cleanup() { rm -rf -- "$scratch"; }
+trap cleanup EXIT HUP INT TERM
+fifo=$scratch/fifo
+data=$scratch/data
+mkfifo "$fifo" || exit 2
+grep -rIHnZ -F "$@" -- "$query" "$root" >"$fifo" 2>/dev/null &
+producer=$!
+exec 3<"$fifo"
+head -c "$limit" <&3 >"$data"
+head_status=$?
+bytes=$(wc -c <"$data")
+capped=0
+if [ "$bytes" -eq "$limit" ]; then capped=1; fi
+drain=
+if [ "$capped" -eq 1 ]; then
+    dd <&3 >/dev/null 2>&1 &
+    drain=$!
+    kill "$producer" 2>/dev/null || true
+    kill "$drain" 2>/dev/null || true
+    wait "$drain" 2>/dev/null || true
+fi
+exec 3<&-
+wait "$producer" 2>/dev/null
+wait_status=$?
+if [ "$head_status" -ne 0 ]; then exit 2; fi
+if [ "$capped" -eq 0 ]; then
+    case "$wait_status" in 0|1) ;; *) exit 2 ;; esac
+else
+    case "$wait_status" in 0|1|141|143) ;; *) exit 2 ;; esac
+fi
+cat "$data"
+if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
+"#,
+);
+
 pub(super) async fn search(
     bridge: &RemoteBridge,
     request: ResolvedSearch,
@@ -351,6 +433,11 @@ pub(super) async fn search(
         .build()
         .map_err(|_| BridgeError::invalid_argument("search glob is invalid"))
         .map_err(&attach_candidates)?;
+    if candidate_capped && !request.binary {
+        return search_complete_grep_tree(bridge, &request, &globs, search_timeout, cancel)
+            .await
+            .map_err(attach_candidates);
+    }
     let operation_root = crate::REMOTE_OPERATION_ROOT;
     let display_root = request.path.as_str().as_bytes();
     let mut candidates = Vec::with_capacity(10_001);
@@ -564,6 +651,109 @@ pub(super) async fn search(
     })
 }
 
+async fn search_complete_grep_tree(
+    bridge: &RemoteBridge,
+    request: &ResolvedSearch,
+    globs: &globset::GlobSet,
+    search_timeout: Duration,
+    cancel: CancellationToken,
+) -> BridgeResult<SearchResult> {
+    let limits = bridge.runner.config().limits();
+    let remote_globs_are_exact = request.globs.iter().all(|glob| {
+        !glob.contains('/') && !glob.bytes().any(|byte| matches!(byte, b'{' | b'}' | b'\\'))
+    });
+    let mut args = vec![
+        request.query.clone(),
+        request.path.as_str().to_owned(),
+        (limits.max_frame_bytes + 1).to_string(),
+    ];
+    if remote_globs_are_exact {
+        args.extend(request.globs.iter().map(|glob| format!("--include={glob}")));
+    }
+    let owner = InternalSpoolOwner::new();
+    let result = bridge
+        .execute_readonly_fixed(
+            FixedRunRequest {
+                kind: FixedOperationKind::ReadOnly,
+                host: request.host.clone(),
+                script: GREP_TREE_SCRIPT,
+                args,
+                stdin: None,
+                rooted_paths: RootedPathInputs {
+                    argument_indices: &[1],
+                    argument_stride: None,
+                    stdin_nul_paths: false,
+                },
+                required_capabilities: &["grep_nul", "search_bound"],
+                stdout_limit: (limits.max_frame_bytes + 1) as u64,
+                stderr_limit: 1024,
+                timeout: search_timeout,
+                cleanup: owner.registration(),
+            },
+            cancel,
+        )
+        .await?;
+    let attach = |error| attach_fixed_result_context(error, &request.host, &result);
+    let stderr = read_small_stream(&result.output, StreamKind::Stderr, 1024)
+        .await
+        .map_err(&attach)?;
+    let content_capped = stderr == b"CAPPED\0";
+    if !stderr.is_empty() && !content_capped {
+        let error = match stderr.as_slice() {
+            b"NOT_FOUND\0" => BridgeError::not_found(),
+            b"PERMISSION_DENIED\0" => BridgeError::permission_denied(),
+            b"NOT_DIRECTORY\0" => BridgeError::not_directory(),
+            _ => protocol_error("search engine control record is invalid"),
+        };
+        return Err(attach(error));
+    }
+    let mut cursor = SpoolCursor::new(
+        &result.output,
+        StreamKind::Stdout,
+        limits.max_frame_bytes + 1,
+    )
+    .map_err(&attach)?;
+    let (mut matches, result_lookahead) = parse_grep_filtered(
+        &mut cursor,
+        crate::REMOTE_OPERATION_ROOT.as_bytes(),
+        request.path.as_str().as_bytes(),
+        request.query.as_bytes(),
+        content_capped,
+        request.max_results.saturating_add(1),
+        limits.max_frame_bytes,
+        globs,
+        request.globs.is_empty(),
+    )
+    .await
+    .map_err(&attach)?;
+    if content_capped && !remote_globs_are_exact && matches.len() <= request.max_results {
+        return Err(attach(BridgeError::new(
+            ErrorCode::OutputLimit,
+            "search output ended before complex glob filtering completed",
+            false,
+        )));
+    }
+    matches.sort_by(|left, right| {
+        decoded_path(&left.relative_path)
+            .cmp(&decoded_path(&right.relative_path))
+            .then(left.line.cmp(&right.line))
+            .then(left.column.cmp(&right.column))
+    });
+    let truncated = content_capped || result_lookahead || matches.len() > request.max_results;
+    matches.truncate(request.max_results);
+    Ok(SearchResult {
+        context: context(
+            request.host.clone(),
+            result.capability.physical_root.clone(),
+            &result.shell,
+            result.helper_mode,
+        ),
+        engine: SearchEngine::Grep,
+        matches,
+        truncated,
+    })
+}
+
 async fn parse_rg(
     cursor: &mut SpoolCursor<'_>,
     operation_root: &[u8],
@@ -652,6 +842,39 @@ fn json_bytes(value: &serde_json::Value) -> BridgeResult<Vec<u8>> {
     Err(protocol_error("rg text/bytes field is missing"))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn parse_grep_filtered(
+    cursor: &mut SpoolCursor<'_>,
+    operation_root: &[u8],
+    display_root: &[u8],
+    query: &[u8],
+    capped: bool,
+    retain: usize,
+    record_limit: usize,
+    globs: &globset::GlobSet,
+    globs_empty: bool,
+) -> BridgeResult<(Vec<SearchMatch>, bool)> {
+    parse_grep_records(
+        cursor,
+        operation_root,
+        display_root,
+        query,
+        capped,
+        retain,
+        record_limit,
+        |relative| {
+            let relative = OsString::from_vec(relative.to_vec());
+            let relative = Path::new(&relative);
+            globs_empty
+                || globs.is_match(relative)
+                || relative
+                    .file_name()
+                    .is_some_and(|name| globs.is_match(Path::new(name)))
+        },
+    )
+    .await
+}
+
 async fn parse_grep(
     cursor: &mut SpoolCursor<'_>,
     operation_root: &[u8],
@@ -660,6 +883,30 @@ async fn parse_grep(
     capped: bool,
     retain: usize,
     record_limit: usize,
+) -> BridgeResult<(Vec<SearchMatch>, bool)> {
+    parse_grep_records(
+        cursor,
+        operation_root,
+        display_root,
+        query,
+        capped,
+        retain,
+        record_limit,
+        |_| true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn parse_grep_records(
+    cursor: &mut SpoolCursor<'_>,
+    operation_root: &[u8],
+    display_root: &[u8],
+    query: &[u8],
+    capped: bool,
+    retain: usize,
+    record_limit: usize,
+    mut keep: impl FnMut(&[u8]) -> bool,
 ) -> BridgeResult<(Vec<SearchMatch>, bool)> {
     let mut matches = Vec::with_capacity(retain.min(1024));
     let mut lookahead = false;
@@ -696,10 +943,14 @@ async fn parse_grep(
             .and_then(|value| u64::try_from(value + 1).ok())
             .ok_or_else(|| protocol_error("grep result does not contain the query"))?;
         completed_records += 1;
+        let relative = relative(display_root, &actual)?;
+        if !keep(relative) {
+            continue;
+        }
         if matches.len() < retain {
             matches.push(SearchMatch {
                 actual_path: encode_bytes(&actual),
-                relative_path: encode_bytes(relative(display_root, &actual)?),
+                relative_path: encode_bytes(relative),
                 line,
                 column,
                 content: encode_bytes(content),
