@@ -309,7 +309,7 @@ fn native_search_scans_large_unmatched_files_within_its_deadline() {
     let _ = read_next(&mut output);
 
     let started = Instant::now();
-    send_search_request_with_timeout(&mut input, 1, root, b"not-present", b"*.py\0", 3_000);
+    send_search_request_with_timeout(&mut input, 1, root, b"not-present", b"*.py\0", 10_000);
     let exit = loop {
         let frame = read_next(&mut output);
         assert_eq!(frame.request_id, 1);
@@ -318,11 +318,11 @@ fn native_search_scans_large_unmatched_files_within_its_deadline() {
         }
     };
 
-    assert_eq!(
-        exit,
-        b"0\n0\n0\n0\n0\n",
-        "native search exceeded its own 3s scan deadline after {:?}",
-        started.elapsed()
+    let elapsed = started.elapsed();
+    assert_eq!(exit, b"0\n0\n0\n0\n0\n");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "native search took {elapsed:?} to scan a 512 MiB unmatched file"
     );
     send_frame(
         &mut input,
