@@ -265,7 +265,25 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
         String::from_utf8_lossy(&second.output.stdout.head),
         "persistent-second"
     );
-    assert_eq!(fs::read_to_string(&install_log).unwrap(), "NEED\n");
+    let install_events = fs::read_to_string(&install_log).unwrap();
+    let install_events = install_events.lines().collect::<Vec<_>>();
+    assert_eq!(install_events.len(), 2, "{install_events:?}");
+    assert_eq!(
+        install_events
+            .iter()
+            .filter(|event| **event == "NEED")
+            .count(),
+        1,
+        "{install_events:?}"
+    );
+    assert_eq!(
+        install_events
+            .iter()
+            .filter(|event| **event == "HIT")
+            .count(),
+        1,
+        "{install_events:?}"
+    );
     assert_eq!(fs::read_to_string(&restart_install_log).unwrap(), "HIT\n");
 
     let installed = base
