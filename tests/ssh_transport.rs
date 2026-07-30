@@ -2669,7 +2669,7 @@ async fn run_setup_consumes_one_connect_budget_across_probe_and_session_start() 
 }
 
 #[tokio::test]
-async fn unconfirmed_cancellation_retires_the_session_before_follow_up() {
+async fn confirmed_cancellation_preserves_the_session_for_follow_up() {
     let log_dir = TempDir::new().unwrap();
     let log = log_dir.path().join("calls.log");
     let fixture = task3_runner(
@@ -2706,7 +2706,7 @@ async fn unconfirmed_cancellation_retires_the_session_before_follow_up() {
         .unwrap_err();
     assert!(started.elapsed() < Duration::from_millis(250));
     assert_eq!(error.code, ErrorCode::Cancelled);
-    assert_eq!(error.details.remote_process_may_continue, Some(true));
+    assert_eq!(error.details.remote_process_may_continue, Some(false));
 
     let follow_cancel = CancellationToken::new();
     let follow_up = {
@@ -2721,7 +2721,7 @@ async fn unconfirmed_cancellation_retires_the_session_before_follow_up() {
                 .await
         })
     };
-    wait_for_log_marker_count(&log, "S", 2).await;
+    wait_for_log_marker_count(&log, "C", 2).await;
     follow_cancel.cancel();
     let follow_error = timeout(Duration::from_millis(300), follow_up)
         .await
@@ -2729,6 +2729,19 @@ async fn unconfirmed_cancellation_retires_the_session_before_follow_up() {
         .unwrap()
         .unwrap_err();
     assert_eq!(follow_error.code, ErrorCode::Cancelled);
+    assert_eq!(
+        follow_error.details.remote_process_may_continue,
+        Some(false)
+    );
+    assert_eq!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "S")
+            .count(),
+        1,
+        "a confirmed request cancellation must not retire the persistent session"
+    );
 }
 
 #[tokio::test]
@@ -3285,7 +3298,7 @@ async fn output_capture_read_error_cleans_an_unregistered_spool() {
 }
 
 #[tokio::test]
-async fn concurrent_cancellation_reports_the_started_remote_process() {
+async fn concurrent_cancellation_confirms_the_started_remote_process_stopped() {
     let limits = Limits::default();
     let log_dir = TempDir::new().unwrap();
     let log = log_dir.path().join("calls.log");
@@ -3331,7 +3344,7 @@ async fn concurrent_cancellation_reports_the_started_remote_process() {
     second_cancel.cancel();
     let error = second.await.unwrap().unwrap_err();
     assert_eq!(error.code, ErrorCode::Cancelled);
-    assert_eq!(error.details.remote_process_may_continue, Some(true));
+    assert_eq!(error.details.remote_process_may_continue, Some(false));
 
     first_cancel.cancel();
     first.await.unwrap().unwrap_err();
