@@ -111,7 +111,7 @@ while [ "$#" -gt 0 ]; do
         tmp=$(mktemp --tmpdir="$parent" .codex-ssh-bridge.batch.XXXXXXXXXX) || exit 5
         cleanup_tmp() { rm -f -- "$tmp" >/dev/null 2>&1 || :; }
         trap 'cleanup_tmp; exit 125' HUP INT TERM
-        dd of="$tmp" bs=262144 iflag=count_bytes count="$desired_size" \
+        dd of="$tmp" bs=262144 iflag=fullblock,count_bytes count="$desired_size" \
             status=none conv=notrunc oflag=nofollow || { cleanup_tmp; exit 40; }
         staged_size=$(stat --printf='%s' -- "$tmp" 2>/dev/null) || {
             cleanup_tmp
