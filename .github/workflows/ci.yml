@@ -187,7 +187,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p diagnostics
-          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
+          CODEX_SSH_BRIDGE_PROFILE=1 \
+            cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked \
             --test performance_acceptance task13_release_edit_cache_rss_fresh_child \
             -- --nocapture 2>&1 | tee diagnostics/rss-edit-cache.log
           cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --test mcp_tools task8_output_rss_ \
