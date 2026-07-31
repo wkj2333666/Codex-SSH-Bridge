@@ -238,7 +238,7 @@ pub fn output_read(
 ) -> CallToolResult {
     let result = match result {
         Ok(result) => result,
-        Err(()) => return render_error(invalid_job_log_page(), budget),
+        Err(error) => return render_error(error, budget),
     };
     let raw = match result.data.encoding {
         ValueEncoding::Utf8 => result.data.value.into_bytes(),
