@@ -2902,6 +2902,7 @@ async fn cancellation_during_capability_probe_is_remote_best_effort_and_kills_th
 async fn cancellation_still_kills_pipe_inheriting_descendants_after_ssh_parent_exit() {
     let files = TempDir::new().unwrap();
     let pid_file = files.path().join("child.pid");
+    let request_pid_file = files.path().join("request.pid");
     let parent_exit = files.path().join("parent.exit");
     let fixture = task3_runner(
         &["dev"],
@@ -2911,6 +2912,10 @@ async fn cancellation_still_kills_pipe_inheriting_descendants_after_ssh_parent_e
             ("FAKE_SSH_MODE", "orphan-streams".to_owned()),
             ("FAKE_SSH_SLEEP_SECONDS", "10".to_owned()),
             ("FAKE_SSH_CHILD_PID_FILE", pid_file.display().to_string()),
+            (
+                "FAKE_SSH_REQUEST_PID_FILE",
+                request_pid_file.display().to_string(),
+            ),
             (
                 "FAKE_SSH_PARENT_EXIT_FILE",
                 parent_exit.display().to_string(),
@@ -2931,12 +2936,19 @@ async fn cancellation_still_kills_pipe_inheriting_descendants_after_ssh_parent_e
         })
     };
     wait_for_file(&pid_file).await;
+    wait_for_file(&request_pid_file).await;
     wait_for_file(&parent_exit).await;
     let pid = fs::read_to_string(&pid_file)
         .unwrap()
         .trim()
         .parse()
         .unwrap();
+    let request_pid = fs::read_to_string(&request_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_ne!(pid, request_pid, "orphan and request PIDs must be distinct");
     sleep(Duration::from_millis(20)).await;
     cancel.cancel();
     let result = timeout(Duration::from_millis(250), &mut task).await;
