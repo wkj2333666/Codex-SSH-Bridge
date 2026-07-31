@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use memchr::{memchr, memchr_iter, memmem};
 
+use crate::job_protocol::JobControlRequest;
 use crate::remote_helper_protocol::{Frame, FrameKind, read_frame, write_frame};
 
 const HELPER_PROTOCOL: &str = "codex-ssh-helper/1";
@@ -87,6 +88,7 @@ impl RequestControl {
 enum RequestSpec {
     Command(CommandSpec),
     Search(SearchSpec),
+    Job(JobSpec),
 }
 
 impl RequestSpec {
@@ -94,6 +96,7 @@ impl RequestSpec {
         match self {
             Self::Command(spec) => spec.request_id,
             Self::Search(spec) => spec.request_id,
+            Self::Job(spec) => spec.request_id,
         }
     }
 }
@@ -121,6 +124,12 @@ struct SearchSpec {
     binary: bool,
     timeout: Duration,
     stdout_limit: u64,
+}
+
+#[derive(Debug)]
+struct JobSpec {
+    request_id: u64,
+    request: JobControlRequest,
 }
 
 pub fn run<R, W>(mut reader: R, writer: W, config: HelperConfig) -> io::Result<()>
@@ -288,6 +297,17 @@ fn read_request<R: Read>(
     max_frame_bytes: usize,
 ) -> Result<RequestSpec, String> {
     let fields = parse_metadata(&open.payload)?;
+    if fields.get("operation").map(String::as_str) == Some("job") {
+        ensure_job_fields(&fields)?;
+        let request_length = parse_length(&fields, "request_length")?;
+        let body = read_data(reader, &open, request_length, max_frame_bytes)?;
+        let request =
+            serde_json::from_slice(&body).map_err(|_| "invalid-job-request".to_owned())?;
+        return Ok(RequestSpec::Job(JobSpec {
+            request_id: open.request_id,
+            request,
+        }));
+    }
     if fields.get("operation").map(String::as_str) == Some("search") {
         ensure_search_fields(&fields)?;
         return read_search_request(reader, open, fields, max_frame_bytes);
@@ -372,6 +392,14 @@ fn ensure_search_fields(fields: &BTreeMap<String, String>) -> Result<(), String>
         "stdout_limit",
         "stderr_limit",
     ];
+    if fields.len() != REQUIRED.len() || REQUIRED.iter().any(|key| !fields.contains_key(*key)) {
+        return Err("invalid-open-metadata".to_owned());
+    }
+    Ok(())
+}
+
+fn ensure_job_fields(fields: &BTreeMap<String, String>) -> Result<(), String> {
+    const REQUIRED: &[&str] = &["operation", "request_length"];
     if fields.len() != REQUIRED.len() || REQUIRED.iter().any(|key| !fields.contains_key(*key)) {
         return Err("invalid-open-metadata".to_owned());
     }
@@ -473,6 +501,7 @@ fn parse_metadata(payload: &[u8]) -> Result<BTreeMap<String, String>, String> {
                 | "timeout_ms"
                 | "stdout_limit"
                 | "stderr_limit"
+                | "request_length"
         ) || fields.insert(key.to_owned(), value.to_owned()).is_some()
         {
             return Err("invalid-open-metadata".to_owned());
@@ -525,10 +554,11 @@ where
     W: Write + Send + 'static,
 {
     let RequestSpec::Command(spec) = spec else {
-        let RequestSpec::Search(spec) = spec else {
-            unreachable!()
+        return match spec {
+            RequestSpec::Search(spec) => execute_search(shared, spec, control),
+            RequestSpec::Job(spec) => execute_job(shared, spec, control),
+            RequestSpec::Command(_) => unreachable!(),
         };
-        return execute_search(shared, spec, control);
     };
     let mut command = match spec.shell.as_str() {
         "bash" => {
@@ -731,6 +761,40 @@ where
     // detaching the blocked readers without retaining the request worker.
     control.process_group.store(0, Ordering::Release);
     Ok(())
+}
+
+fn execute_job<W>(
+    shared: &Arc<Shared<W>>,
+    spec: &JobSpec,
+    control: &Arc<RequestControl>,
+) -> Result<(), String>
+where
+    W: Write + Send + 'static,
+{
+    if control.cancelled.load(Ordering::Acquire) {
+        return Err("job-control-cancelled".to_owned());
+    }
+    let response = crate::remote_job_runner::execute_control(spec.request.clone())
+        .map_err(|error| format!("job-control-failed: {error}"))?;
+    let payload = serde_json::to_vec(&response).map_err(|_| "job-response-invalid".to_owned())?;
+    send_frame(
+        shared,
+        Frame {
+            kind: FrameKind::Stdout,
+            request_id: spec.request_id,
+            payload,
+        },
+    )
+    .map_err(|_| "job-response-write-failed".to_owned())?;
+    send_frame(
+        shared,
+        Frame {
+            kind: FrameKind::Exit,
+            request_id: spec.request_id,
+            payload: b"0\n0\n0\n0\n0\n".to_vec(),
+        },
+    )
+    .map_err(|_| "job-exit-write-failed".to_owned())
 }
 
 fn execute_search<W>(

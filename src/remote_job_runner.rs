@@ -14,8 +14,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand::RngCore as _;
 
 use crate::job_protocol::{
-    JOB_RECORD_VERSION, JobId, JobLogEncoding, JobLogPage, JobLogsRequest, JobLogsResponse,
-    JobRequestRecord, JobShell, JobState, JobStateRecord, ProcessIdentity,
+    JOB_RECORD_VERSION, JobControlRequest, JobControlResponse, JobId, JobLogEncoding, JobLogPage,
+    JobLogsRequest, JobLogsResponse, JobRequestRecord, JobShell, JobState, JobStateRecord,
+    ProcessIdentity,
 };
 
 const REQUEST_FILE: &str = "request";
@@ -143,6 +144,63 @@ impl JobStore {
 
     fn job_path(&self, id: &JobId) -> PathBuf {
         self.root.join(id.as_str())
+    }
+}
+
+pub fn execute_control(request: JobControlRequest) -> io::Result<JobControlResponse> {
+    let store = JobStore::open()?;
+    match request {
+        JobControlRequest::Start(request) => {
+            let state = start_job(&store, request)?;
+            Ok(JobControlResponse::Started(state))
+        }
+        JobControlRequest::Status { job_id } => {
+            Ok(JobControlResponse::Status(store.status(&job_id)?))
+        }
+        JobControlRequest::Logs(request) => Ok(JobControlResponse::Logs(store.logs(&request)?)),
+        JobControlRequest::Cancel { .. }
+        | JobControlRequest::List { .. }
+        | JobControlRequest::Delete { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "remote job control is not implemented",
+        )),
+    }
+}
+
+fn start_job(store: &JobStore, request: JobRequestRecord) -> io::Result<JobStateRecord> {
+    store.create(&request)?;
+    let executable = std::env::current_exe()?;
+    let mut command = Command::new(executable);
+    command
+        .args(["job-runner", request.job_id.as_str()])
+        .env_remove("CODEX_SSH_HELPER_PATH")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() >= 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+    command.spawn()?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let state = store.status(&request.job_id)?;
+        if state.state != JobState::Starting {
+            return Ok(state);
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote job runner readiness timed out",
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
