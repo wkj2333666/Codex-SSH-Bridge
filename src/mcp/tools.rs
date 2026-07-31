@@ -1269,4 +1269,48 @@ mod tests {
         assert!(serialized.contains("invalid tool arguments"));
         assert!(!serialized.contains("action"));
     }
+
+    #[test]
+    fn task15_job_arguments_are_closed_and_bounded() {
+        let id = "0123456789abcdef0123456789abcdef";
+        for (name, arguments) in [
+            (
+                "remote_job_start",
+                json!({"host":"dev", "command":"true", "cwd":"/tmp"}),
+            ),
+            ("remote_job_status", json!({"host":"dev", "job_id":id})),
+            ("remote_job_logs", json!({"host":"dev", "job_id":id})),
+            ("remote_job_cancel", json!({"host":"dev", "job_id":id})),
+            ("remote_job_list", json!({"host":"dev"})),
+            ("remote_job_delete", json!({"host":"dev", "job_id":id})),
+        ] {
+            assert_valid(name, arguments);
+        }
+
+        for (name, arguments) in [
+            (
+                "remote_job_start",
+                json!({"host":"dev", "command":"true", "cwd":"/tmp", "unknown":1}),
+            ),
+            (
+                "remote_job_status",
+                json!({"host":"dev", "job_id":"A".repeat(32)}),
+            ),
+            (
+                "remote_job_logs",
+                json!({"host":"dev", "job_id":id, "max_bytes":1_048_577}),
+            ),
+            (
+                "remote_job_cancel",
+                json!({"host":"dev", "job_id":"0".repeat(31)}),
+            ),
+            ("remote_job_list", json!({"host":"dev", "max_jobs":1_001})),
+            (
+                "remote_job_delete",
+                json!({"host":"dev", "job_id":id, "action":"delete"}),
+            ),
+        ] {
+            assert_invalid(name, arguments);
+        }
+    }
 }
