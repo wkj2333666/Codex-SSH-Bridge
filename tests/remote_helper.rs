@@ -6,7 +6,8 @@ use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 use codex_ssh_bridge::job_protocol::{
-    JOB_RECORD_VERSION, JobId, JobLogsRequest, JobRequestRecord, JobShell, JobState,
+    JOB_RECORD_VERSION, JobControlRequest, JobControlResponse, JobId, JobLogsRequest,
+    JobRequestRecord, JobShell, JobState,
 };
 use codex_ssh_bridge::remote_helper_protocol::{Frame, FrameKind, read_frame, write_frame};
 use codex_ssh_bridge::remote_job_runner::{JobStore, run_job_at};
@@ -59,13 +60,26 @@ fn helper_path() -> PathBuf {
 }
 
 fn helper_child() -> std::process::Child {
-    Command::new(helper_path())
+    helper_command()
+        .spawn()
+        .expect("failed to spawn helper binary")
+}
+
+fn helper_child_at_home(home: &std::path::Path) -> std::process::Child {
+    helper_command()
+        .env("HOME", home)
+        .spawn()
+        .expect("failed to spawn helper binary")
+}
+
+fn helper_command() -> Command {
+    let mut command = Command::new(helper_path());
+    command
         .args(["--max-frame", "65536"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn helper binary")
+        .stderr(Stdio::null());
+    command
 }
 
 fn read_next(reader: &mut BufReader<impl std::io::Read>) -> Frame {
@@ -194,6 +208,46 @@ fn send_search_request_with_timeout(
                 payload: payload.to_vec(),
             },
         );
+    }
+}
+
+fn send_job_request(writer: &mut impl Write, request_id: u64, request: &JobControlRequest) {
+    let body = serde_json::to_vec(request).unwrap();
+    send_frame(
+        writer,
+        Frame {
+            kind: FrameKind::Open,
+            request_id,
+            payload: format!("operation=job\nrequest_length={}\n", body.len()).into_bytes(),
+        },
+    );
+    send_frame(
+        writer,
+        Frame {
+            kind: FrameKind::Data,
+            request_id,
+            payload: body,
+        },
+    );
+}
+
+fn read_job_response(reader: &mut BufReader<impl std::io::Read>) -> JobControlResponse {
+    let mut body = Vec::new();
+    loop {
+        let frame = read_next(reader);
+        match frame.kind {
+            FrameKind::Ready => {}
+            FrameKind::Stdout => body.extend_from_slice(&frame.payload),
+            FrameKind::Exit => {
+                assert_eq!(frame.payload, b"0\n0\n0\n0\n0\n");
+                return serde_json::from_slice(&body).unwrap();
+            }
+            FrameKind::Error => panic!(
+                "job helper error: {}",
+                String::from_utf8_lossy(&frame.payload)
+            ),
+            other => panic!("unexpected job response frame: {other:?}"),
+        }
     }
 }
 
@@ -772,4 +826,88 @@ fn task15_job_runner_enforces_optional_timeout() {
     let state = store.status(&request.job_id).unwrap();
     assert_eq!(state.state, JobState::TimedOut);
     assert!(state.finished_unix_ms.is_some());
+}
+
+#[test]
+fn task15_job_survives_initiating_helper_and_is_visible_to_a_fresh_helper() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let request = job_request(work.path(), "printf detached; sleep 1", None);
+
+    let mut first = helper_child_at_home(home.path());
+    let mut first_input = first.stdin.take().unwrap();
+    let mut first_output = BufReader::new(first.stdout.take().unwrap());
+    let _ = read_next(&mut first_output);
+    send_job_request(
+        &mut first_input,
+        1,
+        &JobControlRequest::Start(request.clone()),
+    );
+    let started = read_job_response(&mut first_output);
+    assert!(matches!(
+        started,
+        JobControlResponse::Started(ref state)
+            if state.job_id == request.job_id && matches!(state.state, JobState::Running | JobState::Succeeded)
+    ));
+    send_frame(
+        &mut first_input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(first_input);
+    assert!(first.wait().unwrap().success());
+
+    let mut second = helper_child_at_home(home.path());
+    let mut second_input = second.stdin.take().unwrap();
+    let mut second_output = BufReader::new(second.stdout.take().unwrap());
+    let _ = read_next(&mut second_output);
+    send_job_request(
+        &mut second_input,
+        2,
+        &JobControlRequest::Status {
+            job_id: request.job_id.clone(),
+        },
+    );
+    let status = read_job_response(&mut second_output);
+    assert!(matches!(
+        status,
+        JobControlResponse::Status(ref state)
+            if state.job_id == request.job_id && matches!(state.state, JobState::Running | JobState::Succeeded)
+    ));
+    send_frame(
+        &mut second_input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(second_input);
+    assert!(second.wait().unwrap().success());
+
+    let store = JobStore::open_at(home.path()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let state = store.status(&request.job_id).unwrap();
+        if state.state == JobState::Succeeded {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "detached job did not finish: {state:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let logs = store
+        .logs(&JobLogsRequest {
+            job_id: request.job_id,
+            stdout_offset: 0,
+            stderr_offset: 0,
+            max_bytes: 1024,
+        })
+        .unwrap();
+    assert_eq!(logs.stdout.value, "detached");
 }
