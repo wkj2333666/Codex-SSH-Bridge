@@ -20,6 +20,10 @@ pub enum ErrorCode {
     PermissionDenied,
     NotDirectory,
     MutationOutcomeUnknown,
+    JobStartOutcomeUnknown,
+    JobCancelOutcomeUnknown,
+    JobStateInvalid,
+    JobExpired,
     OutputLimit,
     RequestTooLarge,
     ProtocolError,
@@ -72,6 +76,8 @@ pub struct ErrorDetails {
     pub not_changed_paths: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome_unknown_paths: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 pub fn attach_available_remote_context(

@@ -622,6 +622,11 @@ fn edit_error_code(code: ErrorCode) -> EditErrorCode {
         ErrorCode::PermissionDenied => EditErrorCode::PermissionDenied,
         ErrorCode::NotDirectory => EditErrorCode::NotDirectory,
         ErrorCode::MutationOutcomeUnknown => EditErrorCode::MutationOutcomeUnknown,
+        ErrorCode::JobStartOutcomeUnknown | ErrorCode::JobCancelOutcomeUnknown => {
+            EditErrorCode::MutationOutcomeUnknown
+        }
+        ErrorCode::JobStateInvalid => EditErrorCode::ProtocolError,
+        ErrorCode::JobExpired => EditErrorCode::NotFound,
         ErrorCode::OutputLimit => EditErrorCode::OutputLimit,
         ErrorCode::RequestTooLarge => EditErrorCode::RequestTooLarge,
         ErrorCode::ProtocolError => EditErrorCode::ProtocolError,

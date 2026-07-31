@@ -8,6 +8,7 @@ pub const JOB_ID_HEX_BYTES: usize = 32;
 pub const MAX_JOB_LABEL_BYTES: usize = 256;
 pub const DEFAULT_JOB_LOG_PAGE_BYTES: usize = 256 * 1024;
 pub const MAX_JOB_LOG_PAGE_BYTES: usize = 1024 * 1024;
+pub const MAX_JOB_LIST_ENTRIES: usize = 1_000;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -180,7 +181,12 @@ pub struct JobSummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum JobControlRequest {
     Start(JobRequestRecord),
     Status { job_id: JobId },
@@ -191,7 +197,12 @@ pub enum JobControlRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum JobControlResponse {
     Started(JobStateRecord),
     Status(JobStateRecord),

@@ -31,7 +31,6 @@ const MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
 const TERM_GRACE: Duration = Duration::from_secs(5);
 const CONTROL_WAIT_GRACE: Duration = Duration::from_secs(6);
 const JOB_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
-const MAX_LIST_JOBS: usize = 1_000;
 const RETENTION_BUDGET: usize = 32;
 const READINESS: &[u8] = b"READY\n";
 const READINESS_ENV: &str = "CODEX_SSH_JOB_READINESS";
@@ -149,7 +148,7 @@ impl JobStore {
     }
 
     pub fn list(&self, max_jobs: usize) -> io::Result<Vec<crate::job_protocol::JobSummary>> {
-        if max_jobs == 0 || max_jobs > MAX_LIST_JOBS {
+        if max_jobs == 0 || max_jobs > crate::job_protocol::MAX_JOB_LIST_ENTRIES {
             return Err(invalid_data("invalid remote job list limit"));
         }
         let mut jobs = Vec::new();

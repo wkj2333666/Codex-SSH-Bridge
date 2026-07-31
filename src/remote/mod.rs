@@ -22,6 +22,7 @@ use crate::ssh::{FixedRunRequest, FixedRunResult, HelperMode, SshRunner};
 
 mod edit_cache;
 mod edit_sync;
+mod job;
 mod metadata;
 mod patch;
 mod protocol;
@@ -29,6 +30,12 @@ mod read;
 mod run;
 mod search;
 mod write;
+
+pub use job::{
+    RemoteJobDeleteResult, RemoteJobIdRequest, RemoteJobListRequest, RemoteJobListResult,
+    RemoteJobLogsRequest, RemoteJobLogsResult, RemoteJobStartRequest, RemoteJobStartResult,
+    RemoteJobStatusResult,
+};
 
 const MAX_INPUT_PATH_BYTES: usize = 64 * 1024;
 const MAX_STAT_PATHS: usize = 256;
@@ -357,6 +364,54 @@ impl RemoteBridge {
         let result = run::run(self, request, cancel).await?;
         self.edit_cache.invalidate_clean_host(&host).await;
         Ok(result)
+    }
+
+    pub async fn job_start(
+        &self,
+        request: RemoteJobStartRequest,
+        cancel: CancellationToken,
+    ) -> BridgeResult<RemoteJobStartResult> {
+        job::start(self, request, cancel).await
+    }
+
+    pub async fn job_status(
+        &self,
+        request: RemoteJobIdRequest,
+        cancel: CancellationToken,
+    ) -> BridgeResult<RemoteJobStatusResult> {
+        job::status(self, request, cancel).await
+    }
+
+    pub async fn job_logs(
+        &self,
+        request: RemoteJobLogsRequest,
+        cancel: CancellationToken,
+    ) -> BridgeResult<RemoteJobLogsResult> {
+        job::logs(self, request, cancel).await
+    }
+
+    pub async fn job_cancel(
+        &self,
+        request: RemoteJobIdRequest,
+        cancel: CancellationToken,
+    ) -> BridgeResult<RemoteJobStatusResult> {
+        job::cancel(self, request, cancel).await
+    }
+
+    pub async fn job_list(
+        &self,
+        request: RemoteJobListRequest,
+        cancel: CancellationToken,
+    ) -> BridgeResult<RemoteJobListResult> {
+        job::list(self, request, cancel).await
+    }
+
+    pub async fn job_delete(
+        &self,
+        request: RemoteJobIdRequest,
+        cancel: CancellationToken,
+    ) -> BridgeResult<RemoteJobDeleteResult> {
+        job::delete(self, request, cancel).await
     }
 
     pub async fn write(
@@ -918,17 +973,6 @@ pub struct RemoteRunRequest {
     pub shell: RunShell,
     pub timeout_ms: Option<u64>,
     pub stdin: Option<RunStdin>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteJobStartRequest {
-    pub host: String,
-    pub command: String,
-    pub cwd: String,
-    pub shell: RunShell,
-    pub stdin: Option<RunStdin>,
-    pub timeout_ms: Option<u64>,
-    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -560,7 +560,7 @@ impl SshRunner {
     pub async fn execute_job(
         &self,
         host: String,
-        request: JobControlRequest,
+        mut request: JobControlRequest,
         cancel: CancellationToken,
     ) -> BridgeResult<JobControlResponse> {
         self.config.require_discovered_alias(&host)?;
@@ -591,7 +591,30 @@ impl SshRunner {
         .await
         .map_err(|_| connect_wait_timeout(&host, "SSH host initialization timed out"))??;
         drop(initialize_guard);
-        let shell = select_shell(&capability, ShellRequest::Auto)?;
+        let shell_request = match &request {
+            JobControlRequest::Start(record) => match &record.shell {
+                crate::job_protocol::JobShell::Bash => ShellRequest::Bash,
+                crate::job_protocol::JobShell::Sh => ShellRequest::Sh,
+                crate::job_protocol::JobShell::Login { .. } => ShellRequest::Login,
+            },
+            _ => ShellRequest::Auto,
+        };
+        let shell = select_shell(&capability, shell_request)?;
+        if let JobControlRequest::Start(record) = &mut request {
+            record.shell = match &shell.shell {
+                ShellKind::Bash { .. } => crate::job_protocol::JobShell::Bash,
+                ShellKind::PosixSh => crate::job_protocol::JobShell::Sh,
+                ShellKind::Login => crate::job_protocol::JobShell::Login {
+                    path: capability.login_shell.clone().ok_or_else(|| {
+                        BridgeError::new(
+                            ErrorCode::RemoteCapabilityMissing,
+                            "remote account login shell could not be resolved safely",
+                            false,
+                        )
+                    })?,
+                },
+            };
+        }
         let (session, _) = self
             .session_for_host(&policy, &host, limits, &capability, setup_deadline, &cancel)
             .await

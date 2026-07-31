@@ -63,7 +63,10 @@ pub(super) async fn run(
     Ok(convert_result(host_name, result))
 }
 
-fn decode_stdin(stdin: Option<RunStdin>, maximum: usize) -> BridgeResult<Option<Vec<u8>>> {
+pub(super) fn decode_stdin(
+    stdin: Option<RunStdin>,
+    maximum: usize,
+) -> BridgeResult<Option<Vec<u8>>> {
     let Some(stdin) = stdin else {
         return Ok(None);
     };
