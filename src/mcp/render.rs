@@ -238,7 +238,7 @@ pub fn output_read(
 ) -> CallToolResult {
     let result = match result {
         Ok(result) => result,
-        Err(error) => return render_error(error, budget),
+        Err(()) => return render_error(invalid_job_log_page(), budget),
     };
     let raw = match result.data.encoding {
         ValueEncoding::Utf8 => result.data.value.into_bytes(),
@@ -543,11 +543,11 @@ pub fn job_logs(
     };
     let stdout = match decode_job_log(&result.logs.stdout) {
         Ok(value) => value,
-        Err(error) => return render_error(error, budget),
+        Err(()) => return render_error(invalid_job_log_page(), budget),
     };
     let stderr = match decode_job_log(&result.logs.stderr) {
         Ok(value) => value,
-        Err(error) => return render_error(error, budget),
+        Err(()) => return render_error(invalid_job_log_page(), budget),
     };
     let stdout_start = result
         .logs
@@ -623,19 +623,21 @@ fn job_status_metadata(record: &JobStateRecord) -> Value {
     Value::Object(metadata)
 }
 
-fn decode_job_log(page: &JobLogPage) -> Result<Vec<u8>, BridgeError> {
+fn decode_job_log(page: &JobLogPage) -> Result<Vec<u8>, ()> {
     match page.encoding {
         JobLogEncoding::Utf8 => Ok(page.value.as_bytes().to_vec()),
         JobLogEncoding::Base64 => base64::engine::general_purpose::STANDARD
             .decode(page.value.as_bytes())
-            .map_err(|_| {
-                BridgeError::new(
-                    ErrorCode::ProtocolError,
-                    "remote Job log page was not valid Base64",
-                    false,
-                )
-            }),
+            .map_err(|_| ()),
     }
+}
+
+fn invalid_job_log_page() -> BridgeError {
+    BridgeError::new(
+        ErrorCode::ProtocolError,
+        "remote Job log page was not valid Base64",
+        false,
+    )
 }
 
 fn log_prefix_len(bytes: &[u8], requested: usize, encoding: JobLogEncoding) -> usize {
