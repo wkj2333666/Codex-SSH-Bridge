@@ -2943,7 +2943,7 @@ async fn cancellation_still_kills_pipe_inheriting_descendants_after_ssh_parent_e
         .trim()
         .parse()
         .unwrap();
-    let request_pid = fs::read_to_string(&request_pid_file)
+    let request_pid: u32 = fs::read_to_string(&request_pid_file)
         .unwrap()
         .trim()
         .parse()
