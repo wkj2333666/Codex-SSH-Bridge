@@ -101,9 +101,14 @@ fn persistent_session_runner(
             OsString::from(if persistent_fail { "1" } else { "0" }),
         ),
     ]);
+    let mut config = config_with_host("dev", "/tmp");
+    // This fixture exercises concurrent cold install and restart correctness,
+    // not the production default connection-latency gate. Under a loaded CI
+    // host, two helper uploads and handshakes can exceed ten seconds.
+    config.limits.connect_timeout_ms = 30_000;
     Arc::new(
         SshRunner::with_executable(
-            Arc::new(config_with_host("dev", "/tmp")),
+            Arc::new(config),
             runtime,
             store,
             support::fake_ssh_path(),
