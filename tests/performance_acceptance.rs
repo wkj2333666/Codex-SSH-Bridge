@@ -954,6 +954,7 @@ fn transport_call_kinds(log: &std::path::Path) -> Vec<&'static str> {
             "P" => Some("P"),
             "R" => Some("R"),
             "C" => Some("C"),
+            "S" => Some("S"),
             _ => None,
         })
         .collect()
