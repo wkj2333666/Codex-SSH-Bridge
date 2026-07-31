@@ -1,10 +1,14 @@
 use std::io::{BufReader, Cursor, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
-use codex_ssh_bridge::job_protocol::{JobId, JobState};
+use codex_ssh_bridge::job_protocol::{
+    JOB_RECORD_VERSION, JobId, JobLogsRequest, JobRequestRecord, JobShell, JobState,
+};
 use codex_ssh_bridge::remote_helper_protocol::{Frame, FrameKind, read_frame, write_frame};
+use codex_ssh_bridge::remote_job_runner::{JobStore, run_job_at};
 
 #[test]
 fn helper_wire_round_trips_binary_and_empty_payloads() {
@@ -677,4 +681,94 @@ fn task15_job_state_transition_matrix_is_closed() {
         assert!(Running.can_transition_to(terminal));
     }
     assert!(!Running.can_transition_to(Starting));
+}
+
+fn job_request(root: &std::path::Path, command: &str, timeout_ms: Option<u64>) -> JobRequestRecord {
+    JobRequestRecord {
+        version: JOB_RECORD_VERSION,
+        job_id: JobId::generate(),
+        shell: JobShell::Sh,
+        cwd: root.to_string_lossy().into_owned(),
+        command: command.to_owned(),
+        stdin_base64: String::new(),
+        timeout_ms,
+        label: Some("fixture".to_owned()),
+        max_output_bytes: 1024,
+        created_unix_ms: SystemTime::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+    }
+}
+
+#[test]
+fn task15_job_store_modes_state_and_logs_are_durable() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = JobStore::open_at(home.path()).unwrap();
+    let request = job_request(work.path(), "printf out; printf err >&2", None);
+    store.create(&request).unwrap();
+
+    let job_dir = home
+        .path()
+        .join(".local/state/codex-ssh-bridge/jobs")
+        .join(request.job_id.as_str());
+    assert_eq!(
+        std::fs::metadata(&job_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for file in [
+        "request",
+        "state",
+        "stdout.log",
+        "stderr.log",
+        "runner.lock",
+    ] {
+        assert_eq!(
+            std::fs::metadata(job_dir.join(file))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "wrong mode for {file}"
+        );
+    }
+    assert_eq!(
+        store.status(&request.job_id).unwrap().state,
+        JobState::Starting
+    );
+
+    run_job_at(home.path(), &request.job_id).unwrap();
+    let state = JobStore::open_at(home.path())
+        .unwrap()
+        .status(&request.job_id)
+        .unwrap();
+    assert_eq!(state.state, JobState::Succeeded);
+    assert_eq!(state.exit_code, Some(0));
+    let logs = store
+        .logs(&JobLogsRequest {
+            job_id: request.job_id.clone(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+            max_bytes: 1024,
+        })
+        .unwrap();
+    assert_eq!(logs.stdout.value, "out");
+    assert_eq!(logs.stderr.value, "err");
+    assert!(logs.stdout.eof);
+    assert!(logs.stderr.eof);
+}
+
+#[test]
+fn task15_job_runner_enforces_optional_timeout() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = JobStore::open_at(home.path()).unwrap();
+    let request = job_request(work.path(), "sleep 30", Some(25));
+    store.create(&request).unwrap();
+
+    let started = Instant::now();
+    run_job_at(home.path(), &request.job_id).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let state = store.status(&request.job_id).unwrap();
+    assert_eq!(state.state, JobState::TimedOut);
+    assert!(state.finished_unix_ms.is_some());
 }
