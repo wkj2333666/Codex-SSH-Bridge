@@ -2,6 +2,7 @@ pub mod capability;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod job_protocol;
 pub mod mcp;
 pub mod output;
 pub mod path;

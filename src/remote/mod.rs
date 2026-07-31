@@ -921,6 +921,17 @@ pub struct RemoteRunRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteJobStartRequest {
+    pub host: String,
+    pub command: String,
+    pub cwd: String,
+    pub shell: RunShell,
+    pub stdin: Option<RunStdin>,
+    pub timeout_ms: Option<u64>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteMode {
     Create,
     Replace { expected_sha256: Option<String> },
