@@ -3,10 +3,12 @@ use std::sync::{Arc, OnceLock};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::job_protocol::JobId;
 use crate::output::StreamKind;
 use crate::remote::{
     ApplyPatchRequest, DiscardEditsRequest, EditStatusRequest, ListRequest, OutputReadRequest,
-    ReadRequest, RemoteBridge, RemoteRunRequest, RunShell, RunStdin, SearchRequest, StatRequest,
+    ReadRequest, RemoteBridge, RemoteJobIdRequest, RemoteJobListRequest, RemoteJobLogsRequest,
+    RemoteJobStartRequest, RemoteRunRequest, RunShell, RunStdin, SearchRequest, StatRequest,
     SyncEditsRequest, WriteEncoding, WriteMode, WriteRequest,
 };
 
@@ -190,6 +192,65 @@ impl ToolService for RemoteMcpTools {
                         .await;
                     super::render::run(bridge, result, wire_budget, cancel).await
                 }
+                ParsedToolArguments::JobStart(arguments) => {
+                    let result = bridge
+                        .job_start(
+                            RemoteJobStartRequest {
+                                host: arguments.host,
+                                command: arguments.command,
+                                cwd: arguments.cwd,
+                                shell: map_run_shell(arguments.shell),
+                                stdin: arguments.stdin.map(|stdin| RunStdin {
+                                    encoding: map_encoding(stdin.encoding),
+                                    value: stdin.value,
+                                }),
+                                timeout_ms: arguments.timeout_ms,
+                                label: arguments.label,
+                            },
+                            cancel,
+                        )
+                        .await;
+                    super::render::job_start(result, wire_budget)
+                }
+                ParsedToolArguments::JobStatus(arguments) => {
+                    let result = bridge.job_status(job_id_request(arguments), cancel).await;
+                    super::render::job_status(result, wire_budget)
+                }
+                ParsedToolArguments::JobLogs(arguments) => {
+                    let result = bridge
+                        .job_logs(
+                            RemoteJobLogsRequest {
+                                host: arguments.host,
+                                job_id: parse_job_id(&arguments.job_id),
+                                stdout_offset: arguments.stdout_offset,
+                                stderr_offset: arguments.stderr_offset,
+                                max_bytes: arguments.max_bytes.unwrap_or(262_144),
+                            },
+                            cancel,
+                        )
+                        .await;
+                    super::render::job_logs(result, wire_budget)
+                }
+                ParsedToolArguments::JobCancel(arguments) => {
+                    let result = bridge.job_cancel(job_id_request(arguments), cancel).await;
+                    super::render::job_status(result, wire_budget)
+                }
+                ParsedToolArguments::JobList(arguments) => {
+                    let result = bridge
+                        .job_list(
+                            RemoteJobListRequest {
+                                host: arguments.host,
+                                max_jobs: arguments.max_jobs.unwrap_or(100),
+                            },
+                            cancel,
+                        )
+                        .await;
+                    super::render::job_list(result, wire_budget)
+                }
+                ParsedToolArguments::JobDelete(arguments) => {
+                    let result = bridge.job_delete(job_id_request(arguments), cancel).await;
+                    super::render::job_delete(result, wire_budget)
+                }
             }
         })
     }
@@ -226,6 +287,17 @@ fn map_write_mode(mode: ToolWriteMode) -> WriteMode {
         ToolWriteMode::Create {} => WriteMode::Create,
         ToolWriteMode::Replace { expected_sha256 } => WriteMode::Replace { expected_sha256 },
     }
+}
+
+fn job_id_request(arguments: JobIdArgs) -> RemoteJobIdRequest {
+    RemoteJobIdRequest {
+        host: arguments.host,
+        job_id: parse_job_id(&arguments.job_id),
+    }
+}
+
+fn parse_job_id(value: &str) -> JobId {
+    JobId::parse(value).expect("validated MCP Job IDs are exact lowercase hexadecimal")
 }
 
 const HOST_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
@@ -686,6 +758,45 @@ struct RunArgs {
     stdin: Option<ToolEncodedInput>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobStartArgs {
+    host: String,
+    command: String,
+    cwd: String,
+    #[serde(default)]
+    shell: ToolRunShell,
+    timeout_ms: Option<u64>,
+    stdin: Option<ToolEncodedInput>,
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobIdArgs {
+    host: String,
+    job_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobLogsArgs {
+    host: String,
+    job_id: String,
+    #[serde(default)]
+    stdout_offset: u64,
+    #[serde(default)]
+    stderr_offset: u64,
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobListArgs {
+    host: String,
+    max_jobs: Option<usize>,
+}
+
 #[allow(dead_code, reason = "Task 7 consumes the typed arguments")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -743,6 +854,12 @@ enum ParsedToolArguments {
     ApplyPatch(ApplyPatchArgs),
     Write(WriteArgs),
     Run(RunArgs),
+    JobStart(JobStartArgs),
+    JobStatus(JobIdArgs),
+    JobLogs(JobLogsArgs),
+    JobCancel(JobIdArgs),
+    JobList(JobListArgs),
+    JobDelete(JobIdArgs),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -772,6 +889,12 @@ fn parse_tool_arguments(
         "remote_apply_patch" => deserialize(arguments).map(ParsedToolArguments::ApplyPatch),
         "remote_write" => deserialize(arguments).map(ParsedToolArguments::Write),
         "remote_run" => deserialize(arguments).map(ParsedToolArguments::Run),
+        "remote_job_start" => deserialize(arguments).map(ParsedToolArguments::JobStart),
+        "remote_job_status" => deserialize(arguments).map(ParsedToolArguments::JobStatus),
+        "remote_job_logs" => deserialize(arguments).map(ParsedToolArguments::JobLogs),
+        "remote_job_cancel" => deserialize(arguments).map(ParsedToolArguments::JobCancel),
+        "remote_job_list" => deserialize(arguments).map(ParsedToolArguments::JobList),
+        "remote_job_delete" => deserialize(arguments).map(ParsedToolArguments::JobDelete),
         _ => return Err(invalid_arguments(name, ArgumentValidationCategory::Shape)),
     }
     .map_err(|()| invalid_arguments(name, ArgumentValidationCategory::Shape))?;
@@ -860,6 +983,42 @@ fn validate_parsed_arguments(
             }
             Ok(())
         }
+        ParsedToolArguments::JobStart(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_chars(&arguments.command, 1, 8_388_608)?;
+            validate_path(&arguments.cwd)?;
+            validate_optional_minimum(arguments.timeout_ms, 1)?;
+            if let Some(stdin) = &arguments.stdin {
+                validate_chars(&stdin.value, 0, 5_592_408)?;
+            }
+            if let Some(label) = &arguments.label {
+                validate_chars(label, 0, 256)?;
+            }
+            Ok(())
+        }
+        ParsedToolArguments::JobStatus(arguments)
+        | ParsedToolArguments::JobCancel(arguments)
+        | ParsedToolArguments::JobDelete(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_job_id(&arguments.job_id)
+        }
+        ParsedToolArguments::JobLogs(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_job_id(&arguments.job_id)?;
+            validate_optional_range(arguments.max_bytes, 1, 1_048_576)
+        }
+        ParsedToolArguments::JobList(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_optional_range(arguments.max_jobs, 1, 1_000)
+        }
+    }
+}
+
+fn validate_job_id(job_id: &str) -> Result<(), ArgumentValidationCategory> {
+    if is_lower_hex(job_id, 32) {
+        Ok(())
+    } else {
+        Err(ArgumentValidationCategory::Constraint)
     }
 }
 
