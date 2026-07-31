@@ -13,11 +13,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use codex_ssh_bridge::config::{Config, HostLimitOverrides, HostProfile};
+use codex_ssh_bridge::job_protocol::{JobLogEncoding, JobState};
 use codex_ssh_bridge::output::OutputStore;
 use codex_ssh_bridge::remote::{
     ApplyPatchRequest, EncodedValue, ListRequest, ReadEntry, ReadRequest, RemoteBridge,
-    RemoteFileKind, RemoteRunRequest, RunShell, SearchRequest, ShellName, StatEntry, StatRequest,
-    ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest,
+    RemoteFileKind, RemoteJobIdRequest, RemoteJobListRequest, RemoteJobLogsRequest,
+    RemoteJobStartRequest, RemoteRunRequest, RunShell, SearchRequest, ShellName, StatEntry,
+    StatRequest, ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest,
 };
 use codex_ssh_bridge::ssh::{RuntimePaths, SshRunner};
 use codex_ssh_bridge::{ErrorCode, quote};
@@ -453,6 +455,12 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         Some(fixture) => fixture,
         None => return,
     };
+    let helper_fixture = install_helper_fixture();
+    if required {
+        helper_fixture
+            .as_ref()
+            .expect("required real SSH Job integration needs the helper fixture");
+    }
     let (runtime_base, runtime, runner, bridge) = fixture.bridge().expect("build real SSH bridge");
     let root = config_path(&fixture.root).unwrap().to_owned();
     let seed_path = format!("{root}/seed.txt");
@@ -809,6 +817,28 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         assert!(cancel_started.elapsed() < Duration::from_millis(500));
     }
 
+    let durable_job = if helper_fixture.is_some() {
+        let started = bridge
+            .job_start(
+                RemoteJobStartRequest {
+                    host: BASH_HOST.to_owned(),
+                    command: "printf job-stdout; printf job-stderr >&2; sleep 30 & wait".to_owned(),
+                    cwd: root.clone(),
+                    shell: RunShell::Sh,
+                    stdin: None,
+                    timeout_ms: None,
+                    label: Some("real ssh lifecycle".to_owned()),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("start durable Job through real sshd");
+        assert_eq!(started.state, JobState::Running);
+        Some(started.job_id)
+    } else {
+        None
+    };
+
     drop(bridge);
     drop(runner);
     fixture
@@ -818,8 +848,125 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         .expect("clean up the truthfully reported possibly-running remote process");
     drop(runtime);
     drop(runtime_base);
+
+    if let Some(job_id) = durable_job {
+        let (restart_base, restart_runtime, restart_runner, restart_bridge) =
+            fixture.bridge().expect("rebuild real SSH bridge for Job");
+        let status = restart_bridge
+            .job_status(
+                RemoteJobIdRequest {
+                    host: BASH_HOST.to_owned(),
+                    job_id: job_id.clone(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("fresh Bridge must observe durable Job");
+        assert_eq!(status.record.state, JobState::Running);
+        let command_group = status
+            .record
+            .command_group
+            .expect("running Job must expose its verified command identity");
+        let command_process = OwnedProcess {
+            pid: u32::try_from(command_group.pid).unwrap(),
+            start_ticks: command_group.start_ticks,
+        };
+
+        let log_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let logs = restart_bridge
+                .job_logs(
+                    RemoteJobLogsRequest {
+                        host: BASH_HOST.to_owned(),
+                        job_id: job_id.clone(),
+                        stdout_offset: 0,
+                        stderr_offset: 0,
+                        max_bytes: 4096,
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("read durable Job logs after Bridge restart");
+            assert_eq!(logs.logs.stdout.encoding, JobLogEncoding::Utf8);
+            assert_eq!(logs.logs.stderr.encoding, JobLogEncoding::Utf8);
+            if logs.logs.stdout.value == "job-stdout" && logs.logs.stderr.value == "job-stderr" {
+                break;
+            }
+            assert!(
+                Instant::now() < log_deadline,
+                "durable Job output was not drained promptly: {logs:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let cancelled = restart_bridge
+            .job_cancel(
+                RemoteJobIdRequest {
+                    host: BASH_HOST.to_owned(),
+                    job_id: job_id.clone(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("cancel durable Job through fresh Bridge");
+        assert_eq!(cancelled.record.state, JobState::Cancelled);
+        assert!(!same_process_exists(command_process));
+        restart_bridge
+            .job_delete(
+                RemoteJobIdRequest {
+                    host: BASH_HOST.to_owned(),
+                    job_id: job_id.clone(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("delete terminal durable Job");
+        let listed = restart_bridge
+            .job_list(
+                RemoteJobListRequest {
+                    host: BASH_HOST.to_owned(),
+                    max_jobs: 100,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("list durable Jobs after delete");
+        assert!(listed.jobs.iter().all(|job| job.job_id != job_id));
+
+        drop(restart_bridge);
+        drop(restart_runner);
+        fixture
+            .close_control_masters(&restart_runtime)
+            .expect("close restarted Job ControlMaster");
+        drop(restart_runtime);
+        drop(restart_base);
+    }
     fixture.shutdown().expect("stop isolated sshd");
     assert!(!same_process_exists(cancelled_remote_pid));
+}
+
+fn install_helper_fixture() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let profile = executable.parent()?.parent()?;
+    let source = std::env::var("CARGO_BIN_EXE_codex-ssh-bridge-helper")
+        .or_else(|_| std::env::var("CARGO_BIN_EXE_codex_ssh_bridge_helper"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| profile.join("codex-ssh-bridge-helper"));
+    if !source.is_file() {
+        return None;
+    }
+    let target = match std::env::consts::ARCH {
+        "x86_64" => "x86_64-unknown-linux-musl",
+        "aarch64" => "aarch64-unknown-linux-musl",
+        "arm" => "armv7-unknown-linux-musleabihf",
+        _ => return None,
+    };
+    let directory = profile.join("remote-helpers");
+    fs::create_dir_all(&directory).ok()?;
+    let destination = directory.join(target);
+    fs::copy(source, &destination).ok()?;
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).ok()?;
+    Some(destination)
 }
 
 fn utf8(value: &EncodedValue) -> &str {

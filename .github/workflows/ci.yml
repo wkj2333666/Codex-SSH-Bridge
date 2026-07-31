@@ -206,6 +206,9 @@ jobs:
           cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --test remote_ops \
             five_hosts_successfully_stream_forty_mib_below_rss_bound -- --nocapture \
             2>&1 | tee diagnostics/rss-fixed-operations.log
+          cargo +"$RUST_TOOLCHAIN" test --release --features profile --locked --test performance_acceptance \
+            task15_release_remote_job_pressure_keeps_local_resources_bounded -- --nocapture \
+            2>&1 | tee diagnostics/rss-remote-jobs.log
 
       - name: Run required real SSH edit-cache integration
         env:

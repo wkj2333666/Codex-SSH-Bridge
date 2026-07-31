@@ -350,6 +350,7 @@ fn install_release_helper_fixture() -> Option<PathBuf> {
     let directory = std::env::current_exe()
         .ok()?
         .parent()?
+        .parent()?
         .join("remote-helpers");
     std::fs::create_dir_all(&directory).ok()?;
     let target = directory.join(target_name);
@@ -467,6 +468,128 @@ async fn task12_release_persistent_helper_cold_reuse_warm_profile() {
     let (shell_p50, shell_p95, _) = short_duration_percentiles(&mut shell_warm);
     eprintln!(
         "Task12 persistent profile: persistent_install_cold={install_p50:?}/{install_p95:?} first_install={install_cold:?} persistent_reuse_cold={reuse_p50:?}/{reuse_p95:?} persistent_warm={persistent_p50:?}/{persistent_p95:?} shell_warm={shell_p50:?}/{shell_p95:?} warm_persistent_upload_bytes=0"
+    );
+    let _ = std::fs::remove_file(helper_path);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task15_release_remote_job_pressure_keeps_local_resources_bounded() {
+    if cfg!(debug_assertions) {
+        eprintln!("Task15 remote Job pressure acceptance is release-only");
+        return;
+    }
+    let Some(helper_path) = install_release_helper_fixture() else {
+        eprintln!("Task15 remote Job pressure skipped: release helper unavailable");
+        return;
+    };
+    let remote_home = TempDir::new().unwrap();
+    let fixture = persistent_fake_fixture(remote_home.path());
+    let warm = call_json(
+        &fixture.tools,
+        "remote_run",
+        json!({"host":"dev", "cwd":"/tmp", "command":"true", "shell":"sh"}),
+    )
+    .await;
+    assert_eq!(warm["isError"], Value::Null, "{warm}");
+    let baseline_fds = proc_entry_count("/proc/self/fd");
+    let baseline_rss = resident_kib();
+    let baseline_files = recursive_regular_file_count(fixture._runtime_base.path());
+
+    let mut job_ids = Vec::new();
+    for index in 0..16 {
+        let started = call_json(
+            &fixture.tools,
+            "remote_job_start",
+            json!({
+                "host":"dev",
+                "cwd":"/tmp",
+                "command":"sleep 30",
+                "shell":"sh",
+                "label":format!("pressure-{index}"),
+            }),
+        )
+        .await;
+        assert_eq!(started["isError"], Value::Null, "{started}");
+        assert_eq!(started["structuredContent"]["state"], "running");
+        job_ids.push(
+            started["structuredContent"]["job_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert_eq!(
+        transport_call_kinds(&fixture.log)
+            .iter()
+            .filter(|kind| **kind == "S")
+            .count(),
+        1,
+        "active Jobs must not own one SSH transport each"
+    );
+
+    let arguments = json!({"host":"dev", "cwd":"/tmp", "command":"true", "shell":"sh"});
+    let mut warm_during_jobs = Vec::new();
+    for _ in 0..32 {
+        let started = Instant::now();
+        let result = call_json(&fixture.tools, "remote_run", arguments.clone()).await;
+        warm_during_jobs.push(started.elapsed());
+        assert_eq!(result["isError"], Value::Null, "{result}");
+    }
+    let (_, warm_p95, _) = short_duration_percentiles(&mut warm_during_jobs);
+    assert!(
+        warm_p95 < SSH_P95_CEILING,
+        "warm remote_run p95 with active Jobs was {warm_p95:?}"
+    );
+
+    for index in 0..1_000 {
+        let job_id = &job_ids[index % job_ids.len()];
+        let (tool, arguments) = if index % 2 == 0 {
+            ("remote_job_status", json!({"host":"dev", "job_id":job_id}))
+        } else {
+            (
+                "remote_job_logs",
+                json!({"host":"dev", "job_id":job_id, "max_bytes":1024}),
+            )
+        };
+        let result = call_json(&fixture.tools, tool, arguments).await;
+        assert_eq!(result["isError"], Value::Null, "{result}");
+    }
+
+    let final_fds = proc_entry_count("/proc/self/fd");
+    let final_rss = resident_kib();
+    let final_files = recursive_regular_file_count(fixture._runtime_base.path());
+    assert!(
+        final_fds <= baseline_fds + 4,
+        "Job controls grew local descriptors from {baseline_fds} to {final_fds}"
+    );
+    assert!(
+        final_rss.saturating_sub(baseline_rss) <= ZERO_OUTPUT_RSS_GROWTH_CEILING_KIB,
+        "Job controls grew RSS from {baseline_rss} KiB to {final_rss} KiB"
+    );
+    assert_eq!(
+        final_files, baseline_files,
+        "Job controls must not create local output spool files"
+    );
+
+    for job_id in job_ids {
+        let cancelled = call_json(
+            &fixture.tools,
+            "remote_job_cancel",
+            json!({"host":"dev", "job_id":job_id}),
+        )
+        .await;
+        assert_eq!(cancelled["isError"], Value::Null, "{cancelled}");
+        assert_eq!(cancelled["structuredContent"]["state"], "cancelled");
+        let deleted = call_json(
+            &fixture.tools,
+            "remote_job_delete",
+            json!({"host":"dev", "job_id":job_id}),
+        )
+        .await;
+        assert_eq!(deleted["isError"], Value::Null, "{deleted}");
+    }
+    eprintln!(
+        "Task15 remote Job pressure: jobs=16 controls=1000 warm_p95={warm_p95:?} rss={baseline_rss}->{final_rss}KiB fds={baseline_fds}->{final_fds}"
     );
     let _ = std::fs::remove_file(helper_path);
 }
@@ -1416,6 +1539,23 @@ fn resident_kib() -> u64 {
 
 fn proc_entry_count(path: &str) -> usize {
     std::fs::read_dir(path).unwrap().count()
+}
+
+fn recursive_regular_file_count(root: &Path) -> usize {
+    let mut pending = vec![root.to_owned()];
+    let mut files = 0;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                files += 1;
+            }
+        }
+    }
+    files
 }
 
 #[test]
