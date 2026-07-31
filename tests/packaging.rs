@@ -439,6 +439,66 @@ fn skill_states_buffered_edit_durability_without_burdening_the_agent() {
 }
 
 #[test]
+fn skill_and_reference_teach_the_durable_remote_job_boundary() {
+    let skill = read_text("skills/remote-ssh-ops/SKILL.md").to_ascii_lowercase();
+    let operations =
+        read_text("skills/remote-ssh-ops/references/operations.md").to_ascii_lowercase();
+    for document in [&skill, &operations] {
+        for tool in [
+            "remote_job_start",
+            "remote_job_status",
+            "remote_job_logs",
+            "remote_job_cancel",
+            "remote_job_list",
+            "remote_job_delete",
+        ] {
+            assert!(document.contains(tool), "Job reference omits {tool}");
+        }
+        for boundary in [
+            "remote_run remains synchronous",
+            "codex task",
+            "bridge disconnect",
+            "survives",
+            "never submit the command again blindly",
+            "no automatic restart after a remote reboot",
+        ] {
+            assert!(
+                document.contains(boundary),
+                "Job reference omits lifecycle boundary {boundary:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn public_docs_state_remote_job_storage_security_and_retention() {
+    let docs = [
+        read_text("README.md"),
+        read_text("docs/security.md"),
+        read_text("docs/performance.md"),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    for required in [
+        ".local/state/codex-ssh-bridge/jobs",
+        "0700",
+        "0600",
+        "no-follow",
+        "process start",
+        "64 mib",
+        "seven-day",
+        "lazy retention",
+        "persistent binary helper",
+        "no automatic restart after a remote reboot",
+    ] {
+        assert!(
+            docs.contains(required),
+            "public Job documentation omits {required:?}"
+        );
+    }
+}
+
+#[test]
 fn local_installation_has_a_transactional_rust_entrypoint_for_mcp_and_skill() {
     let cli = read_text("src/cli.rs");
     assert!(cli.contains("mod install;"));
