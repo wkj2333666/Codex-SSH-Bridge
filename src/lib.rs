@@ -11,6 +11,7 @@ pub mod quote;
 pub mod remote;
 pub mod remote_helper;
 pub mod remote_helper_protocol;
+pub mod remote_job_runner;
 pub mod ssh;
 
 pub use error::{BridgeError, BridgeResult, ErrorCode, ErrorDetails};
