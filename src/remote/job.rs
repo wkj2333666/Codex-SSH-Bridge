@@ -271,7 +271,7 @@ fn prepare_start(
     bridge: &RemoteBridge,
     request: RemoteJobStartRequest,
 ) -> BridgeResult<(String, JobRequestRecord)> {
-    let resolved = bridge.runner.config().host(&request.host)?;
+    let limits = bridge.runner.config().host(&request.host)?.limits;
     if request.command.is_empty() || request.command.as_bytes().contains(&0) {
         return Err(BridgeError::invalid_argument(
             "remote Job command must be nonempty and contain no NUL",
@@ -291,7 +291,7 @@ fn prepare_start(
     {
         return Err(BridgeError::invalid_argument("remote Job label is invalid"));
     }
-    let stdin = run::decode_stdin(request.stdin, resolved.limits.max_write_bytes)?
+    let stdin = run::decode_stdin(request.stdin, limits.max_write_bytes)?
         .map_or_else(String::new, |value| STANDARD.encode(value));
     let shell = match request.shell {
         RunShell::Bash => JobShell::Bash,
@@ -311,7 +311,7 @@ fn prepare_start(
             stdin_base64: stdin,
             timeout_ms: request.timeout_ms,
             label: request.label,
-            max_output_bytes: resolved.limits.max_output_bytes,
+            max_output_bytes: limits.max_output_bytes,
             created_unix_ms: now_ms()?,
         },
     ))
