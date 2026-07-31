@@ -773,7 +773,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
                 host: BASH_HOST.to_owned(),
                 command: concat!(
                     "child=\n",
-                    "cleanup() { [ -z \"$child\" ] || kill \"$child\" 2>/dev/null || :; exit 0; }\n",
+                    "cleanup() { [ -z \"$child\" ] || { kill \"$child\" 2>/dev/null || :; wait \"$child\" 2>/dev/null || :; }; exit 0; }\n",
                     "trap cleanup HUP TERM INT\n",
                     "printf '%s' \"$$\" > cancel.pid\n",
                     "while :; do sleep 1 & child=$!; wait \"$child\" || :; child=; done",
