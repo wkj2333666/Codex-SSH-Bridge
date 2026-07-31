@@ -36,6 +36,7 @@ use crate::config::{Config, EffectiveLimits};
 use crate::error::{
     BridgeError, BridgeResult, ErrorCode, ErrorShellMetadata, attach_available_remote_context,
 };
+use crate::job_protocol::{JobControlRequest, JobControlResponse};
 use crate::output::{
     CaptureLimits, CapturedOutput, InternalCapturedOutput, InternalSpoolRegistration, OutputPage,
     OutputProvenance, OutputReference, OutputStore, StderrSignals, StoredProvenance, StreamKind,
@@ -554,6 +555,155 @@ impl SshRunner {
 
     pub(crate) fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub async fn execute_job(
+        &self,
+        host: String,
+        request: JobControlRequest,
+        cancel: CancellationToken,
+    ) -> BridgeResult<JobControlResponse> {
+        self.config.require_discovered_alias(&host)?;
+        let limits = self.config.limits();
+        let setup_deadline = connect_deadline(limits.connect_timeout_ms);
+        let initializer = self.initializer(&host).await;
+        let initialize_guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
+            guard = initializer.lock() => guard,
+            () = tokio::time::sleep_until(setup_deadline) => {
+                return Err(connect_wait_timeout(
+                    &host,
+                    "SSH host initialization wait timed out",
+                ));
+            }
+        };
+        let initialize_timeout_ms = remaining_connect_timeout_ms(setup_deadline, &host)?;
+        let (policy, capability) = tokio::time::timeout_at(
+            setup_deadline,
+            self.initialize_host(
+                &host,
+                crate::REMOTE_OPERATION_ROOT,
+                initialize_timeout_ms,
+                &cancel,
+            ),
+        )
+        .await
+        .map_err(|_| connect_wait_timeout(&host, "SSH host initialization timed out"))??;
+        drop(initialize_guard);
+        let shell = select_shell(&capability, ShellRequest::Auto)?;
+        let (session, _) = self
+            .session_for_host(&policy, &host, limits, &capability, setup_deadline, &cancel)
+            .await
+            .map_err(|error| {
+                attach_selected_context(error, &host, &capability.physical_root, &shell)
+            })?;
+        if session.helper_mode() != HelperMode::Persistent {
+            return Err(attach_selected_context(
+                BridgeError::new(
+                    ErrorCode::RemoteCapabilityMissing,
+                    "durable remote jobs require the persistent binary helper",
+                    false,
+                ),
+                &host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
+        let body = serde_json::to_vec(&request).map_err(|_| {
+            BridgeError::new(
+                ErrorCode::ProtocolError,
+                "remote Job request could not be serialized",
+                false,
+            )
+        })?;
+        let control_timeout = Duration::from_millis(limits.command_timeout_ms);
+        let response_timeout = control_timeout
+            .checked_add(REMOTE_TIMEOUT_RETURN_GRACE)
+            .ok_or_else(|| BridgeError::invalid_argument("Job control timeout is too large"))?;
+        let result = match session
+            .execute(
+                SessionRequest {
+                    action: SessionAction::Job { request: body },
+                    env: BTreeMap::new(),
+                    timeout: control_timeout,
+                    admission_deadline: setup_deadline,
+                    response_timeout,
+                    stdout_limit: limits.max_frame_bytes as u64,
+                    stderr_limit: 1024,
+                    output: None,
+                },
+                cancel,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if !session.is_reusable() {
+                    self.drop_session(&host, session.session());
+                }
+                return Err(attach_selected_context(
+                    error,
+                    &host,
+                    &capability.physical_root,
+                    &shell,
+                ));
+            }
+        };
+        if result.timed_out {
+            return Err(attach_selected_context(
+                BridgeError::new(
+                    ErrorCode::CommandTimeout,
+                    "remote Job control request timed out",
+                    false,
+                ),
+                &host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
+        if result.status != 0
+            || result.stdout_truncated
+            || result.stderr_truncated
+            || !result.stderr.is_empty()
+        {
+            return Err(attach_selected_context(
+                BridgeError::new(
+                    ErrorCode::ProtocolError,
+                    "remote Job control response was invalid",
+                    false,
+                ),
+                &host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
+        let response: JobControlResponse =
+            serde_json::from_slice(&result.stdout).map_err(|_| {
+                attach_selected_context(
+                    BridgeError::new(
+                        ErrorCode::ProtocolError,
+                        "remote Job control response was not valid JSON",
+                        false,
+                    ),
+                    &host,
+                    &capability.physical_root,
+                    &shell,
+                )
+            })?;
+        if !job_response_matches(&request, &response) {
+            return Err(attach_selected_context(
+                BridgeError::new(
+                    ErrorCode::ProtocolError,
+                    "remote Job control response did not match the request",
+                    false,
+                ),
+                &host,
+                &capability.physical_root,
+                &shell,
+            ));
+        }
+        Ok(response)
     }
 
     pub(crate) async fn execute_native_search(
@@ -1611,6 +1761,26 @@ fn map_native_search_error(
         _ => error,
     };
     attach_selected_context(mapped, host, physical_root, shell)
+}
+
+fn job_response_matches(request: &JobControlRequest, response: &JobControlResponse) -> bool {
+    match (request, response) {
+        (JobControlRequest::Start(request), JobControlResponse::Started(state)) => {
+            request.job_id == state.job_id
+        }
+        (JobControlRequest::Status { job_id }, JobControlResponse::Status(state))
+        | (JobControlRequest::Cancel { job_id }, JobControlResponse::Cancelled(state)) => {
+            job_id == &state.job_id
+        }
+        (JobControlRequest::Logs(request), JobControlResponse::Logs(response)) => {
+            request.job_id == response.job_id
+        }
+        (JobControlRequest::List { .. }, JobControlResponse::Listed(_)) => true,
+        (JobControlRequest::Delete { job_id }, JobControlResponse::Deleted { job_id: deleted }) => {
+            job_id == deleted
+        }
+        _ => false,
+    }
 }
 
 impl FixedOperationKind {

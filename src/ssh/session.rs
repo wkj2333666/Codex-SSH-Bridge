@@ -60,6 +60,9 @@ pub(crate) enum SessionAction {
         max_results: usize,
         binary: bool,
     },
+    Job {
+        request: Vec<u8>,
+    },
 }
 
 #[derive(Debug)]
@@ -1322,7 +1325,49 @@ fn build_request_frames(
             *binary,
             max_payload,
         ),
+        SessionAction::Job { request: body } => {
+            build_job_request_frames(request_id, body, max_payload)
+        }
     }
+}
+
+fn build_job_request_frames(
+    request_id: u64,
+    body: &[u8],
+    max_payload: usize,
+) -> BridgeResult<Vec<Frame>> {
+    if body.is_empty() {
+        return Err(BridgeError::invalid_argument(
+            "session Job request must not be empty",
+        ));
+    }
+    if body.len() > max_payload {
+        return Err(BridgeError::new(
+            ErrorCode::RequestTooLarge,
+            "session Job request exceeds the configured frame limit",
+            false,
+        ));
+    }
+    let metadata = format!("operation=job\nrequest_length={}\n", body.len());
+    if metadata.len() > max_payload {
+        return Err(BridgeError::new(
+            ErrorCode::RequestTooLarge,
+            "session Job metadata exceeds the configured frame limit",
+            false,
+        ));
+    }
+    Ok(vec![
+        Frame {
+            kind: FrameKind::Open,
+            request_id,
+            payload: metadata.into_bytes(),
+        },
+        Frame {
+            kind: FrameKind::Data,
+            request_id,
+            payload: body.to_vec(),
+        },
+    ])
 }
 
 #[allow(clippy::too_many_arguments)]
