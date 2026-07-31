@@ -537,28 +537,27 @@ fn run_request<W>(shared: Arc<Shared<W>>, spec: RequestSpec, control: Arc<Reques
 where
     W: Write + Send + 'static,
 {
-    if let Err(message) = execute_request(&shared, &spec, &control) {
-        let _ = send_error(&shared, spec.request_id(), &message);
+    let request_id = spec.request_id();
+    if let Err(message) = execute_request(&shared, spec, &control) {
+        let _ = send_error(&shared, request_id, &message);
     }
     if let Ok(mut requests) = shared.requests.lock() {
-        requests.remove(&spec.request_id());
+        requests.remove(&request_id);
     }
 }
 
 fn execute_request<W>(
     shared: &Arc<Shared<W>>,
-    spec: &RequestSpec,
+    spec: RequestSpec,
     control: &Arc<RequestControl>,
 ) -> Result<(), String>
 where
     W: Write + Send + 'static,
 {
-    let RequestSpec::Command(spec) = spec else {
-        return match spec {
-            RequestSpec::Search(spec) => execute_search(shared, spec, control),
-            RequestSpec::Job(spec) => execute_job(shared, spec, control),
-            RequestSpec::Command(_) => unreachable!(),
-        };
+    let spec = match spec {
+        RequestSpec::Command(spec) => spec,
+        RequestSpec::Search(spec) => return execute_search(shared, &spec, control),
+        RequestSpec::Job(spec) => return execute_job(shared, &spec, control),
     };
     let mut command = match spec.shell.as_str() {
         "bash" => {
@@ -626,6 +625,8 @@ where
     let request_id = spec.request_id;
     let stdout_limit = spec.stdout_limit;
     let stderr_limit = spec.stderr_limit;
+    let timeout = spec.timeout;
+    let input = spec.stdin;
     let stdout_shared = Arc::clone(shared);
     let stdout_control = Arc::clone(control);
     let stop_sending = Arc::new(AtomicBool::new(false));
@@ -657,13 +658,12 @@ where
             stderr_state_thread,
         )
     });
-    let stdin_thread = child.stdin.take().map(|stdin| {
-        let input = spec.stdin.clone();
-        thread::spawn(move || write_stdin(stdin, &input))
-    });
+    let stdin_thread = child
+        .stdin
+        .take()
+        .map(|stdin| thread::spawn(move || write_stdin(stdin, &input)));
     let watchdog_done = Arc::new((Mutex::new(false), Condvar::new()));
     let timed_out = Arc::new(AtomicBool::new(false));
-    let timeout = spec.timeout;
     let watchdog = if timeout.is_zero() {
         None
     } else {

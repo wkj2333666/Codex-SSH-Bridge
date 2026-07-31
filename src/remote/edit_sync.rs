@@ -112,14 +112,14 @@ while [ "$#" -gt 0 ]; do
         cleanup_tmp() { rm -f -- "$tmp" >/dev/null 2>&1 || :; }
         trap 'cleanup_tmp; exit 125' HUP INT TERM
         dd of="$tmp" bs=262144 iflag=count_bytes count="$desired_size" \
-            status=none conv=notrunc oflag=nofollow || { cleanup_tmp; exit 4; }
+            status=none conv=notrunc oflag=nofollow || { cleanup_tmp; exit 40; }
         staged_size=$(stat --printf='%s' -- "$tmp" 2>/dev/null) || {
             cleanup_tmp
-            exit 4
+            exit 41
         }
-        [ "$staged_size" = "$desired_size" ] || { cleanup_tmp; exit 4; }
-        staged_hash=$(hash_file "$tmp") || { cleanup_tmp; exit 4; }
-        [ "$staged_hash" = "$desired_hash" ] || { cleanup_tmp; exit 4; }
+        [ "$staged_size" = "$desired_size" ] || { cleanup_tmp; exit 42; }
+        staged_hash=$(hash_file "$tmp") || { cleanup_tmp; exit 43; }
+        [ "$staged_hash" = "$desired_hash" ] || { cleanup_tmp; exit 44; }
         chmod "$desired_mode" -- "$tmp" || { cleanup_tmp; exit 5; }
 
         if [ "$base_kind" = M ]; then

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-const EXPECTED_TOOLS: [&str; 12] = [
+const EXPECTED_TOOLS: [&str; 18] = [
     "remote_hosts",
     "remote_list",
     "remote_stat",
@@ -17,6 +17,12 @@ const EXPECTED_TOOLS: [&str; 12] = [
     "remote_apply_patch",
     "remote_write",
     "remote_run",
+    "remote_job_start",
+    "remote_job_status",
+    "remote_job_logs",
+    "remote_job_cancel",
+    "remote_job_list",
+    "remote_job_delete",
 ];
 
 fn repository_root() -> PathBuf {
@@ -285,7 +291,7 @@ fn installed_chain_has_no_python_runtime_or_legacy_module_references() {
 }
 
 #[test]
-fn skill_names_exactly_the_nine_remote_tools() {
+fn skill_names_exactly_the_public_remote_tools() {
     let skill = read_text("skills/remote-ssh-ops/SKILL.md");
     let identifiers = identifier_tokens(&skill);
     let actual_remote_tools: BTreeSet<_> = identifiers
