@@ -829,6 +829,137 @@ fn task15_job_runner_enforces_optional_timeout() {
 }
 
 #[test]
+fn task15_job_store_remains_pinned_after_the_visible_jobs_path_is_replaced() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let attacker = tempfile::tempdir().unwrap();
+    let store = JobStore::open_at(home.path()).unwrap();
+    let visible_jobs = home.path().join(".local/state/codex-ssh-bridge/jobs");
+    let pinned_jobs = visible_jobs.with_extension("pinned");
+    std::fs::rename(&visible_jobs, &pinned_jobs).unwrap();
+    std::os::unix::fs::symlink(attacker.path(), &visible_jobs).unwrap();
+
+    let request = job_request(work.path(), "printf pinned", None);
+    store.create(&request).unwrap();
+
+    assert!(pinned_jobs.join(request.job_id.as_str()).is_dir());
+    assert!(!attacker.path().join(request.job_id.as_str()).exists());
+}
+
+#[test]
+fn task15_job_status_list_delete_and_retention_are_closed() {
+    const EIGHT_DAYS_MS: u64 = 8 * 24 * 60 * 60 * 1_000;
+
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = JobStore::open_at(home.path()).unwrap();
+
+    let completed = job_request(work.path(), "printf complete", None);
+    store.create(&completed).unwrap();
+    run_job_at(home.path(), &completed.job_id).unwrap();
+
+    let pending = job_request(work.path(), "printf pending", None);
+    store.create(&pending).unwrap();
+    let error = store.delete_terminal(&pending.job_id).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+    let summaries = store.list(10).unwrap();
+    assert_eq!(summaries.len(), 2);
+    assert!(summaries.iter().any(|job| {
+        job.job_id == completed.job_id
+            && job.state == JobState::Succeeded
+            && job.cwd == completed.cwd
+    }));
+    assert!(summaries.iter().any(|job| {
+        job.job_id == pending.job_id && job.state == JobState::Starting && job.cwd == pending.cwd
+    }));
+
+    let mut expired = store.status(&completed.job_id).unwrap();
+    expired.finished_unix_ms = Some(1);
+    store.replace_state(&completed.job_id, &expired).unwrap();
+    store.collect_expired(EIGHT_DAYS_MS, 1).unwrap();
+    assert_eq!(
+        store.status(&completed.job_id).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    let mut lost = store.status(&pending.job_id).unwrap();
+    lost.state = JobState::Running;
+    lost.boot_id = "00000000-0000-0000-0000-000000000000".to_owned();
+    lost.started_unix_ms = Some(lost.created_unix_ms);
+    store.replace_state(&pending.job_id, &lost).unwrap();
+    let reconciled = store.status(&pending.job_id).unwrap();
+    assert_eq!(reconciled.state, JobState::Lost);
+    assert!(reconciled.finished_unix_ms.is_some());
+
+    store.delete_terminal(&pending.job_id).unwrap();
+    store.delete_terminal(&pending.job_id).unwrap();
+}
+
+#[test]
+fn task15_job_cancel_waits_for_a_confirmed_terminal_state() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let request = job_request(work.path(), "printf before-cancel; sleep 30", None);
+    let mut helper = helper_child_at_home(home.path());
+    let mut input = helper.stdin.take().unwrap();
+    let mut output = BufReader::new(helper.stdout.take().unwrap());
+    let _ = read_next(&mut output);
+
+    send_job_request(&mut input, 1, &JobControlRequest::Start(request.clone()));
+    assert!(matches!(
+        read_job_response(&mut output),
+        JobControlResponse::Started(ref state) if state.job_id == request.job_id
+    ));
+    send_job_request(
+        &mut input,
+        2,
+        &JobControlRequest::Cancel {
+            job_id: request.job_id.clone(),
+        },
+    );
+    let cancelled = read_job_response(&mut output);
+    assert!(matches!(
+        cancelled,
+        JobControlResponse::Cancelled(ref state)
+            if state.job_id == request.job_id
+                && state.state == JobState::Cancelled
+                && state.finished_unix_ms.is_some()
+    ));
+
+    send_job_request(&mut input, 3, &JobControlRequest::List { max_jobs: 10 });
+    assert!(matches!(
+        read_job_response(&mut output),
+        JobControlResponse::Listed(ref jobs)
+            if jobs.len() == 1 && jobs[0].job_id == request.job_id
+    ));
+    send_job_request(
+        &mut input,
+        4,
+        &JobControlRequest::Delete {
+            job_id: request.job_id.clone(),
+        },
+    );
+    assert_eq!(
+        read_job_response(&mut output),
+        JobControlResponse::Deleted {
+            job_id: request.job_id
+        }
+    );
+
+    send_frame(
+        &mut input,
+        Frame {
+            kind: FrameKind::Close,
+            request_id: 0,
+            payload: Vec::new(),
+        },
+    );
+    drop(input);
+    assert!(helper.wait().unwrap().success());
+}
+
+#[test]
 fn task15_job_survives_initiating_helper_and_is_visible_to_a_fresh_helper() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
