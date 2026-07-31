@@ -1,4 +1,5 @@
 use std::io::{BufReader, Cursor, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
