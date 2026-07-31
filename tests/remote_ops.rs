@@ -12,15 +12,17 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use codex_ssh_bridge::capability::ShellRequest;
+use codex_ssh_bridge::job_protocol::{JobId, MAX_JOB_LABEL_BYTES, MAX_JOB_LOG_PAGE_BYTES};
 use codex_ssh_bridge::output::OutputStore;
 use codex_ssh_bridge::output::StreamKind;
 use codex_ssh_bridge::remote::{
     AggregateKind, ApplyPatchRequest, ApplyPatchResult, EncodedValue, EntryError, EntryErrorCode,
     HostInfo, HostsResult, ListEntry, ListRequest, ListResult, OutputReadResult, ReadEntry,
-    ReadRequest, ReadResult, RemoteBridge, RemoteContext, RemoteFileKind, RemoteJobStartRequest,
-    RemoteMetadata, RemoteRunRequest, RetentionProvenance, RunShell, RunStdin, SearchEngine,
-    SearchMatch, SearchRequest, SearchResult, ShellMetadata, ShellName, StatEntry, StatRequest,
-    StatResult, ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest, WriteResult,
+    ReadRequest, ReadResult, RemoteBridge, RemoteContext, RemoteFileKind, RemoteJobIdRequest,
+    RemoteJobListRequest, RemoteJobLogsRequest, RemoteJobStartRequest, RemoteMetadata,
+    RemoteRunRequest, RetentionProvenance, RunShell, RunStdin, SearchEngine, SearchMatch,
+    SearchRequest, SearchResult, ShellMetadata, ShellName, StatEntry, StatRequest, StatResult,
+    ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest, WriteResult,
 };
 use codex_ssh_bridge::ssh::{RunRequest, RuntimePaths, SshRunner};
 use codex_ssh_bridge::{BridgeError, ErrorCode};
@@ -8272,4 +8274,110 @@ fn task15_remote_job_requests_validate_exact_boundaries() {
     assert_eq!(valid.cwd, "/srv/project");
     assert_eq!(valid.label.as_deref(), Some("training"));
     assert_eq!(valid.timeout_ms, None);
+}
+
+#[tokio::test]
+async fn task15_remote_job_bridge_rejects_invalid_requests_before_transport() {
+    let remote = tempfile::tempdir().unwrap();
+    let (_runtime, _runner, bridge) = fixture(remote.path(), true);
+    let invalid_cwd = bridge
+        .job_start(
+            RemoteJobStartRequest {
+                host: "dev".to_owned(),
+                command: "printf ok".to_owned(),
+                cwd: "relative".to_owned(),
+                shell: RunShell::Bash,
+                stdin: None,
+                timeout_ms: None,
+                label: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_cwd.code, ErrorCode::RemoteAbsolutePathRequired);
+
+    let invalid_command = bridge
+        .job_start(
+            RemoteJobStartRequest {
+                host: "dev".to_owned(),
+                command: String::new(),
+                cwd: "/tmp".to_owned(),
+                shell: RunShell::Sh,
+                stdin: None,
+                timeout_ms: None,
+                label: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_command.code, ErrorCode::InvalidArgument);
+
+    let invalid_label = bridge
+        .job_start(
+            RemoteJobStartRequest {
+                host: "dev".to_owned(),
+                command: "printf ok".to_owned(),
+                cwd: "/tmp".to_owned(),
+                shell: RunShell::Sh,
+                stdin: None,
+                timeout_ms: None,
+                label: Some("x".repeat(MAX_JOB_LABEL_BYTES + 1)),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_label.code, ErrorCode::InvalidArgument);
+
+    let invalid_timeout = bridge
+        .job_start(
+            RemoteJobStartRequest {
+                host: "dev".to_owned(),
+                command: "printf ok".to_owned(),
+                cwd: "/tmp".to_owned(),
+                shell: RunShell::Sh,
+                stdin: None,
+                timeout_ms: Some(0),
+                label: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_timeout.code, ErrorCode::InvalidArgument);
+
+    let job_id = JobId::generate();
+    let invalid_logs = bridge
+        .job_logs(
+            RemoteJobLogsRequest {
+                host: "dev".to_owned(),
+                job_id: job_id.clone(),
+                stdout_offset: 0,
+                stderr_offset: 0,
+                max_bytes: MAX_JOB_LOG_PAGE_BYTES + 1,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_logs.code, ErrorCode::InvalidArgument);
+
+    let invalid_list = bridge
+        .job_list(
+            RemoteJobListRequest {
+                host: "dev".to_owned(),
+                max_jobs: 1_001,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_list.code, ErrorCode::InvalidArgument);
+
+    let _id_request = RemoteJobIdRequest {
+        host: "dev".to_owned(),
+        job_id,
+    };
 }
