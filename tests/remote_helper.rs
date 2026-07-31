@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use codex_ssh_bridge::job_protocol::{JobId, JobState};
 use codex_ssh_bridge::remote_helper_protocol::{Frame, FrameKind, read_frame, write_frame};
 
 #[test]
@@ -634,4 +635,46 @@ fn helper_cancel_terminates_the_request_process_group() {
     );
     drop(input);
     assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn task15_job_id_and_closed_records_are_bounded() {
+    let valid = "0123456789abcdef0123456789abcdef";
+    assert_eq!(JobId::parse(valid).unwrap().as_str(), valid);
+
+    for rejected in [
+        "",
+        "0123456789abcdef0123456789abcde",
+        "0123456789abcdef0123456789abcdef0",
+        "ABCDEF0123456789ABCDEF0123456789",
+        "../0123456789abcdef0123456789abcd",
+        "0123456789abcdef0123456789abcdeg",
+    ] {
+        assert!(JobId::parse(rejected).is_err(), "accepted {rejected:?}");
+    }
+}
+
+#[test]
+fn task15_job_state_transition_matrix_is_closed() {
+    use JobState::{Cancelled, Failed, Lost, Running, Starting, Succeeded, TimedOut};
+
+    for terminal in [Succeeded, Failed, Cancelled, TimedOut, Lost] {
+        assert!(terminal.is_terminal());
+        for next in [
+            Starting, Running, Succeeded, Failed, Cancelled, TimedOut, Lost,
+        ] {
+            assert!(
+                !terminal.can_transition_to(next),
+                "terminal state {terminal:?} transitioned to {next:?}"
+            );
+        }
+    }
+    assert!(!Starting.is_terminal());
+    assert!(!Running.is_terminal());
+    assert!(Starting.can_transition_to(Running));
+    assert!(Starting.can_transition_to(Lost));
+    for terminal in [Succeeded, Failed, Cancelled, TimedOut, Lost] {
+        assert!(Running.can_transition_to(terminal));
+    }
+    assert!(!Running.can_transition_to(Starting));
 }

@@ -17,10 +17,10 @@ use codex_ssh_bridge::output::StreamKind;
 use codex_ssh_bridge::remote::{
     AggregateKind, ApplyPatchRequest, ApplyPatchResult, EncodedValue, EntryError, EntryErrorCode,
     HostInfo, HostsResult, ListEntry, ListRequest, ListResult, OutputReadResult, ReadEntry,
-    ReadRequest, ReadResult, RemoteBridge, RemoteContext, RemoteFileKind, RemoteMetadata,
-    RemoteRunRequest, RetentionProvenance, RunShell, RunStdin, SearchEngine, SearchMatch,
-    SearchRequest, SearchResult, ShellMetadata, ShellName, StatEntry, StatRequest, StatResult,
-    ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest, WriteResult,
+    ReadRequest, ReadResult, RemoteBridge, RemoteContext, RemoteFileKind, RemoteJobStartRequest,
+    RemoteMetadata, RemoteRunRequest, RetentionProvenance, RunShell, RunStdin, SearchEngine,
+    SearchMatch, SearchRequest, SearchResult, ShellMetadata, ShellName, StatEntry, StatRequest,
+    StatResult, ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest, WriteResult,
 };
 use codex_ssh_bridge::ssh::{RunRequest, RuntimePaths, SshRunner};
 use codex_ssh_bridge::{BridgeError, ErrorCode};
@@ -8256,4 +8256,20 @@ async fn search_unknown_rg_event_is_protocol_error() {
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::ProtocolError);
+}
+
+#[test]
+fn task15_remote_job_requests_validate_exact_boundaries() {
+    let valid = RemoteJobStartRequest {
+        host: "dev".to_owned(),
+        command: "printf ok".to_owned(),
+        cwd: "/srv/project".to_owned(),
+        shell: RunShell::Bash,
+        stdin: None,
+        timeout_ms: None,
+        label: Some("training".to_owned()),
+    };
+    assert_eq!(valid.cwd, "/srv/project");
+    assert_eq!(valid.label.as_deref(), Some("training"));
+    assert_eq!(valid.timeout_ms, None);
 }

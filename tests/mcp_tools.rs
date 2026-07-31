@@ -917,7 +917,7 @@ fn assert_closed_objects(value: &Value) {
 }
 
 #[test]
-fn task8_registry_contains_exactly_the_twelve_high_level_remote_tools() {
+fn task8_registry_contains_exactly_the_high_level_remote_tools() {
     let tools = tool_definitions();
     let names = tools
         .iter()
@@ -938,6 +938,12 @@ fn task8_registry_contains_exactly_the_twelve_high_level_remote_tools() {
             "remote_apply_patch",
             "remote_write",
             "remote_run",
+            "remote_job_start",
+            "remote_job_status",
+            "remote_job_logs",
+            "remote_job_cancel",
+            "remote_job_list",
+            "remote_job_delete",
         ]
     );
     let serialized = serde_json::to_string(tools).unwrap();
@@ -955,6 +961,48 @@ fn task8_registry_contains_exactly_the_twelve_high_level_remote_tools() {
             tool.name
         );
     }
+}
+
+#[test]
+fn task15_mcp_job_schema_matrix_is_exact() {
+    let expected = [
+        ("remote_job_start", json!(["host", "command", "cwd"])),
+        ("remote_job_status", json!(["host", "job_id"])),
+        ("remote_job_logs", json!(["host", "job_id"])),
+        ("remote_job_cancel", json!(["host", "job_id"])),
+        ("remote_job_list", json!(["host"])),
+        ("remote_job_delete", json!(["host", "job_id"])),
+    ];
+    for (name, required) in expected {
+        let definition = tool(name);
+        assert_eq!(definition.input_schema["required"], required, "{name}");
+        assert_closed_objects(&definition.input_schema);
+        assert!(
+            definition.input_schema["properties"]
+                .get("action")
+                .is_none()
+        );
+    }
+
+    assert_eq!(
+        property(tool("remote_job_start"), "shell")["default"],
+        "bash"
+    );
+    assert_eq!(
+        property(tool("remote_job_logs"), "max_bytes")["default"],
+        262_144
+    );
+    assert_integer_range(property(tool("remote_job_logs"), "max_bytes"), 1, 1_048_576);
+    assert_eq!(
+        property(tool("remote_job_list"), "max_jobs")["default"],
+        100
+    );
+    assert_integer_range(property(tool("remote_job_list"), "max_jobs"), 1, 1_000);
+    assert!(
+        tool_definitions()
+            .iter()
+            .all(|tool| tool.name != "remote_job")
+    );
 }
 
 struct RegistryService;
