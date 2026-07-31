@@ -2133,7 +2133,7 @@ fn cancellation_tools_fixture() -> (
         (OsString::from("FAKE_SSH_IGNORE_TERM"), OsString::from("1")),
         (OsString::from("FAKE_SSH_LOG"), log.as_os_str().to_owned()),
         (
-            OsString::from("FAKE_SSH_CHILD_PID_FILE"),
+            OsString::from("FAKE_SSH_REQUEST_PID_FILE"),
             pid_file.as_os_str().to_owned(),
         ),
     ]);

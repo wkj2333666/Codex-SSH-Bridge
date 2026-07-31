@@ -968,7 +968,7 @@ async fn cancellation_kills_the_entire_process_group() {
             ("FAKE_SSH_MODE", OsString::from("sleep")),
             ("FAKE_SSH_SLEEP_SECONDS", OsString::from("10")),
             ("FAKE_SSH_IGNORE_TERM", OsString::from("1")),
-            ("FAKE_SSH_CHILD_PID_FILE", pid_file.as_os_str().to_owned()),
+            ("FAKE_SSH_REQUEST_PID_FILE", pid_file.as_os_str().to_owned()),
         ],
     );
     let cancel = CancellationToken::new();

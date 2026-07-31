@@ -435,8 +435,8 @@ exit 0"
         setsid sh -c 'sleep 0.05; kill -KILL -"$1" 2>/dev/null || true' codex-ssh-killer "$run_pid" &
     fi
     if [ -n "${CODEX_SSH_BRIDGE_TEST_MODE-}" ] &&
-       [ -n "${FAKE_SSH_CHILD_PID_FILE-}" ]; then
-        printf '%s\n' "$run_pid" >"$FAKE_SSH_CHILD_PID_FILE" 2>/dev/null || true
+       [ -n "${FAKE_SSH_REQUEST_PID_FILE-}" ]; then
+        printf '%s\n' "$run_pid" >"$FAKE_SSH_REQUEST_PID_FILE" 2>/dev/null || true
     fi
     if [ -n "${CODEX_SSH_BRIDGE_TEST_MODE-}" ]; then
         if [ -n "${FAKE_SSH_FIXED_READY_FILE-}" ]; then
