@@ -773,13 +773,9 @@ async fn task13_release_edit_cache_latency_profile() {
     let barrier_elapsed = barrier_started.elapsed();
     assert_eq!(barrier["structuredContent"]["exit_code"], 0, "{barrier}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "warm-119\n");
-    assert_eq!(
-        transport_call_kinds(&fixture.log)
-            .iter()
-            .filter(|kind| **kind == "C")
-            .count(),
-        2,
-        "one mutation batch plus one command must cross the helper session"
+    assert!(
+        transport_call_kinds(&fixture.log).is_empty(),
+        "the mutation batch and command must reuse the existing persistent helper transport"
     );
 
     let timer_remote = TempDir::new().unwrap();
