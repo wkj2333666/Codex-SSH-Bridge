@@ -51,6 +51,12 @@ All objects reject unknown fields. MCP paths are absolute remote paths. The brid
 | `remote_apply_patch` | `host`, unified `patch` | none |
 | `remote_write` | `host`, `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
 | `remote_run` | `host`, `command` string, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin` |
+| `remote_job_start` | `host`, `command`, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin`, `label` |
+| `remote_job_status` | `host`, `job_id` | none |
+| `remote_job_logs` | `host`, `job_id` | `stdout_offset`, `stderr_offset`, `max_bytes` |
+| `remote_job_cancel` | `host`, `job_id` | none |
+| `remote_job_list` | `host` | `max_jobs` |
+| `remote_job_delete` | `host`, `job_id` | none |
 
 `remote_write.mode` is `{"kind":"create"}` or `{"kind":"replace","expected_sha256":"..."}`. `expected_sha256` is nested inside `mode`, never at the request root. UTF-8 and base64 encodings are supported. Prefer `remote_apply_patch` for model-driven edits.
 
@@ -92,15 +98,21 @@ Timeout and cancellation send a request-level `CANCEL`. If the dispatcher does n
 
 ## Retained output
 
-Calls complete synchronously. A long-lived service must explicitly detach its
-stdin/stdout/stderr and process group; do not start one as an ad-hoc `&` job
-that inherits bridge pipes. If the shell parent exits while a descendant still
-owns a pipe, the bridge completes after a bounded drain grace and reports
-`remote_process_may_continue: true`; keep the service PID/log path for explicit
-remote management. The stdout/stderr preview is a bounded snapshot and may not
-include output produced after the synchronous request boundary. There is not
-yet a persistent background-job ID. Model-visible inline output is capped at
-32 KiB. Successful result text is available as `structuredContent.output` and
+remote_run remains synchronous. If its shell parent exits while a descendant
+still owns a pipe, the bridge completes after a bounded drain grace and reports
+`remote_process_may_continue: true`; its stdout/stderr preview remains only a
+bounded snapshot.
+
+Use `remote_job_start` for long-lived work. A remote Job survives its initiating
+MCP call, Codex task, bridge disconnect, and local Desktop restart. There is no automatic restart after a remote reboot. Keep the returned `job_id`; query
+`remote_job_status`, page `remote_job_logs`, use `remote_job_cancel` when
+needed, discover recent IDs with `remote_job_list`, and remove terminal records
+with `remote_job_delete`. If start or cancellation loses its response, never submit the command again blindly; first inspect the known ID or list durable
+records. Job logs use independent stdout/stderr offsets and do not use
+`remote_output_read`.
+
+For synchronous calls, model-visible inline output is capped at 32 KiB.
+Successful result text is available as `structuredContent.output` and
 as matching standard MCP `content.text`. When a result is too large,
 `truncated` is true and `output_ref` is a 32-character opaque reference.
 

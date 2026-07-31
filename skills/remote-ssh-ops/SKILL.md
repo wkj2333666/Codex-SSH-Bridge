@@ -63,7 +63,13 @@ of the remote state is more important.
 - `remote_discard_edits`: `{host}`; discards local buffered or uncertain edits for one host.
 - `remote_apply_patch`: `{host, patch}`; patch headers must use absolute paths (or `/dev/null`), with no cwd field.
 - `remote_write`: `{host, path, content, encoding, mode}`. Prefer patching. For replacement, supply the observed SHA-256 when available.
-- `remote_run`: `{host, command, cwd, shell?, timeout_ms?, stdin?}`; `cwd` must be absolute. `command` is one shell command string. For an HTTP server, viewer, or other long-lived process, explicitly detach it from stdin/stdout/stderr and its request process group; do not leave an ad-hoc background job inheriting bridge pipes. stdin is an object `{encoding:"utf8"|"base64", value}`.
+- `remote_run`: `{host, command, cwd, shell?, timeout_ms?, stdin?}`; `cwd` must be absolute. `command` is one shell command string. stdin is an object `{encoding:"utf8"|"base64", value}`.
+- `remote_job_start`: `{host, command, cwd, shell?, timeout_ms?, stdin?, label?}`; starts a durable long-running command and returns its opaque `job_id`.
+- `remote_job_status`: `{host, job_id}`; reads durable state and verified process identity.
+- `remote_job_logs`: `{host, job_id, stdout_offset?, stderr_offset?, max_bytes?}`; reads bounded incremental stdout and stderr and returns the next offsets.
+- `remote_job_cancel`: `{host, job_id}`; idempotently cancels the verified process group.
+- `remote_job_list`: `{host, max_jobs?}`; lists newest summaries without command or stdin content.
+- `remote_job_delete`: `{host, job_id}`; deletes retained files only after the job is terminal.
 
 All schemas are closed. Follow the live schema if it differs from this quick reference.
 
@@ -78,6 +84,14 @@ Requests are multiplexed over the host session. The bridge does not impose a hos
 The account/forced login shell must be able to start the POSIX dispatcher. A failed dispatcher handshake is a hard error; never ask the bridge to silently fall back to a one-shot SSH command.
 
 Treat `remote_run` as mutating even for apparently read-only commands. A timeout or cancellation can leave a remote process running; inspect the process-continuation flag and do not retry blindly. Obtain authorization for destructive or high-impact work.
+
+remote_run remains synchronous. Use `remote_job_start` for an HTTP server,
+viewer, training run, download, or other long-lived work; do not hand-roll
+detachment with `&`, `nohup`, tmux, or inherited bridge pipes. A remote Job
+survives the initiating MCP call, Codex task, bridge disconnect, and local
+Desktop restart because its runner and records live on the server. It has no automatic restart after a remote reboot. Preserve the returned `job_id`; after
+an interrupted start or control call, inspect `remote_job_status` or
+`remote_job_list` and never submit the command again blindly.
 
 When a shell parent exits while a descendant still owns a bridge pipe, the
 bridge returns the parent result after a bounded drain grace and sets

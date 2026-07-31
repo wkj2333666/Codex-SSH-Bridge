@@ -1732,7 +1732,7 @@ enum ChildCaptured {
 fn mutation_unknown(mut source: BridgeError) -> BridgeError {
     #[cfg(feature = "profile")]
     {
-        let source_code = format!("{:?}", source.code);
+        let source_code = format!("{:?}:exit={:?}", source.code, source.details.exit_status);
         crate::bridge_profile!(crate::profile::ProfileEvent {
             phase: "mutation_outcome_unknown",
             host: source.details.host.as_deref(),

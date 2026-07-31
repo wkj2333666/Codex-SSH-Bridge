@@ -34,6 +34,13 @@ The bridge is Rust rather than a Bash program because strict MCP framing, bounde
 
 SSHFS is intentionally absent from the MCP tool list. This prevents an Agent from silently treating a FUSE path as a local workspace.
 
+For long-running work, `remote_job_start` creates a durable remote Job and
+returns an opaque ID used by `remote_job_status`, `remote_job_logs`,
+`remote_job_cancel`, `remote_job_list`, and `remote_job_delete`. The short-lived
+runner and records survive a Codex task, bridge disconnect, and local Desktop
+restart; there is no remote daemon and no automatic restart after a remote
+reboot. `remote_run` remains synchronous.
+
 ## Requirements
 
 - Local Linux host with Rust 1.91.1 or newer to build the bridge.

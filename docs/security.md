@@ -89,6 +89,22 @@ Session note: the dispatcher is always POSIX sh and never parses a user command 
 
 All command tools are treated as mutating. A detached or ambiguous remote child can survive cancellation, so results expose process-continuation and mutation uncertainty instead of claiming rollback.
 
+## Durable remote Jobs
+
+Remote Jobs require the persistent binary helper. Each Job is represented
+under `~/.local/state/codex-ssh-bridge/jobs/<job_id>/`; the store directory is
+mode `0700` and record, request, stdout, stderr, lock, and control files are
+mode `0600`. Store traversal and control use no-follow opens, reject links and
+unexpected file types, and verify owner and mode. Cancellation checks the
+recorded boot identity and process start token before signaling the recorded
+process group, rather than trusting a reused PID.
+
+The command and stdin remain private remote records and are omitted from Job
+list output. Aggregate stdout plus stderr is bounded to 64 MiB by default.
+Terminal records use seven-day lazy retention: a later Job operation removes
+expired terminal records. A Job survives a Codex task, bridge disconnect, and
+local Desktop restart, but has no automatic restart after a remote reboot.
+
 ## Files, output, and protocol limits
 
 - The TOML config is a private current-user-owned regular file; load/save reject unsafe ancestors, symlinks, FIFOs, and group/other-writable modes.

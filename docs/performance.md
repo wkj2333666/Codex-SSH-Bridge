@@ -127,6 +127,18 @@ limit is 16 MiB; clean entries are evicted by LRU, while dirty entries are
 never silently discarded. This removes an SSH round trip from the hot logical
 edit path without presenting an SSHFS tree as local files.
 
+## Durable Job control
+
+Job control requires the persistent binary helper and transfers small typed
+requests over the existing warm session. The long-running workload executes in
+a detached per-Job runner on the server, so the MCP call and SSH session do not
+retain its pipes or memory. Status and incremental log reads are bounded;
+aggregate remote stdout plus stderr defaults to 64 MiB. Terminal records use
+seven-day lazy retention, and there is no automatic restart after a remote
+reboot. The release pressure gate starts 16 Jobs, performs 1,000 status/log
+operations, and checks warm `remote_run` latency, bridge RSS, file descriptors,
+and local spool use before cleanup.
+
 The persistent session adds a fixed startup cost once per alias. Acceptance measurements must therefore report `helper_cold`/`helper_warm` separately from `shell_cold`/`shell_warm` on the same fixture. A long command does not block independent request IDs; a session transport failure invalidates all pending requests and is not automatically retried.
 
 OpenSSH connection reuse is private to one MCP runner. A runner uses a
