@@ -11,6 +11,10 @@ use std::time::Duration;
 
 use codex_ssh_bridge::ErrorCode;
 use codex_ssh_bridge::capability::ShellRequest;
+use codex_ssh_bridge::job_protocol::{
+    JOB_RECORD_VERSION, JobControlRequest, JobControlResponse, JobId, JobRequestRecord, JobShell,
+    JobState,
+};
 use codex_ssh_bridge::output::OutputStore;
 use codex_ssh_bridge::ssh::{RunRequest, RuntimePaths, SshRunner};
 use tempfile::TempDir;
@@ -117,6 +121,21 @@ fn request(command: &str) -> RunRequest {
         shell: ShellRequest::Sh,
         stdin: None,
         timeout: Duration::from_secs(5),
+    }
+}
+
+fn job_request(command: &str) -> JobRequestRecord {
+    JobRequestRecord {
+        version: JOB_RECORD_VERSION,
+        job_id: JobId::generate(),
+        shell: JobShell::Sh,
+        cwd: "/tmp".to_owned(),
+        command: command.to_owned(),
+        stdin_base64: String::new(),
+        timeout_ms: None,
+        label: Some("session transport".to_owned()),
+        max_output_bytes: 1024,
+        created_unix_ms: 1,
     }
 }
 
@@ -244,6 +263,20 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
         after_timeout.helper_mode,
         codex_ssh_bridge::ssh::HelperMode::Persistent
     );
+    let job = job_request("printf transported; sleep 30");
+    let started = runner
+        .execute_job(
+            "dev".to_owned(),
+            JobControlRequest::Start(job.clone()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("persistent helpers must transport Job requests");
+    assert!(matches!(
+        started,
+        JobControlResponse::Started(ref state)
+            if state.job_id == job.job_id && state.state == JobState::Running
+    ));
     drop(runner);
 
     let restart_log = base.path().join("restart-ssh.log");
@@ -264,6 +297,51 @@ async fn persistent_helper_installs_once_and_reuses_after_bridge_restart() {
     assert_eq!(
         String::from_utf8_lossy(&second.output.stdout.head),
         "persistent-second"
+    );
+    let status = restarted
+        .execute_job(
+            "dev".to_owned(),
+            JobControlRequest::Status {
+                job_id: job.job_id.clone(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("a fresh Bridge runner must observe the detached Job");
+    assert!(matches!(
+        status,
+        JobControlResponse::Status(ref state)
+            if state.job_id == job.job_id && state.state == JobState::Running
+    ));
+    let cancelled = restarted
+        .execute_job(
+            "dev".to_owned(),
+            JobControlRequest::Cancel {
+                job_id: job.job_id.clone(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the detached Job must remain controllable");
+    assert!(matches!(
+        cancelled,
+        JobControlResponse::Cancelled(ref state)
+            if state.job_id == job.job_id && state.state == JobState::Cancelled
+    ));
+    assert_eq!(
+        restarted
+            .execute_job(
+                "dev".to_owned(),
+                JobControlRequest::Delete {
+                    job_id: job.job_id.clone(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        JobControlResponse::Deleted {
+            job_id: job.job_id.clone()
+        }
     );
     let install_events = fs::read_to_string(&install_log).unwrap();
     let install_events = install_events.lines().collect::<Vec<_>>();
@@ -356,6 +434,15 @@ async fn persistent_startup_failure_falls_back_to_temporary_helper() {
         String::from_utf8_lossy(&result.output.stdout.head),
         "temporary-fallback"
     );
+    let job_error = runner
+        .execute_job(
+            "dev".to_owned(),
+            JobControlRequest::Start(job_request("printf unavailable")),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("temporary helpers must not claim durable Job support");
+    assert_eq!(job_error.code, ErrorCode::RemoteCapabilityMissing);
     let log_text = fs::read_to_string(log).unwrap();
     assert_eq!(
         log_text.lines().filter(|line| *line == "S").count(),
@@ -382,6 +469,15 @@ async fn unsupported_helper_architecture_uses_shell_mode() {
         String::from_utf8_lossy(&result.output.stdout.head),
         "shell-only"
     );
+    let job_error = runner
+        .execute_job(
+            "dev".to_owned(),
+            JobControlRequest::Start(job_request("printf unavailable")),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("shell dispatchers must not claim durable Job support");
+    assert_eq!(job_error.code, ErrorCode::RemoteCapabilityMissing);
     let log_text = fs::read_to_string(log).unwrap();
     assert_eq!(
         log_text.lines().filter(|line| *line == "S").count(),
