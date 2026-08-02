@@ -1899,7 +1899,7 @@ fn canonical_secure_codex_executable(path: &Path) -> BridgeResult<PathBuf> {
     validate_trusted_ancestors(&canonical)?;
     let target_metadata = fs::symlink_metadata(&canonical).map_err(BridgeError::io)?;
     validate_trusted_source_file(&target_metadata, true)?;
-    Ok(canonical)
+    Ok(path.to_owned())
 }
 
 fn canonical_secure_directory(path: &Path) -> BridgeResult<PathBuf> {
