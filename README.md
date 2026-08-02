@@ -190,7 +190,7 @@ The twelve MCP tools are:
 |---|---|
 | `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read`, `remote_edit_status` | `remote_apply_patch`, `remote_write`, `remote_run`, `remote_sync_edits`, `remote_discard_edits` |
 
-The default flow is bounded search/read → unified patch → remote verification.
+The default flow is bounded search/read → Codex or unified patch → remote verification.
 Calls are synchronous. Normal results mirror familiar local tools: listings,
 search matches, file bodies, and stdout/stderr are exposed as concise
 `structuredContent.output`; matching `content.text` remains available to
@@ -201,7 +201,7 @@ payload is capped at 32 KiB; oversized detail is retained under an opaque
 `remote_output_read`, so the Agent never needs to reconstruct transport logic.
 Errors report factual codes and relevant state without prescribing an action.
 
-All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` headers must use absolute paths (or `/dev/null` for create/delete). `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Bash is never silently changed to sh: if Bash is unavailable, the capability error records that Bash was requested and which shells are available, leaving the next decision to the model. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
+All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` accepts native Codex `*** Begin Patch` Add/Update/Delete syntax or standard unified diff; file paths must be absolute (or `/dev/null` in unified create/delete headers), and `*** Move to` is unsupported. `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Bash is never silently changed to sh: if Bash is unavailable, the capability error records that Bash was requested and which shells are available, leaving the next decision to the model. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
 Writes and patches use a bounded per-process in-memory write-back cache.
 Complete cached reads and consecutive edits are local-memory operations after

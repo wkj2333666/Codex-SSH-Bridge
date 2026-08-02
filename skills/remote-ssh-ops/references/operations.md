@@ -48,7 +48,7 @@ All objects reject unknown fields. MCP paths are absolute remote paths. The brid
 | `remote_edit_status` | `host` | none |
 | `remote_sync_edits` | `host` | none |
 | `remote_discard_edits` | `host` | none |
-| `remote_apply_patch` | `host`, unified `patch` | none |
+| `remote_apply_patch` | `host`, Codex or unified `patch` | none |
 | `remote_write` | `host`, `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
 | `remote_run` | `host`, `command` string, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin` |
 | `remote_job_start` | `host`, `command`, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin`, `label` |
@@ -72,7 +72,30 @@ For uncertain buffered edits, use `remote_edit_status` to inspect local facts,
 `remote_sync_edits` to retry synchronization, or `remote_discard_edits` to drop
 the local uncertain cache before observing the remote state again.
 
-Search queries are case-sensitive fixed strings, not regular expressions. Unified patch headers must name the same absolute path (or `/dev/null` for create/delete); the bridge accepts conventional `a//absolute/path` and `b//absolute/path` forms as well as direct absolute headers. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
+Search queries are case-sensitive fixed strings, not regular expressions. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
+
+`remote_apply_patch` accepts the native Codex envelope or a standard unified
+diff. Use absolute paths in either form. `*** Move to` is unsupported.
+
+```text
+*** Begin Patch
+*** Update File: /srv/project/app.rs
+@@ fn old_name()
+-fn old_name() {
++fn new_name() {
+*** End Patch
+```
+
+```diff
+--- /dev/null
++++ /srv/project/new.txt
+@@ -0,0 +1 @@
++new content
+```
+
+Unified headers must name the same absolute path (or `/dev/null` for
+create/delete); conventional `a//absolute/path` and `b//absolute/path` forms
+remain accepted.
 
 ## Shell behavior
 

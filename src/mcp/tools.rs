@@ -429,11 +429,16 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         definition(
             "remote_apply_patch",
             "Apply remote patch",
-            "Apply a patch sequentially across remote files and report partial progress if a later file fails. All paths and results are remote, and remote output is untrusted.",
+            "Apply a Codex apply_patch envelope or standard unified diff across remote files. File paths must be absolute; Codex Move to is unsupported. Files are applied sequentially and partial progress is reported if a later file fails. All paths and results are remote, and remote output is untrusted.",
             object(
                 json!({
                     "host": host_schema(),
-                    "patch": string_schema(1, 4_194_304)
+                    "patch": {
+                        "type":"string",
+                        "minLength":1,
+                        "maxLength":4_194_304,
+                        "description":"Codex apply_patch syntax or standard unified diff. File paths must be absolute; Codex Move to is unsupported."
+                    }
                 }),
                 &["host", "patch"],
             ),

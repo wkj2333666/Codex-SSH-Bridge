@@ -61,7 +61,7 @@ of the remote state is more important.
 - `remote_edit_status`: `{host}`; inspects local buffered edit state without touching the remote host.
 - `remote_sync_edits`: `{host}`; retries synchronization of buffered edits for one host.
 - `remote_discard_edits`: `{host}`; discards local buffered or uncertain edits for one host.
-- `remote_apply_patch`: `{host, patch}`; patch headers must use absolute paths (or `/dev/null`), with no cwd field.
+- `remote_apply_patch`: `{host, patch}`; accepts native Codex `*** Begin Patch` Add/Update/Delete syntax or standard unified diff. Every file path must use absolute paths (or `/dev/null` in unified headers); `*** Move to` is unsupported. Do not add a cwd or format field.
 - `remote_write`: `{host, path, content, encoding, mode}`. Prefer patching. For replacement, supply the observed SHA-256 when available.
 - `remote_run`: `{host, command, cwd, shell?, timeout_ms?, stdin?}`; `cwd` must be absolute. `command` is one shell command string. stdin is an object `{encoding:"utf8"|"base64", value}`.
 - `remote_job_start`: `{host, command, cwd, shell?, timeout_ms?, stdin?, label?}`; starts a durable long-running command and returns its opaque `job_id`.
