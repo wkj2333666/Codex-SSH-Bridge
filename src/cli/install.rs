@@ -2212,15 +2212,16 @@ fn nonempty_environment(name: &str) -> Option<OsString> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::Path;
 
     use tempfile::TempDir;
 
     use super::{
-        InstallJournal, advance_private_source_boundary, apply_config_migration, copy_bundle_tree,
-        hash_secure_bundle_tree, inspect_config_migration, is_managed_skill_source_path,
-        mcp_matches, rollback_config_migration,
+        InstallJournal, advance_private_source_boundary, apply_config_migration,
+        canonical_secure_codex_executable, copy_bundle_tree, hash_secure_bundle_tree,
+        inspect_config_migration, is_managed_skill_source_path, mcp_matches,
+        rollback_config_migration,
     };
 
     #[test]
@@ -2248,6 +2249,21 @@ mod tests {
             advance_private_source_boundary(0, 0o1777, 1000, 0, false, true),
             Some(false)
         );
+    }
+
+    #[test]
+    fn secure_codex_executable_preserves_validated_symlink_entry_for_argv0() {
+        let temporary = TempDir::new().unwrap();
+        let bin = temporary.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = temporary.path().join("codex-provider-switcher");
+        fs::write(&target, b"switcher").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let entry = bin.join("codex");
+        symlink(&target, &entry).unwrap();
+
+        assert_eq!(canonical_secure_codex_executable(&entry).unwrap(), entry);
     }
 
     #[test]
