@@ -1679,6 +1679,100 @@ mod tests {
         )
     }
 
+    fn apply_request(base: Option<&[u8]>, patch: &str) -> crate::BridgeResult<super::PatchedFile> {
+        let parsed = super::parse_request_patch(patch)?;
+        assert_eq!(parsed.len(), 1);
+        let sha256 = base.map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+        super::apply_parsed_file(
+            base.zip(sha256.as_deref()),
+            &parsed[0],
+            super::MAX_PATCH_BYTES,
+        )
+    }
+
+    #[test]
+    fn codex_and_unified_create_produce_identical_bytes() {
+        let codex = concat!(
+            "*** Begin Patch\n",
+            "*** Add File: /srv/repo/new.txt\n",
+            "+alpha\n",
+            "+beta\n",
+            "*** End Patch\n",
+        );
+        let unified = concat!(
+            "--- /dev/null\n",
+            "+++ /srv/repo/new.txt\n",
+            "@@ -0,0 +1,2 @@\n",
+            "+alpha\n",
+            "+beta\n",
+        );
+
+        assert_eq!(
+            apply_request(None, codex).unwrap(),
+            apply_request(None, unified).unwrap(),
+        );
+    }
+
+    #[test]
+    fn codex_update_uses_ordered_context_matching() {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: /srv/repo/a.txt\n",
+            "@@ section two\n",
+            "-old\n",
+            "+new\n",
+            "*** End Patch\n",
+        );
+
+        assert_eq!(
+            apply_request(Some(b"old\nsection two\nold\n"), patch).unwrap(),
+            super::PatchedFile::Write(b"old\nsection two\nnew\n".to_vec()),
+        );
+    }
+
+    #[test]
+    fn codex_delete_matches_unified_delete() {
+        let codex = concat!(
+            "*** Begin Patch\n",
+            "*** Delete File: /srv/repo/old.txt\n",
+            "*** End Patch\n",
+        );
+        let unified = concat!(
+            "--- /srv/repo/old.txt\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-old\n",
+        );
+
+        assert_eq!(
+            apply_request(Some(b"old\n"), codex).unwrap(),
+            apply_request(Some(b"old\n"), unified).unwrap(),
+        );
+    }
+
+    #[test]
+    fn request_parser_rejects_unsupported_or_mixed_codex_syntax() {
+        for input in [
+            "*** Begin Patch\n*** Move to: /srv/repo/b\n*** End Patch\n",
+            "*** Begin Patch\n*** Add File: relative.txt\n+x\n*** End Patch\n",
+            "*** Begin Patch\n*** Add File: /srv/repo/a\n+x\n*** End Patch\ntrailing\n",
+            concat!(
+                "*** Begin Patch\n",
+                "--- /dev/null\n",
+                "+++ /srv/repo/a\n",
+                "@@ -0,0 +1 @@\n",
+                "+x\n",
+                "*** End Patch\n",
+            ),
+        ] {
+            assert_eq!(
+                super::parse_request_patch(input).unwrap_err().code,
+                ErrorCode::InvalidArgument,
+                "{input:?}",
+            );
+        }
+    }
+
     #[test]
     fn task6_mutation_progress_classifies_pre_spawn_cancel_as_definite_suffix() {
         let paths = ["a", "b", "c"].map(str::to_owned);

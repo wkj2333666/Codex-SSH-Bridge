@@ -419,6 +419,26 @@ fn skill_closes_search_stdin_and_patch_schema_ambiguities() {
 }
 
 #[test]
+fn packaged_skill_and_reference_describe_both_patch_formats() {
+    let skill = read_text("skills/remote-ssh-ops/SKILL.md");
+    let operations = read_text("skills/remote-ssh-ops/references/operations.md");
+    let combined = format!("{skill}\n{operations}");
+
+    for required in [
+        "*** Begin Patch",
+        "standard unified diff",
+        "absolute paths",
+        "*** Move to",
+        "unsupported",
+    ] {
+        assert!(
+            combined.contains(required),
+            "packaged patch documentation omits {required:?}"
+        );
+    }
+}
+
+#[test]
 fn skill_states_buffered_edit_durability_without_burdening_the_agent() {
     let skill = read_text("skills/remote-ssh-ops/SKILL.md")
         .to_ascii_lowercase()

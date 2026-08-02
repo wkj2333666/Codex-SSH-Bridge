@@ -1135,6 +1135,21 @@ fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
     );
 
     assert_string_bounds(property(tool("remote_apply_patch"), "patch"), 4_194_304);
+    let patch_tool = tool("remote_apply_patch");
+    let patch_description = patch_tool.description.as_str();
+    let patch_schema_description = property(patch_tool, "patch")["description"]
+        .as_str()
+        .expect("remote_apply_patch.patch must describe both accepted formats");
+    for required in ["Codex apply_patch", "unified diff", "absolute"] {
+        assert!(
+            patch_description.contains(required),
+            "remote_apply_patch description omits {required:?}"
+        );
+        assert!(
+            patch_schema_description.contains(required),
+            "remote_apply_patch.patch description omits {required:?}"
+        );
+    }
     assert_eq!(property(tool("remote_write"), "content")["type"], "string");
     assert_eq!(
         property(tool("remote_write"), "content")["maxLength"],

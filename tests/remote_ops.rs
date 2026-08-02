@@ -2470,6 +2470,41 @@ async fn task6_preparse_rejection_has_no_progress_details() {
 }
 
 #[tokio::test]
+async fn codex_patch_preparse_rejection_starts_no_ssh_process() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let controls = tempfile::TempDir::new().unwrap();
+    let ssh_log = controls.path().join("ssh.log");
+    let (_runtime, _runner, bridge) = fixture_with_options(
+        remote.path(),
+        false,
+        None,
+        &[("FAKE_SSH_LOG", ssh_log.as_os_str().to_owned())],
+    );
+
+    let error = bridge
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch: concat!(
+                    "*** Begin Patch\n",
+                    "*** Add File: relative.txt\n",
+                    "+content\n",
+                    "*** End Patch\n",
+                )
+                .to_owned(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::InvalidArgument);
+    assert_eq!(ssh_call_count(&ssh_log, "G"), 0);
+    assert_eq!(ssh_call_count(&ssh_log, "P"), 0);
+    assert_eq!(ssh_call_count(&ssh_log, "S"), 0);
+}
+
+#[tokio::test]
 async fn task6_postparse_prepared_mutations_execute_after_local_validation() {
     let remote = tempfile::TempDir::new().unwrap();
     std::fs::write(remote.path().join("a"), b"old\n").unwrap();
