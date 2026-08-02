@@ -2505,6 +2505,142 @@ async fn codex_patch_preparse_rejection_starts_no_ssh_process() {
 }
 
 #[tokio::test]
+async fn codex_patch_add_update_and_delete_use_the_existing_mutation_pipeline() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let path = remote.path().join("native.txt");
+    let path = path.to_string_lossy();
+    let (_runtime, _runner, bridge) = fixture(remote.path(), false);
+
+    let add = format!("*** Begin Patch\n*** Add File: {path}\n+first\n*** End Patch\n");
+    let added = bridge
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch: add,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(added.changed_paths, vec!["native.txt".to_owned()]);
+    assert_eq!(
+        std::fs::read(remote.path().join("native.txt")).unwrap(),
+        b"first\n"
+    );
+
+    let update =
+        format!("*** Begin Patch\n*** Update File: {path}\n-first\n+second\n*** End Patch\n");
+    let updated = bridge
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch: update,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.changed_paths, vec!["native.txt".to_owned()]);
+    assert_eq!(
+        std::fs::read(remote.path().join("native.txt")).unwrap(),
+        b"second\n"
+    );
+
+    let delete = format!("*** Begin Patch\n*** Delete File: {path}\n*** End Patch\n");
+    let deleted = bridge
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch: delete,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.changed_paths, vec!["native.txt".to_owned()]);
+    assert!(!remote.path().join("native.txt").exists());
+}
+
+#[tokio::test]
+async fn codex_patch_update_of_a_complete_cached_base_stays_local() {
+    let remote = tempfile::TempDir::new().unwrap();
+    std::fs::write(remote.path().join("cached.txt"), b"old\n").unwrap();
+    let controls = tempfile::TempDir::new().unwrap();
+    let ssh_log = controls.path().join("ssh.log");
+    let (_runtime, runner, immediate) = fixture_with_options(
+        remote.path(),
+        false,
+        None,
+        &[("FAKE_SSH_LOG", ssh_log.as_os_str().to_owned())],
+    );
+    drop(immediate);
+    let bridge = FixtureBridge::new(RemoteBridge::new(runner), remote.path());
+
+    let initial = bridge
+        .read(
+            ReadRequest {
+                host: "dev".to_owned(),
+                paths: vec!["cached.txt".to_owned()],
+                start_line: None,
+                max_lines: None,
+                max_bytes: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        &initial.files[0],
+        ReadEntry::Success { content, .. } if content.value == "old\n"
+    ));
+    let ssh_calls_before_patch = std::fs::read_to_string(&ssh_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| matches!(*line, "G" | "P" | "S" | "C"))
+        .count();
+
+    let path = remote.path().join("cached.txt");
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n-old\n+new\n*** End Patch\n",
+        path.display(),
+    );
+    let result = bridge
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.changed_paths, vec!["cached.txt".to_owned()]);
+    let cached = bridge
+        .read(
+            ReadRequest {
+                host: "dev".to_owned(),
+                paths: vec!["cached.txt".to_owned()],
+                start_line: None,
+                max_lines: None,
+                max_bytes: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        &cached.files[0],
+        ReadEntry::Success { content, .. } if content.value == "new\n"
+    ));
+    let ssh_calls_after_patch = std::fs::read_to_string(&ssh_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| matches!(*line, "G" | "P" | "S" | "C"))
+        .count();
+    assert_eq!(ssh_calls_after_patch, ssh_calls_before_patch);
+}
+
+#[tokio::test]
 async fn task6_postparse_prepared_mutations_execute_after_local_validation() {
     let remote = tempfile::TempDir::new().unwrap();
     std::fs::write(remote.path().join("a"), b"old\n").unwrap();

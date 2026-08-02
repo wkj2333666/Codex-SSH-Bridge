@@ -20,6 +20,7 @@ use crate::output::{
 use crate::path::RemotePath;
 use crate::ssh::{FixedRunRequest, FixedRunResult, HelperMode, SshRunner};
 
+mod codex_patch;
 mod edit_cache;
 mod edit_sync;
 mod job;
