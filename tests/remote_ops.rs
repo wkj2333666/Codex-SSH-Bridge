@@ -2496,6 +2496,7 @@ async fn codex_patch_preparse_rejection_starts_no_ssh_process() {
     );
 
     let error = bridge
+        .inner
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
