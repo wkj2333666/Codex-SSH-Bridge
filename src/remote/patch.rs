@@ -593,7 +593,10 @@ pub(crate) fn parse_patch(input: &str) -> BridgeResult<Vec<FilePatch>> {
     Ok(patches)
 }
 
-pub(crate) fn parse_request_patch(input: &str) -> BridgeResult<Vec<ParsedFilePatch>> {
+pub(crate) fn parse_request_patch(
+    input: &str,
+    expected_environment_id: &str,
+) -> BridgeResult<Vec<ParsedFilePatch>> {
     if input.len() > MAX_PATCH_BYTES {
         return Err(patch_too_large("patch exceeds the compiled byte limit"));
     }
@@ -606,7 +609,7 @@ pub(crate) fn parse_request_patch(input: &str) -> BridgeResult<Vec<ParsedFilePat
         .next()
         .ok_or_else(|| invalid_patch("patch is empty"))?;
     if first == "*** Begin Patch" {
-        return super::codex_patch::parse_codex_patch(input)
+        return super::codex_patch::parse_codex_patch(input, expected_environment_id)
             .map(|patches| patches.into_iter().map(ParsedFilePatch::Codex).collect());
     }
     if first.starts_with("--- ") {
@@ -1407,7 +1410,7 @@ pub(super) async fn apply_patch(
         ));
     }
     let payload_bytes = patch.len();
-    let patches = parse_request_patch(&patch)?;
+    let patches = parse_request_patch(&patch, &host)?;
     let all_paths = patches
         .iter()
         .map(|patch| patch.path().to_owned())
@@ -1536,7 +1539,7 @@ async fn apply_patch_immediate(
             "patch exceeds the effective host write limit",
         ));
     }
-    let patches = parse_request_patch(&patch)?;
+    let patches = parse_request_patch(&patch, &host)?;
     drop(patch);
     let all_paths = patches
         .iter()
@@ -1745,7 +1748,7 @@ mod tests {
     }
 
     fn apply_request(base: Option<&[u8]>, patch: &str) -> crate::BridgeResult<super::PatchedFile> {
-        let parsed = super::parse_request_patch(patch)?;
+        let parsed = super::parse_request_patch(patch, "dev")?;
         assert_eq!(parsed.len(), 1);
         let sha256 = base.map(|bytes| format!("{:x}", Sha256::digest(bytes)));
         super::apply_parsed_file(
@@ -1881,7 +1884,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                super::parse_request_patch(input).unwrap_err().code,
+                super::parse_request_patch(input, "dev").unwrap_err().code,
                 ErrorCode::InvalidArgument,
                 "{input:?}",
             );

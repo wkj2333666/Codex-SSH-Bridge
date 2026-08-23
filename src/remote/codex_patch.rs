@@ -9,16 +9,18 @@ use super::patch::{
 
 const BEGIN_PATCH: &str = "*** Begin Patch";
 const END_PATCH: &str = "*** End Patch";
+const ENVIRONMENT_ID: &str = "*** Environment ID: ";
 const ADD_FILE: &str = "*** Add File: ";
 const UPDATE_FILE: &str = "*** Update File: ";
 const DELETE_FILE: &str = "*** Delete File: ";
 const MOVE_TO: &str = "*** Move to: ";
 const END_OF_FILE: &str = "*** End of File";
-const MAX_CODEX_RECORDS: usize = MAX_PATCH_BODY_LINES + (2 * MAX_PATCH_HUNKS) + MAX_PATCH_FILES + 2;
+const MAX_CODEX_RECORDS: usize = MAX_PATCH_BODY_LINES + (2 * MAX_PATCH_HUNKS) + MAX_PATCH_FILES + 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexFilePatch {
     pub path: String,
+    pub move_path: Option<String>,
     pub operation: FilePatchOperation,
     pub add_bytes: Option<Vec<u8>>,
     pub chunks: Vec<CodexUpdateChunk>,
@@ -29,10 +31,14 @@ pub(crate) struct CodexUpdateChunk {
     pub context: Option<String>,
     pub old_lines: Vec<String>,
     pub new_lines: Vec<String>,
+    pub context_line_indices: Vec<(usize, usize)>,
     pub end_of_file: bool,
 }
 
-pub(super) fn parse_codex_patch(input: &str) -> BridgeResult<Vec<CodexFilePatch>> {
+pub(super) fn parse_codex_patch(
+    input: &str,
+    expected_environment_id: &str,
+) -> BridgeResult<Vec<CodexFilePatch>> {
     if input.len() > MAX_PATCH_BYTES {
         return Err(patch_too_large("patch exceeds the compiled byte limit"));
     }
@@ -49,7 +55,7 @@ pub(super) fn parse_codex_patch(input: &str) -> BridgeResult<Vec<CodexFilePatch>
         return Err(patch_too_large("Codex patch contains too many records"));
     }
     if records.first().copied() != Some(BEGIN_PATCH) {
-        return Err(invalid_patch("Codex patch begin marker is missing"));
+        return Err(invalid_patch("patch must use Codex apply_patch syntax"));
     }
     let end = records
         .iter()
@@ -64,14 +70,24 @@ pub(super) fn parse_codex_patch(input: &str) -> BridgeResult<Vec<CodexFilePatch>
     let mut total_hunks = 0usize;
     let mut total_body_lines = 0usize;
     let mut index = 1usize;
+    if index < end
+        && let Some(environment_id) = records[index].strip_prefix(ENVIRONMENT_ID)
+    {
+        if environment_id.is_empty() {
+            return Err(invalid_patch("Codex patch environment id is empty"));
+        }
+        if environment_id != expected_environment_id {
+            return Err(invalid_patch(
+                "Codex patch environment id does not match host",
+            ));
+        }
+        index += 1;
+    }
     while index < end {
         if patches.len() == MAX_PATCH_FILES {
             return Err(patch_too_large("patch contains too many files"));
         }
         let record = records[index];
-        if record.starts_with(MOVE_TO) {
-            return Err(invalid_patch("Codex patch move is unsupported"));
-        }
         let (operation, path) = if let Some(path) = record.strip_prefix(ADD_FILE) {
             (FilePatchOperation::Create, path)
         } else if let Some(path) = record.strip_prefix(UPDATE_FILE) {
@@ -105,6 +121,7 @@ pub(super) fn parse_codex_patch(input: &str) -> BridgeResult<Vec<CodexFilePatch>
                 }
                 CodexFilePatch {
                     path: path.to_owned(),
+                    move_path: None,
                     operation,
                     add_bytes: Some(bytes),
                     chunks: Vec::new(),
@@ -112,18 +129,31 @@ pub(super) fn parse_codex_patch(input: &str) -> BridgeResult<Vec<CodexFilePatch>
             }
             FilePatchOperation::Delete => CodexFilePatch {
                 path: path.to_owned(),
+                move_path: None,
                 operation,
                 add_bytes: None,
                 chunks: Vec::new(),
             },
             FilePatchOperation::Update => {
-                if index < end && records[index].starts_with(MOVE_TO) {
-                    return Err(invalid_patch("Codex patch move is unsupported"));
-                }
+                let move_path = if index < end {
+                    records[index]
+                        .strip_prefix(MOVE_TO)
+                        .map(|move_path| {
+                            validate_codex_path(move_path)?;
+                            if move_path != path && !paths.insert(move_path.to_owned()) {
+                                return Err(invalid_patch("patch contains an overlapping path"));
+                            }
+                            index += 1;
+                            Ok(move_path.to_owned())
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
                 let mut chunks = Vec::new();
                 while index < end && !is_file_directive(records[index]) {
                     if records[index].starts_with(MOVE_TO) {
-                        return Err(invalid_patch("Codex patch move is unsupported"));
+                        return Err(invalid_patch("Codex patch move directive is misplaced"));
                     }
                     increment_hunks(&mut total_hunks)?;
                     let (chunk, next) =
@@ -131,11 +161,9 @@ pub(super) fn parse_codex_patch(input: &str) -> BridgeResult<Vec<CodexFilePatch>
                     chunks.push(chunk);
                     index = next;
                 }
-                if chunks.is_empty() {
-                    return Err(invalid_patch("Codex update-file section is empty"));
-                }
                 CodexFilePatch {
                     path: path.to_owned(),
+                    move_path,
                     operation,
                     add_bytes: None,
                     chunks,
@@ -173,7 +201,7 @@ fn parse_update_chunk(
 
     let mut old_lines = Vec::new();
     let mut new_lines = Vec::new();
-    let mut changed = false;
+    let mut context_line_indices = Vec::new();
     let mut end_of_file = false;
     while index < end {
         let record = records[index];
@@ -198,28 +226,24 @@ fn parse_update_chunk(
             .ok_or_else(|| invalid_patch("Codex update-file line is invalid"))?;
         match prefix.as_bytes()[0] {
             b' ' => {
+                context_line_indices.push((old_lines.len(), new_lines.len()));
                 old_lines.push(text.to_owned());
                 new_lines.push(text.to_owned());
             }
             b'-' => {
                 old_lines.push(text.to_owned());
-                changed = true;
             }
             b'+' => {
                 new_lines.push(text.to_owned());
-                changed = true;
             }
             _ => return Err(invalid_patch("Codex update-file line is invalid")),
         }
         increment_body_lines(total_body_lines)?;
         index += 1;
     }
-    if !changed {
-        return Err(invalid_patch("Codex update chunk has no changes"));
-    }
     if end_of_file && index < end {
         if records[index].starts_with(MOVE_TO) {
-            return Err(invalid_patch("Codex patch move is unsupported"));
+            return Err(invalid_patch("Codex patch move directive is misplaced"));
         }
         if !is_file_directive(records[index]) {
             return Err(invalid_patch("Codex end-of-file marker is not final"));
@@ -230,6 +254,7 @@ fn parse_update_chunk(
             context,
             old_lines,
             new_lines,
+            context_line_indices,
             end_of_file,
         },
         index,
@@ -259,7 +284,7 @@ fn reject_nested_or_mixed_record(record: &str) -> BridgeResult<()> {
     if record.starts_with("--- ") || record.starts_with("+++ ") {
         return Err(invalid_patch("Codex patch contains unified diff syntax"));
     }
-    if record.starts_with("*** ") {
+    if record.starts_with(ENVIRONMENT_ID) || record.starts_with("*** ") {
         return Err(invalid_patch("Codex patch marker is invalid"));
     }
     Ok(())
@@ -356,13 +381,27 @@ fn apply_update(
     for chunk in &patch.chunks {
         if let Some(context) = &chunk.context {
             let context = std::slice::from_ref(context);
-            let found = find_sequence(&lines, context, cursor, false)
+            let found = seek_sequence(&lines, context, cursor, false)
                 .ok_or_else(|| write_conflict("Codex patch context was not found"))?;
             cursor = found + 1;
         }
-        let start = find_sequence(&lines, &chunk.old_lines, cursor, chunk.end_of_file)
-            .ok_or_else(|| write_conflict("Codex patch expected lines were not found"))?;
-        replacements.push((start, chunk.old_lines.len(), &chunk.new_lines));
+        if chunk.old_lines.is_empty() && chunk.new_lines.is_empty() {
+            continue;
+        }
+        let start = if chunk.old_lines.is_empty() && chunk.context.is_none() {
+            lines.len()
+        } else {
+            seek_sequence(&lines, &chunk.old_lines, cursor, chunk.end_of_file)
+                .ok_or_else(|| write_conflict("Codex patch expected lines were not found"))?;
+        };
+        let mut new_lines = chunk.new_lines.clone();
+        for (old_index, new_index) in &chunk.context_line_indices {
+            let actual = lines
+                .get(start + old_index)
+                .ok_or_else(|| write_conflict("Codex patch context was not found"))?;
+            new_lines[*new_index] = (*actual).to_owned();
+        }
+        replacements.push((start, chunk.old_lines.len(), new_lines));
         cursor = start
             .checked_add(chunk.old_lines.len())
             .ok_or_else(|| patch_too_large("patch line position overflowed"))?;
@@ -374,7 +413,7 @@ fn apply_update(
         for line in &lines[copied..start] {
             extend_line(&mut output, line, maximum_output_bytes)?;
         }
-        for line in new_lines {
+        for line in &new_lines {
             extend_line(&mut output, line, maximum_output_bytes)?;
         }
         copied = start
@@ -384,7 +423,7 @@ fn apply_update(
     for line in &lines[copied..] {
         extend_line(&mut output, line, maximum_output_bytes)?;
     }
-    if output.as_slice() == base {
+    if output.as_slice() == base && patch.move_path.is_none() {
         return Err(write_conflict(
             "patch update would leave the file unchanged",
         ));
@@ -392,7 +431,7 @@ fn apply_update(
     Ok(PatchedFile::Write(output))
 }
 
-fn find_sequence(
+fn seek_sequence(
     haystack: &[&str],
     needle: &[String],
     start: usize,
@@ -409,17 +448,69 @@ fn find_sequence(
     if start > last {
         return None;
     }
-    if end_of_file {
-        return sequence_matches(haystack, needle, last).then_some(last);
+    if end_of_file && let Some(found) = seek_candidates(haystack, needle, last..=last) {
+        return Some(found);
     }
-    (start..=last).find(|&candidate| sequence_matches(haystack, needle, candidate))
+    seek_candidates(haystack, needle, start..=last)
 }
 
-fn sequence_matches(haystack: &[&str], needle: &[String], start: usize) -> bool {
+fn seek_candidates(
+    haystack: &[&str],
+    needle: &[String],
+    candidates: std::ops::RangeInclusive<usize>,
+) -> Option<usize> {
+    for mode in [
+        MatchMode::Exact,
+        MatchMode::TrimEnd,
+        MatchMode::Trim,
+        MatchMode::UnicodeNormalized,
+    ] {
+        for candidate in candidates.clone() {
+            if sequence_matches(haystack, needle, candidate, mode) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum MatchMode {
+    Exact,
+    TrimEnd,
+    Trim,
+    UnicodeNormalized,
+}
+
+fn sequence_matches(haystack: &[&str], needle: &[String], start: usize, mode: MatchMode) -> bool {
     haystack[start..start + needle.len()]
         .iter()
         .zip(needle)
-        .all(|(actual, expected)| *actual == expected)
+        .all(|(actual, expected)| match mode {
+            MatchMode::Exact => *actual == expected,
+            MatchMode::TrimEnd => actual.trim_end() == expected.trim_end(),
+            MatchMode::Trim => actual.trim() == expected.trim(),
+            MatchMode::UnicodeNormalized => {
+                normalize_unicode(actual) == normalize_unicode(expected)
+            }
+        })
+}
+
+fn normalize_unicode(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|character| match character {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => '\'',
+            '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' => '"',
+            '\u{00a0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200a}' | '\u{202f}' | '\u{205f}'
+            | '\u{3000}' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -428,7 +519,7 @@ mod tests {
     // Fixtures track codex-rs/apply-patch/src/{parser,streaming_parser,seek_sequence}.rs.
 
     fn apply(base: &[u8], patch: &str) -> crate::BridgeResult<super::PatchedFile> {
-        let parsed = super::parse_codex_patch(patch)?;
+        let parsed = super::parse_codex_patch(patch, "dev")?;
         assert_eq!(parsed.len(), 1);
         super::apply_codex_file(Some(base), &parsed[0], super::MAX_PATCH_BYTES)
     }
@@ -482,7 +573,13 @@ mod tests {
             "*** End Patch\n",
         );
 
-        let parsed = super::parse_codex_patch(patch).unwrap();
+        let parsed = super::parse_codex_patch(patch, "dev").unwrap();
         assert_eq!(parsed[0].path, "/srv/repo/a");
+        assert_eq!(parsed[0].move_path.as_deref(), Some("/srv/repo/b"));
+
+        assert_eq!(
+            super::parse_codex_patch(patch, "prod").unwrap_err().message,
+            "Codex patch environment id does not match host",
+        );
     }
 }
