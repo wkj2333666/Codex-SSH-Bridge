@@ -618,7 +618,7 @@ async fn task8_complete_surface_all_twelve_tools_are_real_json_rpc_calls() {
             json!({
                 "host":"dev",
                 "patch":format!(
-                    "--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-WRITE_SURFACE\n+PATCH_SURFACE\n",
+                    "*** Begin Patch\n*** Update File: {0}\n-WRITE_SURFACE\n+PATCH_SURFACE\n*** End Patch\n",
                     root.join("created.txt").display()
                 )
             }),
@@ -1435,7 +1435,7 @@ async fn task8_dispatch_fake_ssh_maps_read_search_run_write_and_patch_presentati
         json!({
             "host":"dev",
             "patch":format!(
-                "--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-WRITE_SENTINEL\n+PATCH_SENTINEL\n",
+                "*** Begin Patch\n*** Update File: {0}\n-WRITE_SENTINEL\n+PATCH_SENTINEL\n*** End Patch\n",
                 root.join("created.txt").display()
             )
         }),

@@ -281,9 +281,6 @@ fn reject_nested_or_mixed_record(record: &str) -> BridgeResult<()> {
     if record == BEGIN_PATCH || record == END_PATCH {
         return Err(invalid_patch("Codex patch envelope is nested"));
     }
-    if record.starts_with("--- ") || record.starts_with("+++ ") {
-        return Err(invalid_patch("Codex patch contains unified diff syntax"));
-    }
     if record.starts_with(ENVIRONMENT_ID) || record.starts_with("*** ") {
         return Err(invalid_patch("Codex patch marker is invalid"));
     }

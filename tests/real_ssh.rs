@@ -695,7 +695,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
             ApplyPatchRequest {
                 host: BASH_HOST.to_owned(),
                 patch: format!(
-                    "--- a/{generated_path}\n+++ b/{generated_path}\n@@ -1 +1 @@\n-old\n+new\n"
+                    "*** Begin Patch\n*** Update File: {generated_path}\n-old\n+new\n*** End Patch\n"
                 ),
             },
             CancellationToken::new(),

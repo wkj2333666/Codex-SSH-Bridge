@@ -93,10 +93,15 @@ impl FixtureBridge {
 
     fn absolute_patch(&self, patch: String) -> String {
         let root = self.root.to_string_lossy();
-        patch
+        let patch = patch
             .split_inclusive('\n')
             .map(|line| {
-                for prefix in ["--- a/", "+++ b/"] {
+                for prefix in [
+                    "*** Add File: ",
+                    "*** Update File: ",
+                    "*** Delete File: ",
+                    "*** Move to: ",
+                ] {
                     if let Some(remainder) = line.strip_prefix(prefix)
                         && !remainder.starts_with('/')
                     {
@@ -105,7 +110,15 @@ impl FixtureBridge {
                 }
                 line.to_owned()
             })
-            .collect()
+            .collect::<String>();
+        if patch
+            .trim_start_matches('\n')
+            .starts_with("*** Begin Patch")
+        {
+            patch
+        } else {
+            format!("*** Begin Patch\n{patch}*** End Patch\n")
+        }
     }
 
     async fn list(
@@ -1201,7 +1214,7 @@ async fn task78_domain_error_remote_context_is_attached_after_fixed_exit_zero() 
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: target\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -1344,8 +1357,8 @@ async fn task78_patch_mutation_result_corruption_keeps_context_and_progress_trut
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- /dev/null\n+++ b/malformed\n@@ -0,0 +1 @@\n+first\n",
-                    "--- /dev/null\n+++ b/later\n@@ -0,0 +1 @@\n+second\n",
+                    "*** Add File: malformed\n+first\n",
+                    "*** Add File: later\n+second\n",
                 )
                 .to_owned(),
             },
@@ -1404,8 +1417,8 @@ async fn task78_patch_second_snapshot_cancellation_keeps_first_snapshot_context(
                 ApplyPatchRequest {
                     host: "dev".to_owned(),
                     patch: concat!(
-                        "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
-                        "--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+new\n",
+                        "*** Update File: a\n-old\n+new\n",
+                        "*** Update File: b\n-old\n+new\n",
                     )
                     .to_owned(),
                 },
@@ -1854,7 +1867,7 @@ async fn patch_root_retarget_follows_the_current_filesystem_target() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: target\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -2405,7 +2418,7 @@ fn task5_write_result_shape_and_unknown_error_are_closed() {
 fn task6_request_result_and_error_progress_shapes_are_closed() {
     let request = ApplyPatchRequest {
         host: "dev".to_owned(),
-        patch: "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+        patch: "*** Update File: a\n-old\n+new\n".to_owned(),
     };
     assert_eq!(request.host, "dev");
 
@@ -2804,8 +2817,8 @@ async fn task6_postparse_prepared_mutations_execute_after_local_validation() {
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
-                    "--- /dev/null\n+++ b/b\n@@ -0,0 +1 @@\n+new\n",
+                    "*** Update File: a\n-old\n+new\n",
+                    "*** Add File: b\n+new\n",
                 )
                 .to_owned(),
             },
@@ -2839,8 +2852,8 @@ async fn task6_preparation_snapshots_every_base_before_any_output_failure_or_mut
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- a/large\n+++ b/large\n@@ -1 +1 @@\n-old\n+new\n",
-                    "--- a/second\n+++ b/second\n@@ -1 +1 @@\n-wrong\n+new\n",
+                    "*** Update File: large\n-old\n+new\n",
+                    "*** Update File: second\n-wrong\n+new\n",
                 )
                 .to_owned(),
             },
@@ -2895,7 +2908,7 @@ async fn task6_snapshot_rejects_final_symlinks_and_special_files_without_mutatio
             .apply_patch(
                 ApplyPatchRequest {
                     host: "dev".to_owned(),
-                    patch: format!("--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"),
+                    patch: format!("*** Update File: {name}\n-old\n+new\n"),
                 },
                 CancellationToken::new(),
             )
@@ -2946,7 +2959,7 @@ async fn task6_snapshot_detects_identity_drift_before_preparation_completes() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/race\n+++ b/race\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: race\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -2990,7 +3003,7 @@ async fn task6_snapshot_detects_hash_drift_before_preparation_completes() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/race\n+++ b/race\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: race\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3020,7 +3033,7 @@ async fn task6_snapshot_malformed_closed_metadata_is_protocol_error_with_known_p
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: target\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3054,7 +3067,7 @@ async fn task6_snapshot_oversized_stderr_metadata_is_protocol_error() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: target\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3088,7 +3101,7 @@ async fn task6_snapshot_capability_mismatch_with_stdout_is_not_retried() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: target\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3119,7 +3132,7 @@ async fn task6_snapshot_cancel_and_abort_remove_internal_spools() {
         .unwrap();
     }
 
-    let patch = "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n";
+    let patch = "*** Update File: target\n-old\n+new\n";
     let remote = tempfile::TempDir::new().unwrap();
     std::fs::write(remote.path().join("target"), b"old\n").unwrap();
     let controls = tempfile::TempDir::new().unwrap();
@@ -3278,9 +3291,7 @@ async fn task6_five_concurrent_large_snapshots_bound_rss_and_spools() {
                 .apply_patch(
                     ApplyPatchRequest {
                         host: format!("host-{index}"),
-                        patch: format!(
-                            "--- a/target-{index}\n+++ b/target-{index}\n@@ -1 +1 @@\n-x\n+y\n"
-                        ),
+                        patch: format!("*** Update File: target-{index}\n-x\n+y\n"),
                     },
                     CancellationToken::new(),
                 )
@@ -3343,7 +3354,7 @@ async fn task6_snapshot_parent_classification_is_bounded_to_thirty_two_ancestors
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: format!("--- a/{requested}\n+++ b/{requested}\n@@ -1 +1 @@\n-old\n+new\n"),
+                patch: format!("*** Update File: {requested}\n-old\n+new\n"),
             },
             CancellationToken::new(),
         )
@@ -3386,7 +3397,7 @@ async fn task6_snapshot_semantic_sentinel_requires_the_exact_nofollow_forms() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: target\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3422,7 +3433,7 @@ async fn task6_snapshot_accepts_exact_write_limit_rejects_plus_one_and_cleans_sp
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/exact\n+++ b/exact\n@@ -1 +1 @@\n-x\n+y\n".to_owned(),
+                patch: "*** Update File: exact\n-x\n+y\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3434,7 +3445,7 @@ async fn task6_snapshot_accepts_exact_write_limit_rejects_plus_one_and_cleans_sp
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/plus-one\n+++ b/plus-one\n@@ -1 +1 @@\n-x\n+y\n".to_owned(),
+                patch: "*** Update File: plus-one\n-x\n+y\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3486,7 +3497,7 @@ async fn task6_snapshot_success_raw_maximum_plus_one_is_contract_request_too_lar
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -0,0 +1 @@\n+new\n".to_owned(),
+                patch: "*** Update File: target\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3518,9 +3529,7 @@ async fn task6_preparation_preflights_every_future_mutation_frame_before_first_m
         &[("FAKE_SSH_PHASE_LOG", phases.as_os_str().to_owned())],
     );
     let large_output = "x".repeat(24 * 1024);
-    let patch = format!(
-        "--- /dev/null\n+++ b/first\n@@ -0,0 +1 @@\n+first\n--- /dev/null\n+++ b/second\n@@ -0,0 +1 @@\n+{large_output}\n"
-    );
+    let patch = format!("*** Add File: first\n+first\n*** Add File: second\n+{large_output}\n");
     let error = bridge
         .apply_patch(
             ApplyPatchRequest {
@@ -3562,7 +3571,7 @@ async fn task6_snapshot_reserves_protocol_within_the_host_output_limit() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: target\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3581,7 +3590,7 @@ async fn task6_host_and_size_rejections_are_preparse_without_progress_or_ssh() {
     let remote = tempfile::TempDir::new().unwrap();
     let controls = tempfile::TempDir::new().unwrap();
     let ssh_log = controls.path().join("ssh");
-    let patch = "--- /dev/null\n+++ b/a\n@@ -0,0 +1 @@\n+x\n";
+    let patch = "*** Add File: a\n+x\n";
 
     let (_runtime, _runner, bridge) = fixture_with_options(
         remote.path(),
@@ -3649,8 +3658,8 @@ async fn task6_aggregate_base_and_output_budgets_accept_exact_and_reject_plus_on
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\n",
-                    "--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y\n",
+                    "*** Update File: a\n-x\n+y\n",
+                    "*** Update File: b\n-x\n+y\n",
                 )
                 .to_owned(),
             },
@@ -3666,11 +3675,7 @@ async fn task6_aggregate_base_and_output_budgets_accept_exact_and_reject_plus_on
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: concat!(
-                    "--- a/a\n+++ b/a\n@@ -0,0 +1 @@\n+h\n",
-                    "--- a/b\n+++ b/b\n@@ -0,0 +1 @@\n+h\n",
-                )
-                .to_owned(),
+                patch: concat!("*** Update File: a\n+h\n", "*** Update File: b\n+h\n",).to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3687,8 +3692,8 @@ async fn task6_aggregate_base_and_output_budgets_accept_exact_and_reject_plus_on
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\n",
-                    "--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y\n",
+                    "*** Update File: a\n-x\n+y\n",
+                    "*** Update File: b\n-x\n+y\n",
                 )
                 .to_owned(),
             },
@@ -3719,7 +3724,7 @@ async fn task6_pre_cancel_is_zero_phase_with_every_path_known_not_changed() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: a\n-old\n+new\n".to_owned(),
             },
             cancel,
         )
@@ -3766,7 +3771,7 @@ async fn task6_snapshot_raw_read_partial_failure_is_closed_read_conflict() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/race\n+++ b/race\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: race\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3803,7 +3808,7 @@ async fn task6_snapshot_output_limit_mapping_preserves_runner_metadata() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+                patch: "*** Update File: target\n-old\n+new\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -3842,7 +3847,7 @@ async fn task6_snapshot_types_unreadable_and_special_mode_bases_without_mutation
             .apply_patch(
                 ApplyPatchRequest {
                     host: "dev".to_owned(),
-                    patch: format!("--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"),
+                    patch: format!("*** Update File: {name}\n-old\n+new\n"),
                 },
                 CancellationToken::new(),
             )
@@ -3902,8 +3907,8 @@ async fn task6_second_snapshot_reprobe_physical_root_drift_is_zero_mutation_conf
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
-                    "--- a/b\n+++ b/b\n@@ -1 +1 @@\n-old\n+new\n",
+                    "*** Update File: a\n-old\n+new\n",
+                    "*** Update File: b\n-old\n+new\n",
                 )
                 .to_owned(),
             },
@@ -3938,9 +3943,9 @@ async fn task6_prepared_create_update_delete_execute_in_patch_order() {
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- /dev/null\n+++ b/create\n@@ -0,0 +1 @@\n+created\n",
-                    "--- a/update\n+++ b/update\n@@ -1 +1 @@\n-old\n+updated\n",
-                    "--- a/delete\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n",
+                    "*** Add File: create\n+created\n",
+                    "*** Update File: update\n-old\n+updated\n",
+                    "*** Delete File: delete\n",
                 )
                 .to_owned(),
             },
@@ -3985,7 +3990,7 @@ async fn task6_prepared_update_uses_the_complete_base_above_public_read_limit() 
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/large\n+++ b/large\n@@ -1 +1 @@\n-x\n+y\n".to_owned(),
+                patch: "*** Update File: large\n-x\n+y\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -4016,7 +4021,7 @@ async fn task6_update_to_empty_is_a_guarded_replace_not_a_delete() {
         .apply_patch(
             ApplyPatchRequest {
                 host: "dev".to_owned(),
-                patch: "--- a/empty\n+++ b/empty\n@@ -1 +0,0 @@\n-old\n".to_owned(),
+                patch: "*** Update File: empty\n-old\n".to_owned(),
             },
             CancellationToken::new(),
         )
@@ -4060,9 +4065,9 @@ async fn task6_second_definite_failure_reports_confirmed_prefix_and_stops_suffix
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
-                    "--- a/b\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n",
-                    "--- /dev/null\n+++ b/c\n@@ -0,0 +1 @@\n+later\n",
+                    "*** Update File: a\n-old\n+new\n",
+                    "*** Delete File: b\n",
+                    "*** Add File: c\n+later\n",
                 )
                 .to_owned(),
             },
@@ -4117,9 +4122,9 @@ async fn task6_second_malformed_postcommit_is_only_current_unknown_and_stops_suf
             ApplyPatchRequest {
                 host: "dev".to_owned(),
                 patch: concat!(
-                    "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
-                    "--- a/b\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n",
-                    "--- /dev/null\n+++ b/c\n@@ -0,0 +1 @@\n+later\n",
+                    "*** Update File: a\n-old\n+new\n",
+                    "*** Delete File: b\n",
+                    "*** Add File: c\n+later\n",
                 )
                 .to_owned(),
             },
@@ -4210,9 +4215,9 @@ async fn task6_assert_cached_root_drift_is_definite_conflict(delete: bool) {
     let bridge = Arc::new(bridge);
     let patch_bridge = Arc::clone(&bridge);
     let patch = if delete {
-        "--- a/target\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+        "*** Delete File: target\n"
     } else {
-        "--- a/target\n+++ b/target\n@@ -1 +1 @@\n-old\n+new\n"
+        "*** Update File: target\n-old\n+new\n"
     };
     let task = tokio::spawn(async move {
         patch_bridge
@@ -4331,9 +4336,9 @@ async fn task6_postspawn_cancel_on_second_mutation_marks_only_current_unknown_an
                 ApplyPatchRequest {
                     host: "dev".to_owned(),
                     patch: concat!(
-                        "--- /dev/null\n+++ b/a\n@@ -0,0 +1 @@\n+first\n",
-                        "--- /dev/null\n+++ b/b\n@@ -0,0 +1 @@\n+second\n",
-                        "--- /dev/null\n+++ b/c\n@@ -0,0 +1 @@\n+third\n",
+                        "*** Add File: a\n+first\n",
+                        "*** Add File: b\n+second\n",
+                        "*** Add File: c\n+third\n",
                     )
                     .to_owned(),
                 },
