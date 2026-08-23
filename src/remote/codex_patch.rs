@@ -389,7 +389,7 @@ fn apply_update(
             lines.len()
         } else {
             seek_sequence(&lines, &chunk.old_lines, cursor, chunk.end_of_file)
-                .ok_or_else(|| write_conflict("Codex patch expected lines were not found"))?;
+                .ok_or_else(|| write_conflict("Codex patch expected lines were not found"))?
         };
         let mut new_lines = chunk.new_lines.clone();
         for (old_index, new_index) in &chunk.context_line_indices {
