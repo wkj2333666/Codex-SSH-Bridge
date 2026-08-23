@@ -48,7 +48,7 @@ All objects reject unknown fields. MCP paths are absolute remote paths. The brid
 | `remote_edit_status` | `host` | none |
 | `remote_sync_edits` | `host` | none |
 | `remote_discard_edits` | `host` | none |
-| `remote_apply_patch` | `host`, Codex or unified `patch` | none |
+| `remote_apply_patch` | `host`, native Codex `patch` | none |
 | `remote_write` | `host`, `path`, `content`, `encoding`, `mode` | `mode.expected_sha256` for replacement |
 | `remote_run` | `host`, `command` string, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin` |
 | `remote_job_start` | `host`, `command`, absolute `cwd` | `shell`, `timeout_ms`, encoded `stdin`, `label` |
@@ -74,28 +74,18 @@ the local uncertain cache before observing the remote state again.
 
 Search queries are case-sensitive fixed strings, not regular expressions. `remote_run.stdin` is `{"encoding":"utf8"|"base64","value":"..."}`.
 
-`remote_apply_patch` accepts the native Codex envelope or a standard unified
-diff. Use absolute paths in either form. `*** Move to` is unsupported.
+`remote_apply_patch` accepts one native Codex envelope. Every source and
+`*** Move to:` destination must use an absolute path.
 
 ```text
 *** Begin Patch
 *** Update File: /srv/project/app.rs
+*** Move to: /srv/project/src/app.rs
 @@ fn old_name()
 -fn old_name() {
 +fn new_name() {
 *** End Patch
 ```
-
-```diff
---- /dev/null
-+++ /srv/project/new.txt
-@@ -0,0 +1 @@
-+new content
-```
-
-Unified headers must name the same absolute path (or `/dev/null` for
-create/delete); conventional `a//absolute/path` and `b//absolute/path` forms
-remain accepted.
 
 ## Shell behavior
 

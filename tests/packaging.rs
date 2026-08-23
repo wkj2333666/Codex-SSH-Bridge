@@ -74,6 +74,39 @@ fn section<'a>(document: &'a str, heading: &str) -> &'a str {
     &body[..end]
 }
 
+fn quoted_assignment<'a>(document: &'a str, key: &str) -> &'a str {
+    document
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix(key)
+                .and_then(|value| value.trim().strip_prefix('='))
+                .map(str::trim)
+                .and_then(|value| value.strip_prefix('"'))
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .unwrap_or_else(|| panic!("missing quoted assignment for {key:?}"))
+}
+
+#[test]
+fn package_versions_are_coordinated() {
+    let cargo_version = quoted_assignment(&read_text("Cargo.toml"), "version").to_owned();
+    let lock = read_text("Cargo.lock");
+    let lock_package = lock
+        .split("[[package]]")
+        .find(|package| package.contains("name = \"codex-ssh-bridge\""))
+        .expect("Cargo.lock omits the codex-ssh-bridge package");
+    let lock_version = quoted_assignment(lock_package, "version");
+    let plugin = read_json(".codex-plugin/plugin.json");
+    let plugin_version = plugin["version"]
+        .as_str()
+        .expect("plugin version must be a string");
+
+    assert_eq!(cargo_version, "0.9.0");
+    assert_eq!(lock_version, cargo_version);
+    assert_eq!(plugin_version, cargo_version);
+}
+
 #[test]
 fn plugin_manifest_publishes_the_skill_without_machine_mcp_configuration() {
     let plugin = read_json(".codex-plugin/plugin.json");
