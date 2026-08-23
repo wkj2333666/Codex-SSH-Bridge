@@ -2593,9 +2593,18 @@ mod tests {
         let base = tempfile::TempDir::new().unwrap();
         let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
         let store = OutputStore::with_limits(&runtime, MAX_GLOBAL_SPOOL_QUOTA_BYTES, 1).unwrap();
-        let before_fds = std::fs::read_dir("/proc/self/fd")
-            .ok()
-            .map(|entries| entries.count());
+        let resident_spool_fds = || {
+            let mut targets = std::fs::read_dir("/proc/self/fd")
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter(|target| target.starts_with(store.spool_directory.path()))
+                .collect::<Vec<_>>();
+            targets.sort();
+            targets
+        };
+        let before_fds = resident_spool_fds();
         let provenance = StoredProvenance::Aggregate {
             kind: StoredAggregateKind::Hosts,
             source_count: 0,
@@ -2631,13 +2640,8 @@ mod tests {
                 .await
                 .is_err()
         );
-        if let Some(before_fds) = before_fds {
-            let after_fds = std::fs::read_dir("/proc/self/fd").unwrap().count();
-            assert!(
-                after_fds <= before_fds + 8,
-                "resident fd growth: {before_fds} -> {after_fds}"
-            );
-        }
+        let after_fds = resident_spool_fds();
+        assert_eq!(after_fds, before_fds, "resident spool fd growth");
         let page = store
             .read(&references[0], super::StreamKind::Stdout, 0, 16)
             .await
