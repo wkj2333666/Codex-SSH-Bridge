@@ -1139,8 +1139,8 @@ fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
     let patch_description = patch_tool.description.as_str();
     let patch_schema_description = property(patch_tool, "patch")["description"]
         .as_str()
-        .expect("remote_apply_patch.patch must describe both accepted formats");
-    for required in ["Codex apply_patch", "unified diff", "absolute"] {
+        .expect("remote_apply_patch.patch must describe native Codex syntax");
+    for required in ["Codex apply_patch", "absolute", "Move to"] {
         assert!(
             patch_description.contains(required),
             "remote_apply_patch description omits {required:?}"
@@ -1148,6 +1148,16 @@ fn task8_schema_has_exact_required_fields_and_advisory_bounds() {
         assert!(
             patch_schema_description.contains(required),
             "remote_apply_patch.patch description omits {required:?}"
+        );
+    }
+    for forbidden in ["unified diff", "unsupported"] {
+        assert!(
+            !patch_description.contains(forbidden),
+            "remote_apply_patch description retains {forbidden:?}"
+        );
+        assert!(
+            !patch_schema_description.contains(forbidden),
+            "remote_apply_patch.patch description retains {forbidden:?}"
         );
     }
     assert_eq!(property(tool("remote_write"), "content")["type"], "string");

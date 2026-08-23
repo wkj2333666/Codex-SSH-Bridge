@@ -419,21 +419,25 @@ fn skill_closes_search_stdin_and_patch_schema_ambiguities() {
 }
 
 #[test]
-fn packaged_skill_and_reference_describe_both_patch_formats() {
+fn packaged_skill_and_reference_describe_only_native_codex_patches() {
     let skill = read_text("skills/remote-ssh-ops/SKILL.md");
     let operations = read_text("skills/remote-ssh-ops/references/operations.md");
     let combined = format!("{skill}\n{operations}");
 
-    for required in [
-        "*** Begin Patch",
-        "standard unified diff",
-        "absolute paths",
-        "*** Move to",
-        "unsupported",
-    ] {
+    for required in ["*** Begin Patch", "absolute paths", "*** Move to"] {
         assert!(
             combined.contains(required),
             "packaged patch documentation omits {required:?}"
+        );
+    }
+    for forbidden in [
+        "standard unified diff",
+        "/dev/null",
+        "Move to is unsupported",
+    ] {
+        assert!(
+            !combined.contains(forbidden),
+            "packaged patch documentation retains {forbidden:?}"
         );
     }
 }

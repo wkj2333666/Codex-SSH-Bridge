@@ -421,3 +421,68 @@ fn sequence_matches(haystack: &[&str], needle: &[String], start: usize) -> bool 
         .zip(needle)
         .all(|(actual, expected)| *actual == expected)
 }
+
+#[cfg(test)]
+mod tests {
+    // UPSTREAM_APPLY_PATCH_BASELINE: 422239eb4b1e0d0f85fac7256a079a1befe78472
+    // Fixtures track codex-rs/apply-patch/src/{parser,streaming_parser,seek_sequence}.rs.
+
+    fn apply(base: &[u8], patch: &str) -> crate::BridgeResult<super::PatchedFile> {
+        let parsed = super::parse_codex_patch(patch)?;
+        assert_eq!(parsed.len(), 1);
+        super::apply_codex_file(Some(base), &parsed[0], super::MAX_PATCH_BYTES)
+    }
+
+    #[test]
+    fn repeated_context_selectors_advance_before_one_change() {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: /srv/repo/src/lib.rs\n",
+            "@@ impl Server\n",
+            "@@ fn dispatch\n",
+            "-old();\n",
+            "+new();\n",
+            "*** End Patch\n",
+        );
+
+        assert_eq!(
+            apply(b"impl Server\nfn other() {}\nfn dispatch\nold();\n", patch,).unwrap(),
+            super::PatchedFile::Write(
+                b"impl Server\nfn other() {}\nfn dispatch\nnew();\n".to_vec(),
+            ),
+        );
+    }
+
+    #[test]
+    fn native_context_matching_uses_ordered_fallbacks() {
+        for (base, context) in [
+            ("target   \nold\n", "target"),
+            ("  target  \nold\n", "target"),
+            ("“target”\nold\n", "\"target\""),
+        ] {
+            let patch = format!(
+                "*** Begin Patch\n*** Update File: /srv/repo/a\n@@ {context}\n-old\n+new\n*** End Patch\n"
+            );
+            let expected = base.replace("old\n", "new\n").into_bytes();
+            assert_eq!(
+                apply(base.as_bytes(), &patch).unwrap(),
+                super::PatchedFile::Write(expected),
+                "context {context:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn native_environment_preamble_and_move_directive_parse() {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Environment ID: dev\n",
+            "*** Update File: /srv/repo/a\n",
+            "*** Move to: /srv/repo/b\n",
+            "*** End Patch\n",
+        );
+
+        let parsed = super::parse_codex_patch(patch).unwrap();
+        assert_eq!(parsed[0].path, "/srv/repo/a");
+    }
+}

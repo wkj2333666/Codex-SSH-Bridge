@@ -2505,6 +2505,103 @@ async fn codex_patch_preparse_rejection_starts_no_ssh_process() {
 }
 
 #[tokio::test]
+async fn unified_patch_is_rejected_before_ssh_or_mutation() {
+    let remote = tempfile::TempDir::new().unwrap();
+    std::fs::write(remote.path().join("target"), b"old\n").unwrap();
+    let controls = tempfile::TempDir::new().unwrap();
+    let ssh_log = controls.path().join("ssh.log");
+    let (_runtime, _runner, bridge) = fixture_with_options(
+        remote.path(),
+        false,
+        None,
+        &[("FAKE_SSH_LOG", ssh_log.as_os_str().to_owned())],
+    );
+    let path = remote.path().join("target");
+    let patch = format!(
+        "--- {0}\n+++ {0}\n@@ -1 +1 @@\n-old\n+new\n",
+        path.display(),
+    );
+
+    let error = bridge
+        .inner
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::InvalidArgument);
+    assert_eq!(std::fs::read(path).unwrap(), b"old\n");
+    assert_eq!(ssh_call_count(&ssh_log, "G"), 0);
+    assert_eq!(ssh_call_count(&ssh_log, "P"), 0);
+    assert_eq!(ssh_call_count(&ssh_log, "S"), 0);
+    assert_eq!(ssh_call_count(&ssh_log, "C"), 0);
+}
+
+#[tokio::test]
+async fn codex_patch_update_and_move_reports_both_mutated_paths() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let source = remote.path().join("source.txt");
+    let destination = remote.path().join("destination.txt");
+    std::fs::write(&source, b"old\n").unwrap();
+    std::fs::write(&destination, b"overwritten\n").unwrap();
+    let (_runtime, _runner, bridge) = fixture(remote.path(), false);
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n*** Move to: {}\n@@\n-old\n+new\n*** End Patch\n",
+        source.display(),
+        destination.display(),
+    );
+
+    let result = bridge
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.changed_paths,
+        vec!["destination.txt".to_owned(), "source.txt".to_owned()],
+    );
+    assert_eq!(std::fs::read(destination).unwrap(), b"new\n");
+    assert!(!source.exists());
+}
+
+#[tokio::test]
+async fn codex_patch_self_move_is_an_in_place_update() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let source = remote.path().join("source.txt");
+    std::fs::write(&source, b"old\n").unwrap();
+    let (_runtime, _runner, bridge) = fixture(remote.path(), false);
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {0}\n*** Move to: {0}\n@@\n-old\n+new\n*** End Patch\n",
+        source.display(),
+    );
+
+    let result = bridge
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.changed_paths, vec!["source.txt".to_owned()]);
+    assert_eq!(std::fs::read(source).unwrap(), b"new\n");
+}
+
+#[tokio::test]
 async fn codex_patch_add_update_and_delete_use_the_existing_mutation_pipeline() {
     let remote = tempfile::TempDir::new().unwrap();
     let path = remote.path().join("native.txt");
