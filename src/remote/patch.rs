@@ -374,6 +374,22 @@ impl ParsedFilePatch {
             Self::Codex(patch) => patch.operation,
         }
     }
+
+    fn move_path(&self) -> Option<&str> {
+        match self {
+            Self::Unified(_) => None,
+            Self::Codex(patch) => patch.move_path.as_deref(),
+        }
+    }
+
+    fn mutation_paths(&self) -> Vec<String> {
+        match self.move_path() {
+            Some(destination) if destination != self.path() => {
+                vec![destination.to_owned(), self.path().to_owned()]
+            }
+            _ => vec![self.path().to_owned()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1091,7 +1107,14 @@ pub(super) fn write_conflict(message: &'static str) -> BridgeError {
 #[derive(Debug)]
 struct ResolvedFilePatch {
     patch: ParsedFilePatch,
-    path: super::write::PreparedMutationPath,
+    source: super::write::PreparedMutationPath,
+    destination: Option<super::write::PreparedMutationPath>,
+}
+
+#[derive(Debug)]
+struct PatchSnapshots {
+    source: FileSnapshot,
+    destination: Option<FileSnapshot>,
 }
 
 #[derive(Debug)]
@@ -1135,11 +1158,28 @@ fn resolve_patch_files(
         .map(|patch| {
             let failed_path = patch.path().to_owned();
             (|| {
-                let path = super::write::prepare_patch_path(bridge, host, patch.path())?;
-                Ok(ResolvedFilePatch { patch, path })
+                let source = super::write::prepare_patch_path(bridge, host, patch.path())?;
+                let destination = match patch.move_path() {
+                    Some(destination) if destination != patch.path() => Some(
+                        super::write::prepare_patch_path(bridge, host, destination).map_err(
+                            |mut error| {
+                                error.details.failed_path = Some(destination.to_owned());
+                                error
+                            },
+                        )?,
+                    ),
+                    _ => None,
+                };
+                Ok(ResolvedFilePatch {
+                    patch,
+                    source,
+                    destination,
+                })
             })()
             .map_err(|mut error: BridgeError| {
-                error.details.failed_path = Some(failed_path);
+                if error.details.failed_path.is_none() {
+                    error.details.failed_path = Some(failed_path);
+                }
                 error
             })
         })
@@ -1149,7 +1189,7 @@ fn resolve_patch_files(
 async fn snapshot_file(
     bridge: &RemoteBridge,
     host: &str,
-    resolved: &ResolvedFilePatch,
+    path: &super::write::PreparedMutationPath,
     maximum_bytes: usize,
     cancel: CancellationToken,
 ) -> BridgeResult<(FileSnapshot, RemoteContext)> {
@@ -1177,8 +1217,8 @@ async fn snapshot_file(
                 host: host.to_owned(),
                 script: PATCH_SNAPSHOT_SCRIPT,
                 args: vec![
-                    resolved.path.parent().to_owned(),
-                    resolved.path.basename().to_owned(),
+                    path.parent().to_owned(),
+                    path.basename().to_owned(),
                     snapshot_maximum.to_string(),
                 ],
                 stdin: None,
@@ -1413,7 +1453,7 @@ pub(super) async fn apply_patch(
     let patches = parse_request_patch(&patch, &host)?;
     let all_paths = patches
         .iter()
-        .map(|patch| patch.path().to_owned())
+        .flat_map(ParsedFilePatch::mutation_paths)
         .collect::<Vec<_>>();
     let resolved = resolve_patch_files(bridge, &host, patches)
         .map_err(|error| attach_preparation_progress(error, None, &all_paths))?;
@@ -1424,9 +1464,10 @@ pub(super) async fn apply_patch(
             &all_paths,
         ));
     }
-    let mut prepared = Vec::with_capacity(resolved.len());
+    let mut prepared = Vec::with_capacity(all_paths.len());
     let mut remaining_output_bytes = maximum_bytes;
-    for (index, file) in resolved.into_iter().enumerate() {
+    let mut remaining_payload_bytes = payload_bytes;
+    for file in resolved {
         if cancel.is_cancelled() {
             return Err(attach_preparation_progress(
                 BridgeError::new(ErrorCode::Cancelled, "remote patch was cancelled", false),
@@ -1434,13 +1475,13 @@ pub(super) async fn apply_patch(
                 &all_paths,
             ));
         }
-        let key = CacheKey {
+        let source_key = CacheKey {
             host: host.clone(),
             path: file.patch.path().to_owned(),
         };
-        let current = match bridge
+        let source_current = match bridge
             .edit_cache
-            .load_entry_complete(key.clone())
+            .load_entry_complete(source_key.clone())
             .await
             .map_err(edit_bridge_error)
             .map_err(|error| {
@@ -1458,11 +1499,45 @@ pub(super) async fn apply_patch(
                 return Ok(result);
             }
         };
-        let current_hash = match &current.desired {
+        let destination_current = if let Some(destination) = file.patch.move_path() {
+            if destination == file.patch.path() {
+                None
+            } else {
+                let destination_key = CacheKey {
+                    host: host.clone(),
+                    path: destination.to_owned(),
+                };
+                let current = match bridge
+                    .edit_cache
+                    .load_entry_complete(destination_key.clone())
+                    .await
+                    .map_err(edit_bridge_error)
+                    .map_err(|error| {
+                        attach_preparation_progress(error, Some(destination), &all_paths)
+                    })? {
+                    LoadEntryDisposition::Cached(current) => current,
+                    LoadEntryDisposition::ImmediateWriteRequired => {
+                        bridge
+                            .edit_cache
+                            .flush_host(&host)
+                            .await
+                            .map_err(edit_bridge_error)?;
+                        let result =
+                            apply_patch_immediate(bridge, immediate_request, cancel).await?;
+                        bridge.edit_cache.invalidate_clean_host(&host).await;
+                        return Ok(result);
+                    }
+                };
+                Some((destination_key, current))
+            }
+        } else {
+            None
+        };
+        let current_hash = match &source_current.desired {
             DesiredState::Present(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
             DesiredState::Deleted => None,
         };
-        let base = match &current.desired {
+        let base = match &source_current.desired {
             DesiredState::Present(bytes) => {
                 Some((bytes.as_ref(), current_hash.as_deref().unwrap()))
             }
@@ -1487,12 +1562,34 @@ pub(super) async fn apply_patch(
             }
             PatchedFile::Delete => DesiredState::Deleted,
         };
-        prepared.push(PreparedEdit {
-            key,
-            expected_generation: current.generation,
-            desired,
-            payload_bytes: if index == 0 { payload_bytes } else { 0 },
-        });
+        if let Some((destination_key, destination_current)) = destination_current {
+            let DesiredState::Present(bytes) = desired else {
+                return Err(attach_preparation_progress(
+                    invalid_patch("Codex patch move did not produce file content"),
+                    Some(file.patch.path()),
+                    &all_paths,
+                ));
+            };
+            prepared.push(PreparedEdit {
+                key: destination_key,
+                expected_generation: destination_current.generation,
+                desired: DesiredState::Present(bytes),
+                payload_bytes: std::mem::take(&mut remaining_payload_bytes),
+            });
+            prepared.push(PreparedEdit {
+                key: source_key,
+                expected_generation: source_current.generation,
+                desired: DesiredState::Deleted,
+                payload_bytes: 0,
+            });
+        } else {
+            prepared.push(PreparedEdit {
+                key: source_key,
+                expected_generation: source_current.generation,
+                desired,
+                payload_bytes: std::mem::take(&mut remaining_payload_bytes),
+            });
+        }
     }
     match bridge
         .edit_cache
@@ -1543,7 +1640,7 @@ async fn apply_patch_immediate(
     drop(patch);
     let all_paths = patches
         .iter()
-        .map(|patch| patch.path().to_owned())
+        .flat_map(ParsedFilePatch::mutation_paths)
         .collect::<Vec<_>>();
     let resolved = resolve_patch_files(bridge, &host, patches)
         .map_err(|error| attach_preparation_progress(error, None, &all_paths))?;
@@ -1562,15 +1659,20 @@ async fn apply_patch_immediate(
                 None => error,
             });
         }
-        let (snapshot, snapshot_context) =
-            snapshot_file(bridge, &host, file, remaining_base_bytes, cancel.clone())
-                .await
-                .map_err(|error| {
-                    attach_optional_remote_context(
-                        attach_preparation_progress(error, Some(file.patch.path()), &all_paths),
-                        operation_context.as_ref(),
-                    )
-                })?;
+        let (source, snapshot_context) = snapshot_file(
+            bridge,
+            &host,
+            &file.source,
+            remaining_base_bytes,
+            cancel.clone(),
+        )
+        .await
+        .map_err(|error| {
+            attach_optional_remote_context(
+                attach_preparation_progress(error, Some(file.patch.path()), &all_paths),
+                operation_context.as_ref(),
+            )
+        })?;
         if let Some(context) = &operation_context
             && context.host != snapshot_context.host
         {
@@ -1583,7 +1685,7 @@ async fn apply_patch_immediate(
                 &snapshot_context,
             ));
         }
-        if let FileSnapshot::Regular { bytes, .. } = &snapshot {
+        if let FileSnapshot::Regular { bytes, .. } = &source {
             remaining_base_bytes =
                 remaining_base_bytes
                     .checked_sub(bytes.len())
@@ -1601,7 +1703,61 @@ async fn apply_patch_immediate(
         if operation_context.is_none() {
             operation_context = Some(snapshot_context);
         }
-        snapshots.push(snapshot);
+        let destination = if let Some(destination_path) = &file.destination {
+            let display_path = file
+                .patch
+                .move_path()
+                .expect("resolved move destination has no patch path");
+            let (destination, destination_context) = snapshot_file(
+                bridge,
+                &host,
+                destination_path,
+                remaining_base_bytes,
+                cancel.clone(),
+            )
+            .await
+            .map_err(|error| {
+                attach_optional_remote_context(
+                    attach_preparation_progress(error, Some(display_path), &all_paths),
+                    operation_context.as_ref(),
+                )
+            })?;
+            if operation_context
+                .as_ref()
+                .is_some_and(|context| context.host != destination_context.host)
+            {
+                return Err(attach_remote_context(
+                    attach_preparation_progress(
+                        BridgeError::read_conflict(),
+                        Some(display_path),
+                        &all_paths,
+                    ),
+                    &destination_context,
+                ));
+            }
+            if let FileSnapshot::Regular { bytes, .. } = &destination {
+                remaining_base_bytes =
+                    remaining_base_bytes
+                        .checked_sub(bytes.len())
+                        .ok_or_else(|| {
+                            attach_remote_context(
+                                attach_preparation_progress(
+                                    patch_too_large("patch bases exceed the aggregate write limit"),
+                                    Some(display_path),
+                                    &all_paths,
+                                ),
+                                &destination_context,
+                            )
+                        })?;
+            }
+            Some(destination)
+        } else {
+            None
+        };
+        snapshots.push(PatchSnapshots {
+            source,
+            destination,
+        });
     }
 
     let operation_context = operation_context.ok_or_else(|| {
@@ -1620,9 +1776,12 @@ async fn apply_patch_immediate(
 
     let mut outputs = Vec::with_capacity(resolved.len());
     let mut remaining_output_bytes = maximum_bytes;
-    for (file, snapshot) in resolved.into_iter().zip(snapshots) {
-        let output = apply_parsed_file(snapshot.base(), &file.patch, remaining_output_bytes)
-            .map_err(|error| attach_after_snapshots(error, Some(file.patch.path().to_owned())))?;
+    for (file, snapshots) in resolved.into_iter().zip(snapshots) {
+        let output =
+            apply_parsed_file(snapshots.source.base(), &file.patch, remaining_output_bytes)
+                .map_err(|error| {
+                    attach_after_snapshots(error, Some(file.patch.path().to_owned()))
+                })?;
         if let PatchedFile::Write(bytes) = &output {
             remaining_output_bytes =
                 remaining_output_bytes
@@ -1634,55 +1793,110 @@ async fn apply_patch_immediate(
                         )
                     })?;
         }
-        let expected_sha256 = snapshot.sha256().map(str::to_owned);
-        outputs.push((file, output, expected_sha256));
+        outputs.push((file, output, snapshots));
     }
 
-    let mut prepared_mutations = Vec::with_capacity(outputs.len());
-    for (file, output, expected_sha256) in outputs {
+    let mut prepared_mutations = Vec::with_capacity(all_paths.len());
+    for (file, output, snapshots) in outputs {
+        let source_path = file.patch.path().to_owned();
+        let source_expected_sha256 = snapshots.source.sha256().map(str::to_owned);
+        if let Some(destination) = file.destination {
+            let destination_path = file
+                .patch
+                .move_path()
+                .expect("resolved move destination has no patch path")
+                .to_owned();
+            let bytes = match output {
+                PatchedFile::Write(bytes) => bytes,
+                PatchedFile::Delete => {
+                    return Err(attach_after_snapshots(
+                        invalid_patch("Codex patch move did not produce file content"),
+                        Some(source_path),
+                    ));
+                }
+            };
+            let destination_snapshot = snapshots.destination.ok_or_else(|| {
+                attach_after_snapshots(
+                    snapshot_protocol_error("move destination snapshot is missing"),
+                    Some(destination_path.clone()),
+                )
+            })?;
+            let mode = match destination_snapshot {
+                FileSnapshot::Missing => WriteMode::Create,
+                FileSnapshot::Regular { sha256, .. } => WriteMode::Replace {
+                    expected_sha256: Some(sha256),
+                },
+            };
+            let content = String::from_utf8(bytes).map_err(|_| {
+                attach_after_snapshots(
+                    snapshot_protocol_error("prepared patch output is not UTF-8"),
+                    Some(source_path.clone()),
+                )
+            })?;
+            let write = super::write::preflight_write_resolved(
+                bridge,
+                destination,
+                content,
+                WriteEncoding::Utf8,
+                mode,
+            )
+            .map_err(|error| attach_after_snapshots(error, Some(destination_path)))?;
+            prepared_mutations.push(PreparedMutation::Write(Box::new(write)));
+
+            let expected_sha256 = source_expected_sha256.ok_or_else(|| {
+                attach_after_snapshots(
+                    write_conflict("patch move source has no regular base"),
+                    Some(source_path.clone()),
+                )
+            })?;
+            let delete =
+                super::write::preflight_delete_resolved(bridge, file.source, expected_sha256)
+                    .map_err(|error| attach_after_snapshots(error, Some(source_path)))?;
+            prepared_mutations.push(PreparedMutation::Delete(Box::new(delete)));
+            continue;
+        }
+
         let prepared = match output {
             PatchedFile::Write(bytes) => {
                 let mode = match file.patch.operation() {
                     FilePatchOperation::Create => WriteMode::Create,
-                    FilePatchOperation::Update => WriteMode::Replace { expected_sha256 },
+                    FilePatchOperation::Update => WriteMode::Replace {
+                        expected_sha256: source_expected_sha256,
+                    },
                     FilePatchOperation::Delete => {
                         return Err(attach_after_snapshots(
                             invalid_patch("patch delete produced a write frame"),
-                            Some(file.patch.path().to_owned()),
+                            Some(source_path),
                         ));
                     }
                 };
                 let content = String::from_utf8(bytes).map_err(|_| {
                     attach_after_snapshots(
                         snapshot_protocol_error("prepared patch output is not UTF-8"),
-                        Some(file.patch.path().to_owned()),
+                        Some(source_path.clone()),
                     )
                 })?;
                 PreparedMutation::Write(Box::new(
                     super::write::preflight_write_resolved(
                         bridge,
-                        file.path,
+                        file.source,
                         content,
                         WriteEncoding::Utf8,
                         mode,
                     )
-                    .map_err(|error| {
-                        attach_after_snapshots(error, Some(file.patch.path().to_owned()))
-                    })?,
+                    .map_err(|error| attach_after_snapshots(error, Some(source_path)))?,
                 ))
             }
             PatchedFile::Delete => {
-                let expected_sha256 = expected_sha256.ok_or_else(|| {
+                let expected_sha256 = source_expected_sha256.ok_or_else(|| {
                     attach_after_snapshots(
                         write_conflict("patch delete has no regular base"),
-                        Some(file.patch.path().to_owned()),
+                        Some(source_path.clone()),
                     )
                 })?;
                 PreparedMutation::Delete(Box::new(
-                    super::write::preflight_delete_resolved(bridge, file.path, expected_sha256)
-                        .map_err(|error| {
-                            attach_after_snapshots(error, Some(file.patch.path().to_owned()))
-                        })?,
+                    super::write::preflight_delete_resolved(bridge, file.source, expected_sha256)
+                        .map_err(|error| attach_after_snapshots(error, Some(source_path)))?,
                 ))
             }
         };

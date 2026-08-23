@@ -22,7 +22,8 @@ use codex_ssh_bridge::remote::{
     RemoteJobListRequest, RemoteJobLogsRequest, RemoteJobStartRequest, RemoteMetadata,
     RemoteRunRequest, RetentionProvenance, RunShell, RunStdin, SearchEngine, SearchMatch,
     SearchRequest, SearchResult, ShellMetadata, ShellName, StatEntry, StatRequest, StatResult,
-    ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest, WriteResult,
+    SyncEditsRequest, ValueEncoding, WriteEncoding, WriteMode, WriteOperation, WriteRequest,
+    WriteResult,
 };
 use codex_ssh_bridge::ssh::{RunRequest, RuntimePaths, SshRunner};
 use codex_ssh_bridge::{BridgeError, ErrorCode};
@@ -2735,6 +2736,62 @@ async fn codex_patch_update_of_a_complete_cached_base_stays_local() {
         .filter(|line| matches!(*line, "G" | "P" | "S" | "C"))
         .count();
     assert_eq!(ssh_calls_after_patch, ssh_calls_before_patch);
+}
+
+#[tokio::test]
+async fn codex_patch_move_of_complete_cached_files_syncs_destination_then_source() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let source = remote.path().join("source.txt");
+    let destination = remote.path().join("destination.txt");
+    std::fs::write(&source, b"old\n").unwrap();
+    std::fs::write(&destination, b"overwritten\n").unwrap();
+    let (_runtime, runner, immediate) = fixture(remote.path(), false);
+    drop(immediate);
+    let bridge = FixtureBridge::new(RemoteBridge::new(runner), remote.path());
+
+    bridge
+        .read(
+            ReadRequest {
+                host: "dev".to_owned(),
+                paths: vec!["source.txt".to_owned(), "destination.txt".to_owned()],
+                start_line: None,
+                max_lines: None,
+                max_bytes: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n*** Move to: {}\n@@\n-old\n+new\n*** End Patch\n",
+        source.display(),
+        destination.display(),
+    );
+    let result = bridge
+        .apply_patch(
+            ApplyPatchRequest {
+                host: "dev".to_owned(),
+                patch,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.changed_paths,
+        vec!["destination.txt".to_owned(), "source.txt".to_owned()],
+    );
+    let synced = bridge
+        .sync_edits(SyncEditsRequest {
+            host: "dev".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert!(synced.pending_paths.is_empty());
+    assert_eq!(std::fs::read(destination).unwrap(), b"new\n");
+    assert!(!source.exists());
 }
 
 #[tokio::test]
