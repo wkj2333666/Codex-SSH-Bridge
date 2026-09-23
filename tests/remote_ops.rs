@@ -2871,7 +2871,7 @@ async fn task6_preparation_snapshots_every_base_before_any_output_failure_or_mut
         Some(vec!["large".to_owned(), "second".to_owned()])
     );
     assert_eq!(error.details.outcome_unknown_paths, Some(Vec::new()));
-    assert_eq!(phase_log(&phases), ["S", "S"]);
+    assert_eq!(phase_log(&phases), ["S"]);
     assert_eq!(std::fs::read(remote.path().join("large")).unwrap(), large);
     assert_eq!(
         std::fs::read(remote.path().join("second")).unwrap(),
@@ -3550,7 +3550,7 @@ async fn task6_preparation_preflights_every_future_mutation_frame_before_first_m
     );
     assert_eq!(error.details.outcome_unknown_paths, Some(Vec::new()));
     assert_task78_fixed_context(&error, remote.path());
-    assert_eq!(phase_log(&phases), ["S", "S"]);
+    assert_eq!(phase_log(&phases), ["S"]);
     assert!(!remote.path().join("first").exists());
     assert!(!remote.path().join("second").exists());
 }
@@ -3704,7 +3704,7 @@ async fn task6_aggregate_base_and_output_budgets_accept_exact_and_reject_plus_on
         .unwrap_err();
     assert_eq!(base_plus_one.code, ErrorCode::RequestTooLarge);
     assert_eq!(base_plus_one.details.failed_path.as_deref(), Some("b"));
-    assert_eq!(phase_log(&phases), ["S", "S", "M", "M", "S", "S", "S", "S"]);
+    assert_eq!(phase_log(&phases), ["S", "M", "M", "S", "S"]);
 }
 
 #[tokio::test]
@@ -3920,7 +3920,7 @@ async fn task6_second_snapshot_reprobe_physical_root_drift_is_zero_mutation_conf
     assert_eq!(error.code, ErrorCode::ReadConflict);
     assert_eq!(error.details.failed_path.as_deref(), Some("b"));
     assert_task78_fixed_context(&error, &second_root);
-    assert_eq!(phase_log(&phases), ["S", "S"]);
+    assert_eq!(phase_log(&phases), ["S"]);
     assert_eq!(std::fs::read(first_root.join("a")).unwrap(), b"old\n");
     assert_eq!(std::fs::read(second_root.join("b")).unwrap(), b"old\n");
 }
@@ -3960,7 +3960,7 @@ async fn task6_prepared_create_update_delete_execute_in_patch_order() {
         ["create", "update", "delete"].map(str::to_owned)
     );
     assert_eq!(result.context.host, "dev");
-    assert_eq!(phase_log(&phases), ["S", "S", "S", "M", "M", "M"]);
+    assert_eq!(phase_log(&phases), ["S", "M", "M", "M"]);
     assert_eq!(
         std::fs::read(remote.path().join("create")).unwrap(),
         b"created\n"
@@ -4086,7 +4086,7 @@ async fn task6_second_definite_failure_reports_confirmed_prefix_and_stops_suffix
     );
     assert_eq!(error.details.outcome_unknown_paths, Some(Vec::new()));
     assert_eq!(error.details.mutation_may_have_applied, None);
-    assert_eq!(phase_log(&phases), ["S", "S", "S", "M", "M"]);
+    assert_eq!(phase_log(&phases), ["S", "M", "M"]);
     assert_eq!(std::fs::read(remote.path().join("a")).unwrap(), b"new\n");
     assert_eq!(std::fs::read(remote.path().join("b")).unwrap(), b"raced");
     assert!(!remote.path().join("c").exists());
@@ -4144,7 +4144,7 @@ async fn task6_second_malformed_postcommit_is_only_current_unknown_and_stops_suf
         error.details.outcome_unknown_paths,
         Some(vec!["b".to_owned()])
     );
-    assert_eq!(phase_log(&phases), ["S", "S", "S", "M", "M"]);
+    assert_eq!(phase_log(&phases), ["S", "M", "M"]);
     assert_eq!(std::fs::read(remote.path().join("a")).unwrap(), b"new\n");
     assert!(!remote.path().join("b").exists());
     assert!(!remote.path().join("c").exists());
@@ -4392,7 +4392,7 @@ async fn task6_postspawn_cancel_on_second_mutation_marks_only_current_unknown_an
         Some(vec!["b".to_owned()])
     );
     assert_task78_fixed_context(&error, remote.path());
-    assert_eq!(phase_log(&phases), ["S", "S", "S", "M", "M"]);
+    assert_eq!(phase_log(&phases), ["S", "M", "M"]);
     assert_eq!(std::fs::read(remote.path().join("a")).unwrap(), b"first\n");
     assert!(!remote.path().join("c").exists());
 }
