@@ -2122,7 +2122,10 @@ async fn complete_remote_read_seeds_cached_partial_reads_without_transport() {
 
 async fn wait_for_file(path: &std::path::Path, timeout: Duration) {
     tokio::time::timeout(timeout, async {
-        while !path.exists() {
+        while std::fs::metadata(path)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true)
+        {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
