@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -151,7 +151,7 @@ pub(crate) struct NativeSearchRunResult {
 struct SessionSlot {
     host: Arc<str>,
     session: Arc<HostSession>,
-    leased: AtomicBool,
+    leases: AtomicUsize,
 }
 
 struct SessionLease {
@@ -185,41 +185,43 @@ struct SessionPool {
 }
 
 impl SessionPool {
-    fn lease_idle(self: &Arc<Self>, host: &str) -> Option<SessionLease> {
+    fn lease_reusable(self: &Arc<Self>, host: &str) -> Option<SessionLease> {
         let mut hosts = self
             .hosts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let slots = hosts.get_mut(host)?;
         slots.retain(|slot| slot.session.is_reusable());
-        for slot in slots {
-            if slot
-                .leased
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return Some(SessionLease {
-                    pool: Arc::clone(self),
-                    slot: Arc::clone(slot),
-                });
-            }
-        }
-        None
+        let slot = slots.first()?;
+        slot.leases.fetch_add(1, Ordering::AcqRel);
+        Some(SessionLease {
+            pool: Arc::clone(self),
+            slot: Arc::clone(slot),
+        })
     }
 
     fn insert_leased(self: &Arc<Self>, host: &str, session: Arc<HostSession>) -> SessionLease {
         let host = Arc::<str>::from(host);
+        let mut hosts = self
+            .hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slots = hosts.entry(Arc::clone(&host)).or_default();
+        slots.retain(|slot| slot.session.is_reusable());
+        if let Some(slot) = slots.first() {
+            slot.leases.fetch_add(1, Ordering::AcqRel);
+            session.retire_idle();
+            return SessionLease {
+                pool: Arc::clone(self),
+                slot: Arc::clone(slot),
+            };
+        }
         let slot = Arc::new(SessionSlot {
             host: Arc::clone(&host),
             session,
-            leased: AtomicBool::new(true),
+            leases: AtomicUsize::new(1),
         });
-        self.hosts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(host)
-            .or_default()
-            .push(Arc::clone(&slot));
+        slots.push(Arc::clone(&slot));
         SessionLease {
             pool: Arc::clone(self),
             slot,
@@ -227,6 +229,11 @@ impl SessionPool {
     }
 
     fn release(&self, released: &Arc<SessionSlot>) {
+        let previous = released.leases.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "session lease count underflowed");
+        if previous > 1 {
+            return;
+        }
         let mut hosts = self
             .hosts
             .lock()
@@ -234,12 +241,11 @@ impl SessionPool {
         let Some(slots) = hosts.get_mut(released.host.as_ref()) else {
             return;
         };
-        released.leased.store(false, Ordering::Release);
         let retain_released = released.session.is_reusable()
             && !slots.iter().any(|slot| {
                 !Arc::ptr_eq(slot, released)
                     && slot.session.is_reusable()
-                    && !slot.leased.load(Ordering::Acquire)
+                    && slot.leases.load(Ordering::Acquire) == 0
             });
         if !retain_released && released.session.is_reusable() {
             released.session.retire_idle();
@@ -370,7 +376,6 @@ impl SshRunner {
         )
         .await
         .map_err(|_| connect_wait_timeout(&request.host, "SSH host initialization timed out"))??;
-        drop(initialize_guard);
         if cancel.is_cancelled() {
             return Err(cancelled_error(false, 0));
         }
@@ -396,6 +401,7 @@ impl SshRunner {
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
             })?;
+        drop(initialize_guard);
         let operation_deadline = Instant::now()
             .checked_add(request.timeout)
             .ok_or_else(|| BridgeError::invalid_argument("command timeout is too large"))?;
@@ -590,7 +596,6 @@ impl SshRunner {
         )
         .await
         .map_err(|_| connect_wait_timeout(&host, "SSH host initialization timed out"))??;
-        drop(initialize_guard);
         let shell_request = match &request {
             JobControlRequest::Start(record) => match &record.shell {
                 crate::job_protocol::JobShell::Bash => ShellRequest::Bash,
@@ -621,6 +626,7 @@ impl SshRunner {
             .map_err(|error| {
                 attach_selected_context(error, &host, &capability.physical_root, &shell)
             })?;
+        drop(initialize_guard);
         if session.helper_mode() != HelperMode::Persistent {
             return Err(attach_selected_context(
                 BridgeError::new(
@@ -768,7 +774,6 @@ impl SshRunner {
         )
         .await
         .map_err(|_| connect_wait_timeout(&request.host, "SSH host initialization timed out"))??;
-        drop(initialize_guard);
         let shell = select_shell(&capability, ShellRequest::Auto)?;
         let (session, _) = self
             .session_for_host(
@@ -783,6 +788,7 @@ impl SshRunner {
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
             })?;
+        drop(initialize_guard);
         if session.helper_mode() == HelperMode::Shell {
             return Ok(None);
         }
@@ -862,7 +868,7 @@ impl SshRunner {
         setup_deadline: Instant,
         cancel: &CancellationToken,
     ) -> BridgeResult<(SessionLease, bool)> {
-        if let Some(session) = self.sessions.lease_idle(host) {
+        if let Some(session) = self.sessions.lease_reusable(host) {
             return Ok((session, true));
         }
         let connect_profile = crate::bridge_profile_span!(crate::profile::ProfileEvent {
@@ -1141,7 +1147,6 @@ impl SshRunner {
         )
         .await
         .map_err(|_| connect_wait_timeout(&request.host, "SSH host initialization timed out"))??;
-        drop(initialize_guard);
         let shell = ShellSelection {
             shell: ShellKind::PosixSh,
             fallback: false,
@@ -1173,6 +1178,7 @@ impl SshRunner {
             .map_err(|error| {
                 attach_selected_context(error, &request.host, &capability.physical_root, &shell)
             })?;
+        drop(initialize_guard);
         let operation_deadline = Instant::now()
             .checked_add(request.timeout)
             .ok_or_else(|| BridgeError::invalid_argument("fixed command timeout is too large"))?;
@@ -2328,7 +2334,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
-    async fn an_active_session_is_not_shared_with_a_concurrent_request() {
+    async fn an_active_session_is_shared_with_a_concurrent_request() {
         let pool = Arc::new(SessionPool::default());
         let session = Arc::new(HostSession::wedged_for_test(
             "dev",
@@ -2336,15 +2342,19 @@ mod tests {
             crate::MAX_OUTPUT_BYTES,
         ));
         let first = pool.insert_leased("dev", Arc::clone(&session));
-
-        assert!(
-            pool.lease_idle("dev").is_none(),
-            "a concurrent request reused an active SSH transport"
-        );
+        let concurrent = pool
+            .lease_reusable("dev")
+            .expect("a concurrent request did not reuse the active SSH transport");
+        assert!(Arc::ptr_eq(concurrent.session(), &session));
 
         drop(first);
+        assert!(
+            session.is_reusable(),
+            "one active lease was still using the session"
+        );
+        drop(concurrent);
         let reused = pool
-            .lease_idle("dev")
+            .lease_reusable("dev")
             .expect("the released warm session was not reusable");
         assert!(Arc::ptr_eq(reused.session(), &session));
     }
@@ -2364,22 +2374,23 @@ mod tests {
         ));
         let first = pool.insert_leased("dev", Arc::clone(&first_session));
         let second = pool.insert_leased("dev", Arc::clone(&second_session));
+        assert!(Arc::ptr_eq(second.session(), &first_session));
+        assert!(
+            !second_session.is_reusable(),
+            "a redundant connected session was not retired"
+        );
 
         drop(first);
         drop(second);
 
         let retained = pool
-            .lease_idle("dev")
+            .lease_reusable("dev")
             .expect("one released session should remain warm");
         assert!(Arc::ptr_eq(retained.session(), &first_session));
-        assert!(
-            !second_session.is_reusable(),
-            "the excess idle transport was not retired"
-        );
-        assert!(
-            pool.lease_idle("dev").is_none(),
-            "the pool retained a second idle transport"
-        );
+        let concurrent = pool
+            .lease_reusable("dev")
+            .expect("the retained transport was not concurrently reusable");
+        assert!(Arc::ptr_eq(concurrent.session(), &first_session));
     }
 
     #[test]

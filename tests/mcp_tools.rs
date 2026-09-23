@@ -222,6 +222,14 @@ fn command_calls(log: &std::path::Path) -> usize {
         .count()
 }
 
+fn session_start_calls(log: &std::path::Path) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|kind| *kind == "S")
+        .count()
+}
+
 fn transport_call_kinds(log: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
@@ -2029,17 +2037,9 @@ async fn task8_five_hosts_pipeline_in_parallel_with_exact_context_and_no_sixth_c
 }
 
 #[tokio::test]
-async fn task14_same_host_barriers_release_before_parallel_remote_runs() {
+async fn task14_cold_same_host_requests_share_one_multiplexed_session() {
     let remote = tempfile::TempDir::new().unwrap();
     let (_runtime, log, tools) = fake_remote_tools_fixture(remote.path());
-    let warm = call_json(
-        &tools,
-        "remote_run",
-        json!({"host":"dev","cwd":remote.path(),"command":":","shell":"sh"}),
-    )
-    .await;
-    assert_eq!(warm["isError"], Value::Null, "{warm}");
-    std::fs::write(&log, b"").unwrap();
 
     let mut session = ProtocolSession::start(tools).await;
     let started = Instant::now();
@@ -2074,7 +2074,15 @@ async fn task14_same_host_barriers_release_before_parallel_remote_runs() {
         assert_eq!(result["structuredContent"]["exit_code"], 0);
         assert!(text_content(result).contains(&format!("SAME-{index}")));
     }
-    assert_eq!(transport_call_kinds(&log), vec!["C"; 5]);
+    let call_kinds = transport_call_kinds(&log);
+    assert_eq!(call_kinds.iter().filter(|kind| *kind == "G").count(), 1);
+    assert_eq!(call_kinds.iter().filter(|kind| *kind == "P").count(), 1);
+    assert_eq!(call_kinds.iter().filter(|kind| *kind == "C").count(), 5);
+    assert_eq!(
+        session_start_calls(&log),
+        1,
+        "cold concurrent requests opened redundant SSH sessions"
+    );
     eprintln!("same-host MCP concurrency sample: elapsed={elapsed:?}");
     session.close().await;
 }
