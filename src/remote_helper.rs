@@ -1417,15 +1417,10 @@ mod tests {
 
     #[test]
     fn completed_worker_handles_are_reaped_during_a_long_lived_session() {
-        let (completed, receiver) = std::sync::mpsc::channel();
-        let mut workers = (0..64)
-            .map(|_| {
-                let completed = completed.clone();
-                thread::spawn(move || completed.send(()).unwrap())
-            })
-            .collect::<Vec<_>>();
-        drop(completed);
-        for _ in receiver {}
+        let mut workers = (0..64).map(|_| thread::spawn(|| {})).collect::<Vec<_>>();
+        while workers.iter().any(|worker| !worker.is_finished()) {
+            thread::yield_now();
+        }
 
         reap_finished_workers(&mut workers);
 
