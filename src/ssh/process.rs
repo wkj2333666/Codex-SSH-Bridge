@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::time::SystemTime;
 
