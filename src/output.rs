@@ -2051,13 +2051,14 @@ mod tests {
 
     use super::{
         ByteQuota, CleanupTombstone, DiagnosticScanner, EntryAccounting, InternalSpoolOwner,
-        OutputStore, PendingSpool, PreviewSink, StoredAggregateKind, StoredProvenance,
+        OutputStore, PendingSpool, PreviewSink, StoredAggregateKind, StoredProvenance, StreamKind,
         cleanup_entry, cleanup_paths, create_private_file, create_spool, retry_tombstones,
         write_all_counted,
     };
     use crate::config::{
         MAX_GLOBAL_SPOOL_QUOTA_BYTES, MAX_SPOOL_ENTRIES, MIN_GLOBAL_SPOOL_QUOTA_BYTES,
     };
+    use crate::error::ErrorCode;
     use crate::ssh::RuntimePaths;
     use serde::Serialize;
     use serde::ser::{SerializeSeq, Serializer};
