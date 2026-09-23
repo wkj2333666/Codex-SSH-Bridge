@@ -226,112 +226,6 @@ codex_mutation_hash() (
     exit "$codex_hash_status"
 )
 
-codex_safe_write_sentinel() (
-    umask 077
-    codex_sentinel_dir=$(mktemp -d "${TMPDIR:-/tmp}/codex-sentinel-safe-write.XXXXXX" 2>/dev/null) || exit 9
-    cleanup_codex_sentinel() {
-        rm -rf -- "$codex_sentinel_dir" >/dev/null 2>&1 || return 1
-        [ ! -e "$codex_sentinel_dir" ] && [ ! -L "$codex_sentinel_dir" ]
-    }
-    on_codex_sentinel_signal() {
-        trap - 0 HUP INT TERM
-        cleanup_codex_sentinel >/dev/null 2>&1 || :
-        exit 9
-    }
-    trap 'cleanup_codex_sentinel >/dev/null 2>&1 || :' 0
-    trap on_codex_sentinel_signal HUP INT TERM
-
-    codex_sentinel_work=$codex_sentinel_dir/work
-    codex_sentinel_parent=$codex_sentinel_work/parent
-    codex_sentinel_parent_link=$codex_sentinel_work/parent-link
-    mkdir -m 700 -- "$codex_sentinel_work" "$codex_sentinel_parent" || exit 9
-    ln -s "$codex_sentinel_parent" "$codex_sentinel_parent_link" || exit 9
-    codex_mutation_parent_stat_follow_valid "$codex_sentinel_parent" || exit $?
-    codex_sentinel_parent_identity=$CODEX_STAT_DEVICE:$CODEX_STAT_INODE
-    codex_sentinel_parent_device=$CODEX_STAT_DEVICE
-    codex_mutation_parent_stat_follow_valid "$codex_sentinel_parent_link" || exit $?
-    [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$codex_sentinel_parent_identity" ] || exit 1
-    case "$CODEX_STAT_TYPE" in 4???) ;; *) exit 1 ;; esac
-
-    codex_sentinel_tmp=$(codex_mutation_mktemp "$codex_sentinel_work") || exit 9
-    printf payload | codex_mutation_stage "$codex_sentinel_tmp" || exit 9
-    codex_mutation_stat_valid "$codex_sentinel_tmp" || exit $?
-    codex_sentinel_uid=$(id -u) || exit 9
-    codex_sentinel_stage_identity=$CODEX_STAT_DEVICE:$CODEX_STAT_INODE
-    case "$CODEX_STAT_TYPE" in 8???) ;; *) exit 1 ;; esac
-    [ "$CODEX_STAT_UID" = "$codex_sentinel_uid" ] || exit 1
-    [ "$CODEX_STAT_MODE:$CODEX_STAT_SIZE:$CODEX_STAT_LINKS" = 600:7:1 ] || exit 1
-    [ "$CODEX_STAT_DEVICE" = "$codex_sentinel_parent_device" ] || exit 1
-    codex_sentinel_hash=$(codex_mutation_hash "$codex_sentinel_tmp") || exit $?
-    [ "$codex_sentinel_hash" = 239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5 ] || exit 1
-
-    codex_sentinel_created=$codex_sentinel_work/created
-    codex_mutation_link "$codex_sentinel_tmp" "$codex_sentinel_created" || exit 9
-    if codex_mutation_link "$codex_sentinel_tmp" "$codex_sentinel_created" 2>/dev/null; then exit 1; fi
-    codex_sentinel_link_directory=$codex_sentinel_work/link-directory
-    codex_sentinel_directory_link=$codex_sentinel_work/directory-link
-    mkdir -m 700 -- "$codex_sentinel_link_directory" || exit 9
-    ln -s "$codex_sentinel_link_directory" "$codex_sentinel_directory_link" || exit 9
-    if codex_mutation_link "$codex_sentinel_tmp" "$codex_sentinel_directory_link" 2>/dev/null; then exit 1; fi
-    codex_sentinel_nested_link=$codex_sentinel_link_directory/${codex_sentinel_tmp##*/}
-    [ -L "$codex_sentinel_directory_link" ] || exit 1
-    [ ! -e "$codex_sentinel_nested_link" ] && [ ! -L "$codex_sentinel_nested_link" ] || exit 1
-    codex_mutation_stat_valid "$codex_sentinel_created" || exit $?
-    [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$codex_sentinel_stage_identity" ] || exit 1
-    codex_mutation_remove "$codex_sentinel_created" || exit 9
-    [ ! -e "$codex_sentinel_created" ] && [ ! -L "$codex_sentinel_created" ] || exit 1
-
-    codex_sentinel_replaced=$codex_sentinel_work/replaced
-    printf old >"$codex_sentinel_replaced" || exit 9
-    codex_mutation_replace "$codex_sentinel_tmp" "$codex_sentinel_replaced" || exit 9
-    [ ! -e "$codex_sentinel_tmp" ] && [ ! -L "$codex_sentinel_tmp" ] || exit 1
-    codex_mutation_mode 0640 "$codex_sentinel_replaced" || exit 9
-    codex_mutation_stat_valid "$codex_sentinel_replaced" || exit $?
-    [ "$CODEX_STAT_MODE" = 640 ] || exit 1
-    codex_sentinel_hash=$(codex_mutation_hash "$codex_sentinel_replaced") || exit $?
-    [ "$codex_sentinel_hash" = 239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5 ] || exit 1
-
-    codex_sentinel_outside=$codex_sentinel_work/outside
-    codex_sentinel_link=$codex_sentinel_work/link
-    printf OUTSIDE >"$codex_sentinel_outside" || exit 9
-    chmod 0600 -- "$codex_sentinel_outside" || exit 9
-    ln -s "$codex_sentinel_outside" "$codex_sentinel_link" || exit 9
-    codex_mutation_stat_valid "$codex_sentinel_link" || exit $?
-    case "$CODEX_STAT_TYPE" in a???) ;; *) exit 1 ;; esac
-    if printf CHANGED | codex_mutation_stage "$codex_sentinel_link" 2>/dev/null; then exit 1; fi
-    codex_sentinel_hash_status=0
-    codex_sentinel_hash=$(codex_mutation_hash "$codex_sentinel_link") || codex_sentinel_hash_status=$?
-    [ "$codex_sentinel_hash_status" -eq 9 ] || exit 1
-    codex_sentinel_outside_content=$(cat "$codex_sentinel_outside") || exit 9
-    [ "$codex_sentinel_outside_content" = OUTSIDE ] || exit 1
-
-    cleanup_codex_sentinel || exit 9
-    trap - 0 HUP INT TERM
-    exit 0
-)
-
-codex_safe_write_preflight() {
-    for codex_required_command in stat mktemp dd sha256sum ln mv chmod rm mkdir id cat; do
-        command -v "$codex_required_command" >/dev/null 2>&1 || return 1
-    done
-}
-
-if ! codex_safe_write_preflight; then
-    printf 'STATUS=CAPABILITY_MISMATCH\000CAPABILITY=safe_write\000'
-    exit 0
-fi
-
-codex_sentinel_status=0
-codex_safe_write_sentinel || codex_sentinel_status=$?
-case "$codex_sentinel_status" in
-    0) ;;
-    1)
-        printf 'STATUS=CAPABILITY_MISMATCH\000CAPABILITY=safe_write\000'
-        exit 0
-        ;;
-    *) exit 9 ;;
-esac
-
 case "$operation:$expected_hash_present" in
     CREATE:0) ;;
     REPLACE:0|REPLACE:1) ;;
@@ -485,8 +379,6 @@ if [ "$operation" = CREATE ]; then
     case "$CODEX_STAT_TYPE" in 8???) ;; *) exit 5 ;; esac
     [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$stage_device:$stage_inode" ] || exit 5
     [ "$CODEX_STAT_UID:$CODEX_STAT_MODE:$CODEX_STAT_SIZE:$CODEX_STAT_LINKS" = "$stage_uid:600:$expected_size:2" ] || exit 5
-    target_hash=$(codex_mutation_hash "$target") || exit 5
-    [ "$target_hash" = "$expected_content_hash" ] || exit 5
 
     codex_mutation_remove "$tmp" || exit 5
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || exit 5
@@ -496,8 +388,6 @@ if [ "$operation" = CREATE ]; then
     case "$CODEX_STAT_TYPE" in 8???) ;; *) exit 5 ;; esac
     [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$stage_device:$stage_inode" ] || exit 5
     [ "$CODEX_STAT_UID:$CODEX_STAT_MODE:$CODEX_STAT_SIZE:$CODEX_STAT_LINKS" = "$stage_uid:600:$expected_size:1" ] || exit 5
-    target_hash=$(codex_mutation_hash "$target") || exit 5
-    [ "$target_hash" = "$expected_content_hash" ] || exit 5
 
     mode_decimal=$((0$CODEX_STAT_MODE))
     trap - 0 HUP INT TERM
@@ -708,86 +598,6 @@ codex_mutation_hash() (
     exit "$codex_hash_status"
 )
 
-codex_guarded_delete_sentinel() (
-    umask 077
-    codex_sentinel_dir=$(mktemp -d "${TMPDIR:-/tmp}/codex-sentinel-guarded-delete.XXXXXX" 2>/dev/null) || exit 9
-    cleanup_codex_sentinel() {
-        rm -rf -- "$codex_sentinel_dir" >/dev/null 2>&1 || return 1
-        [ ! -e "$codex_sentinel_dir" ] && [ ! -L "$codex_sentinel_dir" ]
-    }
-    on_codex_sentinel_signal() {
-        trap - 0 HUP INT TERM
-        cleanup_codex_sentinel >/dev/null 2>&1 || :
-        exit 9
-    }
-    trap 'cleanup_codex_sentinel >/dev/null 2>&1 || :' 0
-    trap on_codex_sentinel_signal HUP INT TERM
-
-    codex_sentinel_parent=$codex_sentinel_dir/parent
-    codex_sentinel_parent_link=$codex_sentinel_dir/parent-link
-    mkdir -m 700 -- "$codex_sentinel_parent" || exit 9
-    ln -s "$codex_sentinel_parent" "$codex_sentinel_parent_link" || exit 9
-    codex_mutation_parent_stat_follow_valid "$codex_sentinel_parent" || exit $?
-    codex_sentinel_parent_identity=$CODEX_STAT_DEVICE:$CODEX_STAT_INODE
-    codex_mutation_parent_stat_follow_valid "$codex_sentinel_parent_link" || exit $?
-    [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$codex_sentinel_parent_identity" ] || exit 1
-    case "$CODEX_STAT_TYPE" in 4???) ;; *) exit 1 ;; esac
-
-    codex_sentinel_victim=$codex_sentinel_parent/victim
-    printf payload >"$codex_sentinel_victim" || exit 9
-    codex_mutation_stat_valid "$codex_sentinel_victim" || exit $?
-    case "$CODEX_STAT_TYPE" in 8???) ;; *) exit 1 ;; esac
-    [ "$CODEX_STAT_MODE:$CODEX_STAT_SIZE:$CODEX_STAT_LINKS" = 600:7:1 ] || exit 1
-    codex_sentinel_identity=$CODEX_STAT_DEVICE:$CODEX_STAT_INODE
-    codex_sentinel_hash=$(codex_mutation_hash "$codex_sentinel_victim") || exit $?
-    [ "$codex_sentinel_hash" = 239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5 ] || exit 1
-    codex_mutation_stat_valid "$codex_sentinel_victim" || exit $?
-    case "$CODEX_STAT_TYPE" in 8???) ;; *) exit 1 ;; esac
-    [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$codex_sentinel_identity" ] || exit 1
-    codex_sentinel_hash=$(codex_mutation_hash "$codex_sentinel_victim") || exit $?
-    [ "$codex_sentinel_hash" = 239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5 ] || exit 1
-    codex_mutation_remove "$codex_sentinel_victim" || exit 9
-    [ ! -e "$codex_sentinel_victim" ] && [ ! -L "$codex_sentinel_victim" ] || exit 1
-
-    codex_sentinel_outside=$codex_sentinel_dir/outside
-    codex_sentinel_link=$codex_sentinel_parent/link
-    printf OUTSIDE >"$codex_sentinel_outside" || exit 9
-    ln -s "$codex_sentinel_outside" "$codex_sentinel_link" || exit 9
-    codex_mutation_stat_valid "$codex_sentinel_link" || exit $?
-    case "$CODEX_STAT_TYPE" in a???) ;; *) exit 1 ;; esac
-    codex_sentinel_hash_status=0
-    codex_sentinel_hash=$(codex_mutation_hash "$codex_sentinel_link") || codex_sentinel_hash_status=$?
-    [ "$codex_sentinel_hash_status" -eq 9 ] || exit 1
-    codex_sentinel_outside_content=$(cat "$codex_sentinel_outside") || exit 9
-    [ "$codex_sentinel_outside_content" = OUTSIDE ] || exit 1
-
-    cleanup_codex_sentinel || exit 9
-    trap - 0 HUP INT TERM
-    exit 0
-)
-
-codex_guarded_delete_preflight() {
-    for codex_required_command in stat mktemp dd sha256sum ln rm mkdir cat; do
-        command -v "$codex_required_command" >/dev/null 2>&1 || return 1
-    done
-}
-
-if ! codex_guarded_delete_preflight; then
-    printf 'STATUS=CAPABILITY_MISMATCH\000CAPABILITY=guarded_delete\000'
-    exit 0
-fi
-
-codex_sentinel_status=0
-codex_guarded_delete_sentinel || codex_sentinel_status=$?
-case "$codex_sentinel_status" in
-    0) ;;
-    1)
-        printf 'STATUS=CAPABILITY_MISMATCH\000CAPABILITY=guarded_delete\000'
-        exit 0
-        ;;
-    *) exit 9 ;;
-esac
-
 case "$expected_hash" in *[!0-9a-f]*) exit 2 ;; esac
 [ "${#expected_hash}" -eq 64 ] || exit 2
 
@@ -891,19 +701,6 @@ if [ "$target_status" -ne 0 ]; then
 fi
 case "$CODEX_STAT_TYPE" in 8???) ;; *) emit_one WRITE_CONFLICT ;; esac
 [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$target_device:$target_inode" ] || emit_one WRITE_CONFLICT
-
-target_hash_status=0
-target_hash=$(codex_mutation_hash "$target") || target_hash_status=$?
-if [ "$target_hash_status" -ne 0 ]; then
-    if codex_mutation_stat_valid "$target"; then
-        case "$CODEX_STAT_TYPE" in 8???) ;; *) emit_one WRITE_CONFLICT ;; esac
-        [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$target_device:$target_inode" ] || emit_one WRITE_CONFLICT
-    else
-        if [ ! -e "$target" ] && [ ! -L "$target" ]; then emit_one WRITE_CONFLICT; fi
-    fi
-    exit 4
-fi
-[ "$target_hash" = "$expected_hash" ] || emit_one WRITE_CONFLICT
 
 codex_mutation_remove "$target" || exit 5
 [ ! -e "$target" ] && [ ! -L "$target" ] || exit 5
@@ -1028,15 +825,14 @@ pub(super) async fn write(
         }
     }
     if let Some(expected) = &resolved.expected_sha256 {
-        let DesiredState::Present(bytes) = &current.desired else {
+        let DesiredState::Present(_) = &current.desired else {
             return Err(BridgeError::new(
                 ErrorCode::WriteConflict,
                 "remote write base conflicts with the request",
                 false,
             ));
         };
-        let actual = format!("{:x}", Sha256::digest(bytes));
-        if actual != *expected {
+        if current.desired_sha256.as_deref() != Some(expected.as_str()) {
             return Err(BridgeError::new(
                 ErrorCode::WriteConflict,
                 "remote write base hash conflicts with the request",

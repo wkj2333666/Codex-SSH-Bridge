@@ -26,40 +26,9 @@ use super::{
 const MAX_SEARCH_CANDIDATE_BYTES: usize = 128 * 1024;
 const MAX_SEARCH_OPERATION_TIMEOUT_MS: u64 = 30_000;
 
-macro_rules! bounded_sentinel {
-    () => {
-        r#"
-cb() (
- d=$(mktemp -d /tmp/codex-sentinel-bound.XXXXXX 2>/dev/null)||exit 90
- trap 'rm -rf -- "$d"' 0 1 2 15
- f=$d/codex-sentinel-bound;o=$d/o
- m=$(stat -c %a "$d" 2>/dev/null)||exit 90
- [ "$m" = 700 ]||exit 1;mkfifo "$f"||exit 90;[ -p "$f" ]||exit 1
- (printf abcdef>"$f")&p=$!;exec 3<"$f"
- CODEX_SSH_SENTINEL=bound head -c 3 <&3 >"$o" 2>/dev/null;h=$?
- cat <&3 >/dev/null;r=$?;exec 3<&-;wait "$p" 2>/dev/null;w=$?
- [ "$r:$w" = 0:0 ]||exit 90;v=$(cat "$o")||exit 90;[ "$h:$v" = 0:abc ]
-)
-cb;s=$?;case $s in 0);;1)printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=search_bound\000' >&2;exit 0;;*)exit 2;;esac
-"#
-    };
-}
-
-const CANDIDATE_SCRIPT: &str = concat!(
-    r#"
+const CANDIDATE_SCRIPT: &str = r#"
 root=$1
 limit=$2
-"#,
-    bounded_sentinel!(),
-    r#"
-cf() (
- d=$(mktemp -d /tmp/codex-sentinel-search-find.XXXXXX 2>/dev/null)||exit 90
- trap 'rm -rf -- "$d"' 0 1 2 15
- mkdir "$d/a" "$d/z"&&printf x>"$d/a/.hidden"&&printf x>"$d/z/x"&&ln -s "$d/z" "$d/a/l"&&ln -s "$d/a" "$d/codex-sentinel-search-find"||exit 90
- find -H "$d/codex-sentinel-search-find" -type f -print0 >"$d/o" 2>/dev/null||exit 90
- printf '%s/.hidden\000' "$d/codex-sentinel-search-find">"$d/e"||exit 90;cmp -s "$d/e" "$d/o"
-)
-cf;s=$?;case $s in 0);;1)printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=find_nul\000' >&2;exit 0;;*)exit 2;;esac
 if [ ! -e "$root" ] && [ ! -L "$root" ]; then printf 'NOT_FOUND\000' >&2; exit 0; fi
 if [ ! -d "$root" ]; then printf 'NOT_DIRECTORY\000' >&2; exit 0; fi
 if [ ! -r "$root" ]; then printf 'PERMISSION_DENIED\000' >&2; exit 0; fi
@@ -95,54 +64,16 @@ if [ "$capped" -eq 0 ]; then
 fi
 cat "$data"
 if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
-"#,
-);
+"#;
 
-const RG_SCRIPT: &str = concat!(
-    r#"
+const RG_SCRIPT: &str = r#"
 query=$1
 binary=$2
 limit=$3
-"#,
-    bounded_sentinel!(),
-    r#"
-x=$(printf 'a\nb\000'|xargs -0 -r sh -c 'printf %s "$1"' codex-sentinel-rg-xargs 2>/dev/null);s=$?
-printf x\000|xargs -0 -r sh -c 'exit 7' codex-sentinel-rg-xargs >/dev/null 2>&1;q=$?
-if [ "$s" -ne 0 ]||[ "$q" -eq 0 ]||[ "$x" != 'a
-b' ];then printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=xargs_nul\000' >&2;exit 0;fi
 umask 077
 scratch=$(mktemp -d /tmp/codex-ssh-search.XXXXXX) || exit 2
 cleanup() { rm -rf -- "$scratch"; }
 trap cleanup EXIT HUP INT TERM
-codex_rg_file=$scratch/codex-sentinel-rg
-if [ "$binary" = 1 ]; then
-    printf '\377needle\n' >"$codex_rg_file" || exit 2
-    codex_rg_json=$(rg --json --fixed-strings --hidden --no-ignore --text -- needle "$codex_rg_file" 2>/dev/null)
-else
-    printf 'before needle after\n' >"$codex_rg_file" || exit 2
-    codex_rg_json=$(rg --json --fixed-strings --hidden --no-ignore -- needle "$codex_rg_file" 2>/dev/null)
-fi
-codex_rg_status=$?
-if [ "$codex_rg_status" -gt 1 ]; then exit 2; fi
-if [ "$binary" = 1 ]; then
-    case "$codex_rg_json" in
-        *'"type":"match"'*'"path":{"text":"'"$codex_rg_file"'"}'*'"lines":{"bytes":"/25lZWRsZQo="}'*'"line_number":1'*'"start":1,"end":7'*) codex_rg_ok=1 ;;
-        *) codex_rg_ok=0 ;;
-    esac
-    rg --json --fixed-strings --hidden --no-ignore --text -- absent "$codex_rg_file" >/dev/null 2>&1
-else
-    case "$codex_rg_json" in
-        *'"type":"match"'*'"path":{"text":"'"$codex_rg_file"'"}'*'"lines":{"text":"before needle after\n"}'*'"line_number":1'*'"start":7,"end":13'*) codex_rg_ok=1 ;;
-        *) codex_rg_ok=0 ;;
-    esac
-    rg --json --fixed-strings --hidden --no-ignore -- absent "$codex_rg_file" >/dev/null 2>&1
-fi
-codex_rg_empty=$?
-if [ "$codex_rg_empty" -gt 1 ]; then exit 2; fi
-if [ "$codex_rg_status" -ne 0 ] || [ "$codex_rg_empty" -ne 1 ] || [ "$codex_rg_ok" -ne 1 ]; then
-    printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=rg_json\000' >&2
-    exit 0
-fi
 fifo=$scratch/fifo
 data=$scratch/data
 engine_error=$scratch/engine-error
@@ -192,42 +123,15 @@ else
 fi
 cat "$data"
 if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
-"#,
-);
+"#;
 
-const GREP_SCRIPT: &str = concat!(
-    r#"
+const GREP_SCRIPT: &str = r#"
 query=$1
 limit=$2
-"#,
-    bounded_sentinel!(),
-    r#"
-x=$(printf 'a\nb\000'|xargs -0 -r sh -c 'printf %s "$1"' codex-sentinel-grep-xargs 2>/dev/null);s=$?
-printf x\000|xargs -0 -r sh -c 'exit 7' codex-sentinel-grep-xargs >/dev/null 2>&1;q=$?
-if [ "$s" -ne 0 ]||[ "$q" -eq 0 ]||[ "$x" != 'a
-b' ];then printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=xargs_nul\000' >&2;exit 0;fi
 umask 077
 scratch=$(mktemp -d /tmp/codex-ssh-search.XXXXXX) || exit 2
 cleanup() { rm -rf -- "$scratch"; }
 trap cleanup EXIT HUP INT TERM
-codex_grep_file=$scratch/codex-sentinel-grep
-codex_grep_binary=$scratch/codex-sentinel-grep-binary
-codex_grep_out=$scratch/codex-sentinel-grep-out
-codex_grep_expected=$scratch/codex-sentinel-grep-expected
-printf 'needle\n' >"$codex_grep_file" || exit 2
-printf 'before\000needle\n' >"$codex_grep_binary" || exit 2
-grep -IHnZ -F -- needle "$codex_grep_file" "$codex_grep_binary" >"$codex_grep_out" 2>/dev/null
-codex_grep_status=$?
-if [ "$codex_grep_status" -gt 1 ]; then exit 2; fi
-{ printf '%s\000' "$codex_grep_file"; printf '1:needle\n'; } >"$codex_grep_expected" || exit 2
-grep -IHnZ -F -- absent "$codex_grep_file" >/dev/null 2>&1
-codex_grep_empty=$?
-if [ "$codex_grep_empty" -gt 1 ]; then exit 2; fi
-if [ "$codex_grep_status" -ne 0 ] || [ "$codex_grep_empty" -ne 1 ] ||
-   ! cmp -s "$codex_grep_expected" "$codex_grep_out"; then
-    printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=grep_nul\000' >&2
-    exit 0
-fi
 fifo=$scratch/fifo
 data=$scratch/data
 engine_error=$scratch/engine-error
@@ -276,51 +180,13 @@ else
 fi
 cat "$data"
 if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
-"#,
-);
+"#;
 
-const GREP_TREE_SCRIPT: &str = concat!(
-    r#"
+const GREP_TREE_SCRIPT: &str = r#"
 query=$1
 root=$2
 limit=$3
 shift 3
-"#,
-    bounded_sentinel!(),
-    r#"
-codex_grep_file=$(mktemp /tmp/codex-sentinel-grep.XXXXXX 2>/dev/null) || exit 2
-codex_grep_binary=$(mktemp /tmp/codex-sentinel-grep-binary.XXXXXX 2>/dev/null) || {
-    rm -f -- "$codex_grep_file"
-    exit 2
-}
-codex_grep_out=$(mktemp /tmp/codex-sentinel-grep-out.XXXXXX 2>/dev/null) || {
-    rm -f -- "$codex_grep_file" "$codex_grep_binary"
-    exit 2
-}
-codex_grep_expected=$(mktemp /tmp/codex-sentinel-grep-expected.XXXXXX 2>/dev/null) || {
-    rm -f -- "$codex_grep_file" "$codex_grep_binary" "$codex_grep_out"
-    exit 2
-}
-cleanup_probe() {
-    rm -f -- "$codex_grep_file" "$codex_grep_binary" "$codex_grep_out" "$codex_grep_expected"
-}
-trap cleanup_probe EXIT HUP INT TERM
-printf 'needle\n' >"$codex_grep_file" || exit 2
-printf 'before\000needle\n' >"$codex_grep_binary" || exit 2
-grep -IHnZ -F -- needle "$codex_grep_file" "$codex_grep_binary" >"$codex_grep_out" 2>/dev/null
-codex_grep_status=$?
-if [ "$codex_grep_status" -gt 1 ]; then exit 2; fi
-{ printf '%s\000' "$codex_grep_file"; printf '1:needle\n'; } >"$codex_grep_expected" || exit 2
-grep -IHnZ -F -- absent "$codex_grep_file" >/dev/null 2>&1
-codex_grep_empty=$?
-if [ "$codex_grep_empty" -gt 1 ]; then exit 2; fi
-if [ "$codex_grep_status" -ne 0 ] || [ "$codex_grep_empty" -ne 1 ] ||
-   ! cmp -s "$codex_grep_expected" "$codex_grep_out"; then
-    printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=grep_nul\000' >&2
-    exit 0
-fi
-cleanup_probe
-trap - EXIT HUP INT TERM
 if [ ! -e "$root" ] && [ ! -L "$root" ]; then printf 'NOT_FOUND\000' >&2; exit 0; fi
 if [ ! -d "$root" ]; then printf 'NOT_DIRECTORY\000' >&2; exit 0; fi
 if [ ! -r "$root" ]; then printf 'PERMISSION_DENIED\000' >&2; exit 0; fi
@@ -358,8 +224,7 @@ else
 fi
 cat "$data"
 if [ "$capped" -eq 1 ]; then printf 'CAPPED\000' >&2; fi
-"#,
-);
+"#;
 
 pub(super) async fn search(
     bridge: &RemoteBridge,

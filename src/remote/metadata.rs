@@ -22,30 +22,6 @@ lf(){
  else find -H "$1" -mindepth 1 -maxdepth "$2" \( -path './.*' -o -path '*/.*' \) -prune -o -printf '%P\000%y\000%s\000%m\000%T@\000';fi
 }
 lx(){ xargs -0 -r -n 100 "$@"; }
-cs() (
- d=$(mktemp -d /tmp/codex-sentinel-bound.XXXXXX 2>/dev/null)||exit 90
- trap 'rm -rf -- "$d"' 0 1 2 15
- f=$d/codex-sentinel-bound;o=$d/o
- m=$(stat -c %a "$d" 2>/dev/null)||exit 90
- [ "$m" = 700 ]||exit 11;mkfifo "$f"||exit 90;[ -p "$f" ]||exit 11
- (printf abcdef>"$f")&p=$!;exec 3<"$f"
- CODEX_SSH_SENTINEL=bound head -c 3 <&3 >"$o" 2>/dev/null;h=$?
- cat <&3 >/dev/null;r=$?;exec 3<&-;wait "$p" 2>/dev/null;w=$?
- [ "$r:$w" = 0:0 ]||exit 90;v=$(cat "$o")||exit 90;[ "$h:$v" = 0:abc ]||exit 11
- b=$d/codex-sentinel-list-production;z=$d/z;ft=$b/ft;fr=$b/fr;lr=$b/lr;hr=$b/hr
- mkdir -p "$ft" "$lr" "$hr" "$z"&&ln -s "$ft" "$fr"&&printf x>"$ft/f"&&ln -s "$z" "$lr/l"||exit 90
- if [ "$H" = 1 ];then n=.h;else n=v;printf x>"$hr/.x"||exit 90;fi
- printf x>"$hr/$n"&&chmod 640 "$ft/f"&&chmod 600 "$hr/$n"&&touch -d @7.25 "$ft/f"&&touch -h -d @8.5 "$lr/l"&&touch -d @9.25 "$hr/$n"||exit 90
- lf "$fr" "$D" "$H">"$o" 2>/dev/null&&lf "$lr" "$D" "$H">>"$o" 2>/dev/null&&lf "$hr" "$D" "$H">>"$o" 2>/dev/null||exit 90
- { printf 'f\000f\0001\000640\0007.2500000000\000';printf 'l\000l\000%s\000777\0008.5000000000\000' "${#z}";printf '%s\000f\0001\000600\0009.2500000000\000' "$n"; }>"$d/e"||exit 90
- cmp -s "$d/e" "$o"||exit 12
- x=$(printf 'a\nb\000'|lx sh -c 'printf %s "$1"' codex-sentinel-list-xargs 2>/dev/null);s=$?
- printf x\000|lx sh -c 'exit 7' codex-sentinel-list-xargs >/dev/null 2>&1;q=$?
- [ "$s" -eq 0 ]&&[ "$q" -ne 0 ]&&[ "$x" = 'a
-b' ]||exit 13
-)
-cs;s=$?
-case $s in 0);;11)printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=search_bound\000' >&2;exit 0;;12)printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=find_nul\000' >&2;exit 0;;13)printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=xargs_nul\000' >&2;exit 0;;*)exit 2;;esac
 if [ ! -e "$R" ]&&[ ! -L "$R" ];then printf 'NOT_FOUND\000' >&2;exit 0;fi
 if [ ! -d "$R" ];then printf 'NOT_DIRECTORY\000' >&2;exit 0;fi
 if [ ! -r "$R" ];then printf 'PERMISSION_DENIED\000' >&2;exit 0;fi
@@ -91,42 +67,6 @@ if [ "$n" -eq "$L" ];then printf 'CAPPED\000' >&2;fi
 "#;
 
 const STAT_SCRIPT: &str = r#"
-codex_check_stat() (
-    codex_stat_dir=$(mktemp -d /tmp/codex-sentinel-stat.XXXXXX 2>/dev/null) || exit 2
-    cleanup_codex_stat() { rm -rf -- "$codex_stat_dir"; }
-    trap cleanup_codex_stat EXIT HUP INT TERM
-    codex_stat_file=$codex_stat_dir/file
-    printf x >"$codex_stat_file" || exit 2
-    chmod 640 "$codex_stat_file" || exit 2
-    touch -d '@-1.123456789' -- "$codex_stat_file" || exit 2
-    codex_stat_mode=$(stat --printf='%f' -- "$codex_stat_file" 2>/dev/null) || exit 1
-    codex_stat_size=$(stat --printf='%s' -- "$codex_stat_file" 2>/dev/null) || exit 1
-    codex_stat_seconds=$(stat --printf='%Y' -- "$codex_stat_file" 2>/dev/null) || exit 1
-    codex_stat_human=$(stat --printf='%y' -- "$codex_stat_file" 2>/dev/null) || exit 1
-    codex_stat_fraction=$(printf '%s' "$codex_stat_human" | cut -d. -f2 | cut -d' ' -f1)
-    [ "$codex_stat_mode:$codex_stat_size:$codex_stat_seconds:$codex_stat_fraction" = \
-      '81a0:1:-2:876543211' ]
-)
-codex_stat_status=0
-codex_check_stat || codex_stat_status=$?
-if [ "$codex_stat_status" -eq 1 ]; then
-    printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=stat_printf\000' >&2
-    exit 0
-fi
-if [ "$codex_stat_status" -ne 0 ]; then exit 2; fi
-codex_xargs_newline='line
-name'
-codex_xargs_out=$(printf 'line\nname\000' |
-    xargs -0 -r sh -c 'printf %s "$1"' codex-sentinel-stat-xargs 2>/dev/null)
-codex_xargs_ok=$?
-printf 'x\000' |
-    xargs -0 -r sh -c 'exit 7' codex-sentinel-stat-xargs >/dev/null 2>&1
-codex_xargs_failure=$?
-if [ "$codex_xargs_ok" -ne 0 ] || [ "$codex_xargs_failure" -eq 0 ] ||
-   [ "$codex_xargs_out" != "$codex_xargs_newline" ]; then
-    printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=xargs_nul\000' >&2
-    exit 0
-fi
 exec xargs -0 -r sh -c '
 for path do
     printf "%s\000" "$path"

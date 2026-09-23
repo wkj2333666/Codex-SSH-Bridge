@@ -22,41 +22,6 @@ path=$1
 start=$2
 lines=$3
 budget=$4
-codex_check_read() (
-    codex_read_dir=$(mktemp -d /tmp/codex-sentinel-read.XXXXXX 2>/dev/null) || exit 9
-    cleanup_codex_read() { rm -rf -- "$codex_read_dir"; }
-    trap cleanup_codex_read EXIT HUP INT TERM
-    codex_read_file=$codex_read_dir/codex-sentinel-read
-    codex_read_tail=$codex_read_dir/tail
-    codex_read_line=$codex_read_dir/line
-    codex_read_bytes=$codex_read_dir/bytes
-    codex_read_last=$codex_read_dir/last
-    codex_read_expected=$codex_read_dir/expected
-    printf 'a\000b\nc' >"$codex_read_file" || exit 9
-    printf 'a\000b\n' >"$codex_read_expected" || exit 9
-    tail -n +1 -- "$codex_read_file" >"$codex_read_tail" 2>/dev/null || exit 1
-    head -n 1 "$codex_read_tail" >"$codex_read_line" 2>/dev/null || exit 1
-    head -c 4 "$codex_read_line" >"$codex_read_bytes" 2>/dev/null || exit 1
-    tail -c 1 -- "$codex_read_file" >"$codex_read_last" 2>/dev/null || exit 1
-    codex_read_count=$(wc -l <"$codex_read_file") || exit 1
-    codex_read_size=$(stat --printf='%s' -- "$codex_read_file" 2>/dev/null) || exit 2
-    codex_read_hash=$(sha256sum -- "$codex_read_file" 2>/dev/null) || exit 3
-    set -- $codex_read_hash
-    codex_read_hash=$1
-    cmp -s "$codex_read_expected" "$codex_read_bytes" &&
-    [ "$(cat "$codex_read_last")" = c ] && [ "$codex_read_count" -eq 1 ] || exit 1
-    [ "$codex_read_size" -eq 5 ] || exit 2
-    [ "$codex_read_hash" = 214df3f68e1a607f5baa40cc3315f4316ae58b282b6c0bf288b89fec4da7aa80 ] || exit 3
-)
-codex_read_status=0
-codex_check_read || codex_read_status=$?
-case "$codex_read_status" in
-    0) ;;
-    1) printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=read_slice\000' >&2; exit 0 ;;
-    2) printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=stat_printf\000' >&2; exit 0 ;;
-    3) printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=sha256sum\000' >&2; exit 0 ;;
-    *) exit 2 ;;
-esac
 if [ ! -e "$path" ]; then
     parent=${path%/*};[ -n "$parent" ]||parent=/
     while [ "$parent" != . ]&&[ ! -d "$parent" ];do parent=${parent%/*};[ -n "$parent" ]||parent=.;done
@@ -72,15 +37,12 @@ if [ "$size" -gt 0 ]; then
     final_lf=$(tail -c 1 -- "$path" | wc -l)
     if [ "$final_lf" -eq 0 ]; then count=$((count + 1)); fi
 fi
-hash1=$(sha256sum -- "$path" 2>/dev/null) || { printf 'PERMISSION_DENIED\000' >&2; exit 0; }
-set -- $hash1
-hash1=$1
 look=$((budget + 1))
 tail -n "+$start" -- "$path" 2>/dev/null | head -n "$lines" | head -c "$look"
-hash2=$(sha256sum -- "$path" 2>/dev/null) || { printf 'PERMISSION_DENIED\000' >&2; exit 0; }
-set -- $hash2
-hash2=$1
-printf 'OK\000%s\000%s\000%s\000%s\000%s\000' "$size" "$count" "$hash1" "$hash2" "$mode" >&2
+hash=$(sha256sum -- "$path" 2>/dev/null) || { printf 'PERMISSION_DENIED\000' >&2; exit 0; }
+set -- $hash
+hash=$1
+printf 'OK\000%s\000%s\000%s\000%s\000' "$size" "$count" "$hash" "$mode" >&2
 "#;
 
 pub(super) async fn read(
@@ -103,7 +65,10 @@ pub(super) async fn read(
             path: path.as_str().to_owned(),
         };
         if bridge.edit_buffering_enabled
-            && let Some(desired) = bridge.edit_cache.lookup_complete(&cache_key).await
+            && let Some((desired, desired_sha256)) = bridge
+                .edit_cache
+                .lookup_complete_with_hash(&cache_key)
+                .await
         {
             if operation_context.is_none() {
                 operation_context = bridge.edit_backend.context_for(&request.host).await;
@@ -111,6 +76,7 @@ pub(super) async fn read(
             let (entry, raw_bytes) = cached_read_entry(
                 &path,
                 &desired,
+                desired_sha256.as_deref(),
                 request.start_line,
                 request.max_lines,
                 remaining,
@@ -194,17 +160,16 @@ pub(super) async fn read(
             });
             continue;
         }
-        if fields.len() != 6 {
+        if fields.len() != 5 {
             return Err(attach(protocol_error(
                 "read metadata field count is invalid",
             )));
         }
         let size = parse_u64(fields[1]).map_err(&attach)?;
         let total_lines = parse_u64(fields[2]).map_err(&attach)?;
-        let hash1 = utf8(fields[3]).map_err(&attach)?;
-        let hash2 = utf8(fields[4]).map_err(&attach)?;
-        let mode = utf8(fields[5]).map_err(&attach)?;
-        if !valid_hash(hash1) || !valid_hash(hash2) {
+        let remote_sha256 = utf8(fields[3]).map_err(&attach)?;
+        let mode = utf8(fields[4]).map_err(&attach)?;
+        if !valid_hash(remote_sha256) {
             return Err(attach(protocol_error("read hash is invalid")));
         }
         if mode.is_empty()
@@ -222,19 +187,6 @@ pub(super) async fn read(
         )
         .await
         .map_err(&attach)?;
-        if hash1 != hash2 {
-            let conflict = crate::error::BridgeError::read_conflict();
-            debug_assert_eq!(conflict.code, crate::error::ErrorCode::ReadConflict);
-            files.push(ReadEntry::Error {
-                actual_path,
-                relative_path,
-                error: EntryError {
-                    code: EntryErrorCode::ReadConflict,
-                    message: "remote file changed while being read",
-                },
-            });
-            continue;
-        }
         let byte_truncated = stdout.len() > remaining;
         let retained = &stdout[..stdout.len().min(remaining)];
         let truncated_before = request.start_line > 1 && size != 0;
@@ -245,9 +197,21 @@ pub(super) async fn read(
         let truncated_after = byte_truncated || line_end < total_lines;
         let truncated = truncated_before || truncated_after;
         let sha256 = if !truncated {
-            format!("{:x}", Sha256::digest(retained))
+            let sha256 = format!("{:x}", Sha256::digest(retained));
+            if sha256 != remote_sha256 {
+                files.push(ReadEntry::Error {
+                    actual_path,
+                    relative_path,
+                    error: EntryError {
+                        code: EntryErrorCode::ReadConflict,
+                        message: "remote file changed while being read",
+                    },
+                });
+                continue;
+            }
+            sha256
         } else {
-            hash1.to_owned()
+            remote_sha256.to_owned()
         };
         if bridge.edit_buffering_enabled && !truncated {
             bridge
@@ -292,6 +256,7 @@ pub(super) async fn read(
 fn cached_read_entry(
     path: &crate::path::RemotePath,
     desired: &DesiredState,
+    desired_sha256: Option<&str>,
     start_line: u64,
     max_lines: u64,
     maximum_bytes: usize,
@@ -311,6 +276,7 @@ fn cached_read_entry(
             0,
         );
     };
+    let sha256 = desired_sha256.expect("cached content is missing its precomputed hash");
     let total_lines = logical_line_count(bytes);
     let start = logical_line_offset(bytes, start_line.saturating_sub(1));
     let end = logical_line_offset_from(bytes, start, max_lines);
@@ -321,18 +287,13 @@ fn cached_read_entry(
     let line_end = start_line.saturating_sub(1).saturating_add(max_lines);
     let truncated_after = byte_truncated || line_end < total_lines;
     let truncated = truncated_before || truncated_after;
-    let sha256 = if truncated {
-        format!("{:x}", Sha256::digest(bytes))
-    } else {
-        format!("{:x}", Sha256::digest(retained))
-    };
     (
         ReadEntry::Success {
             actual_path,
             relative_path,
             content: encode_bytes(retained),
             raw_bytes: retained.len() as u64,
-            sha256,
+            sha256: sha256.to_owned(),
             truncated_before,
             truncated_after,
             truncated,
@@ -434,7 +395,8 @@ mod tests {
     fn cached_read_preserves_line_and_byte_truncation_semantics() {
         let path = crate::path::RemotePath::absolute("/srv/app/file").unwrap();
         let desired = DesiredState::Present(Arc::from(&b"one\ntwo\nthree"[..]));
-        let (entry, raw_bytes) = super::cached_read_entry(&path, &desired, 2, 2, 4);
+        let hash = "a".repeat(64);
+        let (entry, raw_bytes) = super::cached_read_entry(&path, &desired, Some(&hash), 2, 2, 4);
 
         assert_eq!(raw_bytes, 4);
         let ReadEntry::Success {
@@ -458,7 +420,7 @@ mod tests {
     fn cached_tombstone_reads_as_not_found() {
         let path = crate::path::RemotePath::absolute("/srv/app/missing").unwrap();
         let (entry, raw_bytes) =
-            super::cached_read_entry(&path, &DesiredState::Deleted, 1, 2_000, 1024);
+            super::cached_read_entry(&path, &DesiredState::Deleted, None, 1, 2_000, 1024);
         assert_eq!(raw_bytes, 0);
         let ReadEntry::Error { error, .. } = entry else {
             panic!("cached tombstone did not produce an error");

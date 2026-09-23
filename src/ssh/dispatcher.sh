@@ -111,8 +111,8 @@ record_test_command() { record_test_call C "$1"; }
 record_test_phase() {
     if [ -n "${FAKE_SSH_PHASE_LOG-}" ]; then
         case "$(cat "$1")" in
-            *codex_patch_snapshot_sentinel*) printf 'S\n' >>"$FAKE_SSH_PHASE_LOG" ;;
-            *codex_safe_write_sentinel*|*codex_guarded_delete_sentinel*) printf 'M\n' >>"$FAKE_SSH_PHASE_LOG" ;;
+            *codex_snapshot_read*) printf 'S\n' >>"$FAKE_SSH_PHASE_LOG" ;;
+            *codex_mutation_stage\(\)*|*codex_classify_unreachable_parent\(\)*) printf 'M\n' >>"$FAKE_SSH_PHASE_LOG" ;;
         esac
     fi
 }

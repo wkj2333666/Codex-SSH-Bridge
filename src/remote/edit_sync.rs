@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
@@ -92,11 +93,6 @@ while [ "$#" -gt 0 ]; do
         if [ "$base_kind" = M ]; then
             emit_result "$index" UNCHANGED - 0
         else
-            recheck_hash=$(hash_file "$target") || exit 5
-            [ "$recheck_hash" = "$base_hash" ] || {
-                emit_result "$index" CONFLICT - 0
-                exit 0
-            }
             rm -f -- "$target" || exit 5
             [ ! -e "$target" ] && [ ! -L "$target" ] || exit 5
             emit_result "$index" CHANGED - 0
@@ -142,12 +138,6 @@ while [ "$#" -gt 0 ]; do
             result_mode=$((0$current_mode))
             emit_result "$index" UNCHANGED "$desired_hash" "$result_mode"
         else
-            recheck_hash=$(hash_file "$target") || { cleanup_tmp; exit 5; }
-            [ "$recheck_hash" = "$base_hash" ] || {
-                cleanup_tmp
-                emit_result "$index" CONFLICT - 0
-                exit 0
-            }
             mv -T -- "$tmp" "$target" || { cleanup_tmp; exit 5; }
             trap - HUP INT TERM
             result_mode=$((0$desired_mode))
@@ -413,7 +403,9 @@ fn prepare_batch_arguments(
                     .checked_add(bytes.len())
                     .ok_or_else(|| permanent("batch stdin length overflowed"))?;
                 let hash = if hash_contents {
-                    format!("{:x}", Sha256::digest(bytes))
+                    item.desired_sha256
+                        .clone()
+                        .ok_or_else(|| permanent("cached content hash is missing"))?
                 } else {
                     "0".repeat(64)
                 };
@@ -515,13 +507,16 @@ fn parse_batch_result(
         let mode = parse_field_u32(fields[3], b"MODE=")?;
         let base = match &items[index].desired {
             DesiredState::Deleted if hash == b"-" && mode == 0 => RemoteBase::Missing,
-            DesiredState::Present(bytes) => {
-                let expected_hash = format!("{:x}", Sha256::digest(bytes));
+            DesiredState::Present(_) => {
+                let expected_hash = items[index]
+                    .desired_sha256
+                    .as_ref()
+                    .ok_or_else(|| unknown("cached content hash is missing"))?;
                 if hash != expected_hash.as_bytes() || mode > 0o777 {
                     return Err(unknown("batch mutation result does not match its input"));
                 }
                 RemoteBase::Regular {
-                    sha256: expected_hash,
+                    sha256: expected_hash.clone(),
                     mode,
                 }
             }
@@ -657,6 +652,10 @@ mod tests {
     use crate::remote::edit_cache::Generation;
 
     fn item(path: &str, desired: DesiredState) -> CommitItem {
+        let desired_sha256 = match &desired {
+            DesiredState::Present(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
+            DesiredState::Deleted => None,
+        };
         CommitItem {
             key: CacheKey {
                 host: "host".to_owned(),
@@ -664,6 +663,7 @@ mod tests {
             },
             base: RemoteBase::Missing,
             desired,
+            desired_sha256,
             generation: Generation(7),
         }
     }

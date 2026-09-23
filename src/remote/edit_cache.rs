@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -39,6 +40,7 @@ pub(crate) struct RemoteSnapshot {
 pub(crate) struct CachedEntry {
     pub(crate) base: RemoteBase,
     pub(crate) desired: DesiredState,
+    pub(crate) desired_sha256: Option<String>,
     pub(crate) generation: Generation,
 }
 
@@ -61,6 +63,7 @@ pub(crate) struct CommitItem {
     pub(crate) key: CacheKey,
     pub(crate) base: RemoteBase,
     pub(crate) desired: DesiredState,
+    pub(crate) desired_sha256: Option<String>,
     pub(crate) generation: Generation,
 }
 
@@ -207,6 +210,7 @@ struct HostRuntime {
 struct Entry {
     base: RemoteBase,
     desired: DesiredState,
+    desired_sha256: Option<String>,
     generation: Generation,
     dirty: bool,
     in_flight: Option<Generation>,
@@ -256,11 +260,13 @@ impl EditCache {
             return Ok(desired);
         }
         let lru_sequence = next_lru(&mut state);
+        let desired_sha256 = snapshot_desired_sha256(&snapshot);
         host_state_mut(&mut state, &key.host).entries.insert(
             key.path,
             Entry {
                 base: snapshot.base,
                 desired: snapshot.desired,
+                desired_sha256,
                 generation: Generation(0),
                 dirty: false,
                 in_flight: None,
@@ -273,11 +279,20 @@ impl EditCache {
     }
 
     pub(crate) async fn lookup_complete(&self, key: &CacheKey) -> Option<DesiredState> {
+        self.lookup_complete_with_hash(key)
+            .await
+            .map(|(desired, _)| desired)
+    }
+
+    pub(crate) async fn lookup_complete_with_hash(
+        &self,
+        key: &CacheKey,
+    ) -> Option<(DesiredState, Option<String>)> {
         let mut state = self.state.lock().await;
         let lru_sequence = next_lru(&mut state);
         let entry = state.hosts.get_mut(&key.host)?.entries.get_mut(&key.path)?;
         entry.lru_sequence = lru_sequence;
-        Some(entry.desired.clone())
+        Some((entry.desired.clone(), entry.desired_sha256.clone()))
     }
 
     pub(crate) async fn load_entry_complete(
@@ -311,6 +326,7 @@ impl EditCache {
         Ok(Some(CachedEntry {
             base: entry.base.clone(),
             desired: entry.desired.clone(),
+            desired_sha256: entry.desired_sha256.clone(),
             generation: entry.generation,
         }))
     }
@@ -330,11 +346,13 @@ impl EditCache {
             return;
         }
         let lru_sequence = next_lru(&mut state);
+        let desired_sha256 = snapshot_desired_sha256(&snapshot);
         host_state_mut(&mut state, &key.host).entries.insert(
             key.path,
             Entry {
                 base: snapshot.base,
                 desired: snapshot.desired,
+                desired_sha256,
                 generation: Generation(0),
                 dirty: false,
                 in_flight: None,
@@ -426,6 +444,7 @@ impl EditCache {
                 .get_mut(&host_name)
                 .and_then(|host| host.entries.get_mut(&edit.key.path))
                 .expect("validated prepared cache entry disappeared");
+            entry.desired_sha256 = desired_sha256(&edit.desired);
             entry.desired = edit.desired;
             entry.generation = generation;
             entry.dirty = true;
@@ -482,11 +501,13 @@ impl EditCache {
                 && make_capacity(&mut state, self.config.max_bytes, snapshot_bytes, &[])
             {
                 let lru_sequence = next_lru(&mut state);
+                let desired_sha256 = snapshot_desired_sha256(&snapshot);
                 host_state_mut(&mut state, &key.host).entries.insert(
                     key.path.clone(),
                     Entry {
                         base: snapshot.base,
                         desired: snapshot.desired,
+                        desired_sha256,
                         generation: Generation(0),
                         dirty: false,
                         in_flight: None,
@@ -524,6 +545,7 @@ impl EditCache {
             .entries
             .get_mut(&key.path)
             .expect("prepared cache entry disappeared");
+        entry.desired_sha256 = desired_sha256(&desired);
         entry.desired = desired;
         entry.generation = generation;
         entry.dirty = true;
@@ -838,6 +860,7 @@ impl EditCache {
                         },
                         base: entry.base.clone(),
                         desired: entry.desired.clone(),
+                        desired_sha256: entry.desired_sha256.clone(),
                         generation: entry.generation,
                     })
                 })
@@ -945,6 +968,20 @@ fn desired_size(desired: &DesiredState) -> usize {
     match desired {
         DesiredState::Present(bytes) => bytes.len(),
         DesiredState::Deleted => 0,
+    }
+}
+
+fn desired_sha256(desired: &DesiredState) -> Option<String> {
+    match desired {
+        DesiredState::Present(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
+        DesiredState::Deleted => None,
+    }
+}
+
+fn snapshot_desired_sha256(snapshot: &RemoteSnapshot) -> Option<String> {
+    match (&snapshot.base, &snapshot.desired) {
+        (RemoteBase::Regular { sha256, .. }, DesiredState::Present(_)) => Some(sha256.clone()),
+        (_, desired) => desired_sha256(desired),
     }
 }
 

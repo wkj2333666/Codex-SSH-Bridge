@@ -33,8 +33,6 @@ basename=$2
 maximum_size=$3
 [ -n "$basename" ] || exit 2
 case "$basename" in .|..|*/*) exit 2 ;; esac
-newline='
-'
 
 codex_snapshot_stat() {
     stat --printf='%f:%u:%a:%s:%d:%i:%h\n' -- "$1" 2>/dev/null
@@ -109,121 +107,6 @@ codex_snapshot_parent_stat_follow_valid() {
 codex_snapshot_read() {
     dd if="$1" bs=262144 status=none iflag=nofollow 2>/dev/null
 }
-codex_snapshot_hash() (
-    codex_hash_capture=$(
-        {
-            {
-                dd if="$1" bs=262144 status=none iflag=nofollow 2>/dev/null
-                printf 'CODEX_DD_STATUS=%s\n' "$?" >&2
-            } | sha256sum 2>/dev/null
-            printf 'CODEX_SHA_STATUS=%s\n' "$?" >&2
-        } 2>&1
-    )
-    codex_hash_dd=
-    codex_hash_sha=
-    codex_hash_digest=
-    codex_hash_dd_seen=0
-    codex_hash_sha_seen=0
-    codex_hash_digest_seen=0
-    codex_hash_valid=1
-    set -f
-    IFS="$newline"
-    for codex_hash_line in $codex_hash_capture; do
-        case "$codex_hash_line" in
-            CODEX_DD_STATUS=*)
-                [ "$codex_hash_dd_seen" -eq 0 ] || { codex_hash_valid=0; break; }
-                codex_hash_dd_seen=1
-                codex_hash_dd=${codex_hash_line#CODEX_DD_STATUS=}
-                ;;
-            CODEX_SHA_STATUS=*)
-                [ "$codex_hash_sha_seen" -eq 0 ] || { codex_hash_valid=0; break; }
-                codex_hash_sha_seen=1
-                codex_hash_sha=${codex_hash_line#CODEX_SHA_STATUS=}
-                ;;
-            *'  -')
-                [ "$codex_hash_digest_seen" -eq 0 ] || { codex_hash_valid=0; break; }
-                codex_hash_digest_seen=1
-                codex_hash_digest=${codex_hash_line%  -}
-                ;;
-            *) codex_hash_valid=0; break ;;
-        esac
-    done
-    if [ "$codex_hash_dd_seen" -ne 1 ] || [ "$codex_hash_sha_seen" -ne 1 ]; then
-        codex_hash_valid=0
-    fi
-    if [ "$codex_hash_valid" -ne 1 ]; then
-        codex_hash_status=1
-    elif [ "$codex_hash_dd" != 0 ] || [ "$codex_hash_sha" != 0 ]; then
-        codex_hash_status=9
-    elif [ "$codex_hash_digest_seen" -ne 1 ] || [ "${#codex_hash_digest}" -ne 64 ]; then
-        codex_hash_status=1
-    else
-        case "$codex_hash_digest" in *[!0-9a-f]*) codex_hash_valid=0 ;; esac
-        if [ "$codex_hash_valid" -eq 1 ]; then
-            printf '%s\n' "$codex_hash_digest"
-            codex_hash_status=0
-        else
-            codex_hash_status=1
-        fi
-    fi
-    exit "$codex_hash_status"
-)
-
-codex_patch_snapshot_sentinel() (
-    umask 077
-    codex_sentinel_dir=$(mktemp -d "${TMPDIR:-/tmp}/codex-sentinel-patch-snapshot.XXXXXX" 2>/dev/null) || exit 9
-    cleanup_codex_sentinel() {
-        rm -rf -- "$codex_sentinel_dir" >/dev/null 2>&1 || return 1
-        [ ! -e "$codex_sentinel_dir" ] && [ ! -L "$codex_sentinel_dir" ]
-    }
-    on_codex_sentinel_signal() {
-        trap - 0 HUP INT TERM
-        cleanup_codex_sentinel >/dev/null 2>&1 || :
-        exit 9
-    }
-    trap 'cleanup_codex_sentinel >/dev/null 2>&1 || :' 0
-    trap on_codex_sentinel_signal HUP INT TERM
-    codex_sentinel_parent=$codex_sentinel_dir/parent
-    codex_sentinel_parent_link=$codex_sentinel_dir/parent-link
-    mkdir -m 700 -- "$codex_sentinel_parent" || exit 9
-    ln -s "$codex_sentinel_parent" "$codex_sentinel_parent_link" || exit 9
-    codex_snapshot_parent_stat_follow_valid "$codex_sentinel_parent" || exit $?
-    codex_sentinel_parent_identity=$CODEX_STAT_DEVICE:$CODEX_STAT_INODE
-    codex_snapshot_parent_stat_follow_valid "$codex_sentinel_parent_link" || exit $?
-    [ "$CODEX_STAT_DEVICE:$CODEX_STAT_INODE" = "$codex_sentinel_parent_identity" ] || exit 1
-    case "$CODEX_STAT_TYPE" in 4???) ;; *) exit 1 ;; esac
-    codex_sentinel_file=$codex_sentinel_parent/file
-    printf payload >"$codex_sentinel_file" || exit 9
-    codex_snapshot_stat_valid "$codex_sentinel_file" || exit $?
-    case "$CODEX_STAT_TYPE" in 8???) ;; *) exit 1 ;; esac
-    [ "$CODEX_STAT_SIZE" = 7 ] || exit 1
-    codex_sentinel_hash=$(codex_snapshot_hash "$codex_sentinel_file") || exit $?
-    [ "$codex_sentinel_hash" = 239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5 ] || exit 1
-    codex_sentinel_content=$(codex_snapshot_read "$codex_sentinel_file") || exit 9
-    [ "$codex_sentinel_content" = payload ] || exit 1
-    codex_sentinel_link=$codex_sentinel_parent/link
-    ln -s "$codex_sentinel_file" "$codex_sentinel_link" || exit 9
-    codex_snapshot_stat_valid "$codex_sentinel_link" || exit $?
-    case "$CODEX_STAT_TYPE" in a???) ;; *) exit 1 ;; esac
-    if codex_snapshot_read "$codex_sentinel_link" >/dev/null 2>&1; then exit 1; fi
-    cleanup_codex_sentinel || exit 9
-    trap - 0 HUP INT TERM
-    exit 0
-)
-
-for codex_required_command in stat mktemp dd sha256sum ln rm mkdir cat; do
-    command -v "$codex_required_command" >/dev/null 2>&1 || {
-        printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=safe_write\000' >&2
-        exit 0
-    }
-done
-codex_sentinel_status=0
-codex_patch_snapshot_sentinel || codex_sentinel_status=$?
-case "$codex_sentinel_status" in
-    0) ;;
-    1) printf 'CODE=CAPABILITY_MISMATCH\000CAPABILITY=safe_write\000' >&2; exit 0 ;;
-    *) exit 9 ;;
-esac
 
 codex_snapshot_decimal_valid "$maximum_size" || exit 2
 emit_one() {
@@ -310,17 +193,6 @@ target_mode_decimal=$((0$target_mode))
 [ $((target_mode_decimal & 07000)) -eq 0 ] || emit_one WRITE_CONFLICT
 codex_snapshot_decimal_le "$target_size" "$maximum_size" || emit_one REQUEST_TOO_LARGE
 
-target_hash1_status=0
-target_hash1=$(codex_snapshot_hash "$target") || target_hash1_status=$?
-if [ "$target_hash1_status" -ne 0 ]; then
-    if codex_snapshot_stat_valid "$target"; then
-        case "$CODEX_STAT_TYPE" in 8???) ;; *) emit_one READ_CONFLICT ;; esac
-        [ "$CODEX_STAT_SIZE:$CODEX_STAT_DEVICE:$CODEX_STAT_INODE:$CODEX_STAT_MODE:$CODEX_STAT_LINKS" = "$target_size:$target_device:$target_inode:$target_mode:$target_links" ] || emit_one READ_CONFLICT
-        if [ ! -r "$target" ]; then emit_one PERMISSION_DENIED; fi
-        exit 4
-    fi
-    emit_one READ_CONFLICT
-fi
 target_read_status=0
 codex_snapshot_read "$target" || target_read_status=$?
 if [ "$target_read_status" -ne 0 ]; then
@@ -338,10 +210,8 @@ case "$CODEX_STAT_TYPE" in 8???) ;; *) emit_one READ_CONFLICT ;; esac
 [ "$CODEX_STAT_SIZE:$CODEX_STAT_DEVICE:$CODEX_STAT_INODE:$CODEX_STAT_MODE:$CODEX_STAT_LINKS" = "$target_size:$target_device:$target_inode:$target_mode:$target_links" ] || emit_one READ_CONFLICT
 target_final_mode_decimal=$((0$CODEX_STAT_MODE))
 [ $((target_final_mode_decimal & 07000)) -eq 0 ] || emit_one READ_CONFLICT
-target_hash2=$(codex_snapshot_hash "$target") || emit_one READ_CONFLICT
-[ "$target_hash1" = "$target_hash2" ] || emit_one READ_CONFLICT
-printf 'STATUS=SUCCESS\000SIZE=%s\000SHA256=%s\000MODE=%s\000DEVICE=%s\000INODE=%s\000LINKS=%s\000' \
-    "$target_size" "$target_hash1" "$target_mode" "$target_device" "$target_inode" "$target_links" >&2
+printf 'STATUS=SUCCESS\000SIZE=%s\000MODE=%s\000DEVICE=%s\000INODE=%s\000LINKS=%s\000' \
+    "$target_size" "$target_mode" "$target_device" "$target_inode" "$target_links" >&2
 exit 0
 "#;
 
@@ -626,7 +496,7 @@ pub(super) fn parse_snapshot_protocol(
         (b"STATUS=REQUEST_TOO_LARGE", [_]) => Err(patch_too_large(
             "patch base exceeds the configured write limit",
         )),
-        (b"STATUS=SUCCESS", [_, size, sha256, mode, device, inode, links]) => {
+        (b"STATUS=SUCCESS", [_, size, mode, device, inode, links]) => {
             let size = parse_snapshot_u64(size, b"SIZE=")?;
             let device = parse_snapshot_u64(device, b"DEVICE=")?;
             let inode = parse_snapshot_u64(inode, b"INODE=")?;
@@ -644,10 +514,6 @@ pub(super) fn parse_snapshot_protocol(
                 return Err(write_conflict("patch base has unsafe special mode bits"));
             }
             let _identity = (device, inode, links, mode);
-            let sha256 = snapshot_text(sha256, b"SHA256=")?;
-            if !valid_snapshot_hash(sha256) {
-                return Err(snapshot_protocol_error("snapshot hash is invalid"));
-            }
             let expected_size = usize::try_from(size)
                 .map_err(|_| snapshot_protocol_error("snapshot size is not representable"))?;
             if expected_size > maximum_bytes {
@@ -656,12 +522,12 @@ pub(super) fn parse_snapshot_protocol(
                 ));
             }
             let actual_hash = format!("{:x}", Sha256::digest(&stdout));
-            if stdout.len() != expected_size || actual_hash != sha256 {
+            if stdout.len() != expected_size {
                 return Err(BridgeError::read_conflict());
             }
             Ok(FileSnapshot::Regular {
                 bytes: stdout,
-                sha256: sha256.to_owned(),
+                sha256: actual_hash,
                 mode,
             })
         }
@@ -683,13 +549,6 @@ fn snapshot_text<'a>(record: &'a [u8], prefix: &[u8]) -> BridgeResult<&'a str> {
         .strip_prefix(prefix)
         .ok_or_else(|| snapshot_protocol_error("snapshot text field is invalid"))?;
     utf8(value).map_err(|_| snapshot_protocol_error("snapshot text field is invalid"))
-}
-
-fn valid_snapshot_hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn snapshot_protocol_error(message: &'static str) -> BridgeError {
@@ -839,14 +698,12 @@ pub(super) async fn apply_patch(
         } else {
             None
         };
-        let current_hash = match &source_current.desired {
-            DesiredState::Present(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
-            DesiredState::Deleted => None,
-        };
+        let current_hash = source_current.desired_sha256.as_deref();
         let base = match &source_current.desired {
-            DesiredState::Present(bytes) => {
-                Some((bytes.as_ref(), current_hash.as_deref().unwrap()))
-            }
+            DesiredState::Present(bytes) => Some((
+                bytes.as_ref(),
+                current_hash.expect("cached content is missing its precomputed hash"),
+            )),
             DesiredState::Deleted => None,
         };
         let output = super::codex_patch::apply_codex_file(
@@ -1338,7 +1195,7 @@ mod tests {
         let raw = vec![b'x'; 1_048_577];
         let hash = format!("{:x}", Sha256::digest(&raw));
         let metadata = format!(
-            "STATUS=SUCCESS\0SIZE={}\0SHA256={hash}\0MODE=600\0DEVICE=1\0INODE=2\0LINKS=1\0",
+            "STATUS=SUCCESS\0SIZE={}\0MODE=600\0DEVICE=1\0INODE=2\0LINKS=1\0",
             raw.len()
         );
         let snapshot =
@@ -1356,11 +1213,8 @@ mod tests {
         assert_eq!(mode, 0o600);
 
         let maximum = 64;
-        let declared = vec![b'x'; maximum];
-        let declared_hash = format!("{:x}", Sha256::digest(&declared));
-        let success_metadata = format!(
-            "STATUS=SUCCESS\0SIZE={maximum}\0SHA256={declared_hash}\0MODE=600\0DEVICE=1\0INODE=2\0LINKS=1\0"
-        );
+        let success_metadata =
+            format!("STATUS=SUCCESS\0SIZE={maximum}\0MODE=600\0DEVICE=1\0INODE=2\0LINKS=1\0");
         let maximum_plus_one = vec![b'x'; maximum + 1];
         assert_eq!(
             super::parse_snapshot_protocol(
