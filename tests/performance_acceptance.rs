@@ -778,6 +778,40 @@ async fn task13_release_edit_cache_latency_profile() {
         "the mutation batch and command must reuse the existing persistent helper transport"
     );
 
+    let read_remote = TempDir::new().unwrap();
+    let read_fixture = persistent_fake_fixture(read_remote.path());
+    let read_path = read_remote.path().join("cached-read.txt");
+    std::fs::write(&read_path, b"one\ntwo\nthree\n").unwrap();
+    let first_read = call_json(
+        &read_fixture.tools,
+        "remote_read",
+        json!({"host":"dev","paths":[read_path.clone()],"max_bytes":4096}),
+    )
+    .await;
+    assert_eq!(first_read["isError"], Value::Null, "{first_read}");
+    std::fs::write(&read_fixture.log, b"").unwrap();
+    let mut cached_read_samples = Vec::with_capacity(SSH_MEASURED_CALLS);
+    for _ in 0..SSH_MEASURED_CALLS {
+        let started = Instant::now();
+        let result = call_json(
+            &read_fixture.tools,
+            "remote_read",
+            json!({
+                "host":"dev","paths":[read_path.clone()],"start_line":2,"max_lines":1,
+                "max_bytes":4096
+            }),
+        )
+        .await;
+        cached_read_samples.push(started.elapsed());
+        assert_eq!(result["isError"], Value::Null, "{result}");
+    }
+    let (_, cached_read_p95, _) =
+        report_latency("warm cached partial read", &mut cached_read_samples);
+    assert!(
+        transport_call_kinds(&read_fixture.log).is_empty(),
+        "reads served from a complete cached snapshot must not create SSH session requests"
+    );
+
     let timer_remote = TempDir::new().unwrap();
     let timer = persistent_fake_fixture_with_edit_limits(timer_remote.path(), 25, 1024 * 1024);
     let timer_path = timer_remote.path().join("timer.txt");
@@ -813,7 +847,7 @@ async fn task13_release_edit_cache_latency_profile() {
     let threshold_elapsed = threshold_started.elapsed();
 
     eprintln!(
-        "Task13 edit-cache latency: first_miss={first_miss:?} warm_p95={warm_p95:?} timer_flush={timer_elapsed:?} threshold_flush={threshold_elapsed:?} barrier_flush={barrier_elapsed:?}"
+        "Task13 edit-cache latency: first_miss={first_miss:?} warm_p95={warm_p95:?} cached_read_p95={cached_read_p95:?} timer_flush={timer_elapsed:?} threshold_flush={threshold_elapsed:?} barrier_flush={barrier_elapsed:?}"
     );
 }
 

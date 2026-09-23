@@ -2079,6 +2079,39 @@ async fn task14_same_host_barriers_release_before_parallel_remote_runs() {
     session.close().await;
 }
 
+#[tokio::test]
+async fn complete_remote_read_seeds_cached_partial_reads_without_transport() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let path = remote.path().join("cached-read.txt");
+    std::fs::write(&path, b"one\ntwo\nthree\n").unwrap();
+    let (_runtime, log, tools) = fake_remote_tools_fixture(remote.path());
+
+    let first = call_json(
+        &tools,
+        "remote_read",
+        json!({"host":"dev","paths":[path.clone()],"max_bytes":4096}),
+    )
+    .await;
+    assert_eq!(first["isError"], Value::Null, "{first}");
+    std::fs::write(&log, b"").unwrap();
+
+    let cached = call_json(
+        &tools,
+        "remote_read",
+        json!({
+            "host":"dev","paths":[path],"start_line":2,"max_lines":1,"max_bytes":4096
+        }),
+    )
+    .await;
+
+    assert_eq!(cached["isError"], Value::Null, "{cached}");
+    assert!(text_content(&cached).contains("two\n"), "{cached}");
+    assert!(
+        transport_call_kinds(&log).is_empty(),
+        "cached partial read launched an SSH request"
+    );
+}
+
 async fn wait_for_file(path: &std::path::Path, timeout: Duration) {
     tokio::time::timeout(timeout, async {
         while !path.exists() {

@@ -127,6 +127,13 @@ limit is 16 MiB; clean entries are evicted by LRU, while dirty entries are
 never silently discarded. This removes an SSH round trip from the hot logical
 edit path without presenting an SSHFS tree as local files.
 
+A complete, untruncated `remote_read` also seeds that generation. Later full or
+line-range reads of the same path are sliced from the cached bytes without an
+SSH request. Truncated first reads are not cached because they cannot represent
+the complete guarded file state. Commands and Jobs that may change the remote
+filesystem invalidate clean generations; dirty locally buffered generations
+remain authoritative until synchronized or explicitly discarded.
+
 ## Durable Job control
 
 Job control requires the persistent binary helper and transfers small typed
