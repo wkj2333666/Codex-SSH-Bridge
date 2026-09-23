@@ -187,6 +187,7 @@ version = "0.9.0"
 dependencies = [
  "assert_cmd",
  "base64",
+ "bytes",
  "clap",
  "globset",
  "libc",

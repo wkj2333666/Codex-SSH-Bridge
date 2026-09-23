@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
     DuplexStream,
@@ -95,7 +96,7 @@ struct SessionInner {
     max_payload: usize,
     max_output_bytes: u64,
     tx: mpsc::Sender<Outbound>,
-    pending: Mutex<HashMap<u64, PendingRequest>>,
+    pending: Mutex<HashMap<u64, Arc<Mutex<PendingRequest>>>>,
     next_id: AtomicU64,
     closed: AtomicBool,
     retired: AtomicBool,
@@ -119,18 +120,18 @@ struct PendingRequest {
     stderr_truncated: bool,
     stdout_sink: Option<OutputForwarder>,
     stderr_sink: Option<OutputForwarder>,
-    sender: oneshot::Sender<BridgeResult<SessionResult>>,
+    sender: Option<oneshot::Sender<BridgeResult<SessionResult>>>,
 }
 
 struct OutputForwarder {
-    sender: Option<mpsc::Sender<Vec<u8>>>,
+    sender: Option<mpsc::Sender<Bytes>>,
     cancel: Option<CancellationToken>,
     failed: Arc<AtomicBool>,
 }
 
 impl OutputForwarder {
     fn new(mut sink: DuplexStream) -> Self {
-        let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(OUTPUT_FORWARD_QUEUE_CAPACITY);
+        let (sender, mut receiver) = mpsc::channel::<Bytes>(OUTPUT_FORWARD_QUEUE_CAPACITY);
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
         let failed = Arc::new(AtomicBool::new(false));
@@ -155,17 +156,15 @@ impl OutputForwarder {
         }
     }
 
-    async fn forward(&mut self, bytes: &[u8]) -> bool {
+    async fn forward(&mut self, bytes: Vec<u8>) -> bool {
         let Some(sender) = &self.sender else {
             return false;
         };
-        for chunk in bytes.chunks(OUTPUT_FORWARD_CHUNK_BYTES) {
+        let mut bytes = Bytes::from(bytes);
+        while !bytes.is_empty() {
+            let chunk = bytes.split_to(bytes.len().min(OUTPUT_FORWARD_CHUNK_BYTES));
             if !matches!(
-                timeout(
-                    OUTPUT_FORWARD_BACKPRESSURE_GRACE,
-                    sender.send(chunk.to_vec())
-                )
-                .await,
+                timeout(OUTPUT_FORWARD_BACKPRESSURE_GRACE, sender.send(chunk)).await,
                 Ok(Ok(()))
             ) {
                 self.failed.store(true, Ordering::Release);
@@ -668,7 +667,7 @@ impl HostSession {
                 )
             })
             .unwrap_or((None, None));
-        let pending = PendingRequest {
+        let pending = Arc::new(Mutex::new(PendingRequest {
             started,
             ready: Some(ready),
             stdout_limit: usize::try_from(request.stdout_limit)
@@ -690,8 +689,8 @@ impl HostSession {
             stderr_truncated: false,
             stdout_sink,
             stderr_sink,
-            sender,
-        };
+            sender: Some(sender),
+        }));
         self.inner.pending.lock().await.insert(request_id, pending);
         let helper_command_profile = if self.inner.helper_mode != HelperMode::Shell {
             Some(crate::bridge_profile_span!(crate::profile::ProfileEvent {
@@ -978,15 +977,26 @@ impl SessionInner {
     }
 
     async fn fail_all(&self, error: BridgeError) {
-        let mut pending = self.pending.lock().await;
-        for (_, request) in pending.drain() {
-            let _ = request.sender.send(Err(error.clone()));
+        let requests = {
+            let mut pending = self.pending.lock().await;
+            pending
+                .drain()
+                .map(|(_, request)| request)
+                .collect::<Vec<_>>()
+        };
+        for request in requests {
+            if let Some(sender) = request.lock().await.sender.take() {
+                let _ = sender.send(Err(error.clone()));
+            }
         }
     }
 
     async fn fail_request(&self, request_id: u64, error: BridgeError) {
-        if let Some(request) = self.pending.lock().await.remove(&request_id) {
-            let _ = request.sender.send(Err(error));
+        let request = self.pending.lock().await.remove(&request_id);
+        if let Some(request) = request {
+            if let Some(sender) = request.lock().await.sender.take() {
+                let _ = sender.send(Err(error));
+            }
         }
     }
 
@@ -1102,23 +1112,26 @@ async fn drain_stderr(mut stderr: impl AsyncRead + Unpin) {
 async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult<()> {
     match frame.kind {
         FrameKind::Ready => {
-            let ready = {
-                let mut pending = inner.pending.lock().await;
-                let request = pending.get_mut(&frame.request_id).ok_or_else(|| {
+            let request = {
+                let pending = inner.pending.lock().await;
+                pending.get(&frame.request_id).cloned().ok_or_else(|| {
                     protocol_error(&inner.host, "dispatcher returned an unknown request ID")
-                })?;
-                request.ready.take().ok_or_else(|| {
-                    protocol_error(&inner.host, "dispatcher returned duplicate READY")
                 })?
             };
+            let ready = request.lock().await.ready.take().ok_or_else(|| {
+                protocol_error(&inner.host, "dispatcher returned duplicate READY")
+            })?;
             let _ = ready.send(());
             Ok(())
         }
         FrameKind::Stdout | FrameKind::Stderr => {
-            let mut pending = inner.pending.lock().await;
-            let request = pending.get_mut(&frame.request_id).ok_or_else(|| {
-                protocol_error(&inner.host, "dispatcher returned an unknown request ID")
-            })?;
+            let request = {
+                let pending = inner.pending.lock().await;
+                pending.get(&frame.request_id).cloned().ok_or_else(|| {
+                    protocol_error(&inner.host, "dispatcher returned an unknown request ID")
+                })?
+            };
+            let mut request = request.lock().await;
             if frame.kind == FrameKind::Stdout {
                 let _output_profile = if inner.helper_mode != HelperMode::Shell {
                     Some(crate::bridge_profile_span!(crate::profile::ProfileEvent {
@@ -1134,16 +1147,19 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 };
                 let aggregate_used =
                     request.stdout_seen.saturating_add(request.stderr_seen) as usize;
+                let payload_len = frame.payload.len();
                 let remaining = request
                     .stdout_limit
                     .saturating_sub(request.stdout_seen as usize)
                     .min(request.aggregate_limit.saturating_sub(aggregate_used));
-                if frame.payload.len() > remaining {
+                if payload_len > remaining {
                     request.stdout_truncated = true;
                 }
-                let allowed = remaining.min(frame.payload.len());
+                let allowed = remaining.min(payload_len);
                 let write_failed = if let Some(sink) = request.stdout_sink.as_mut() {
-                    !sink.forward(&frame.payload[..allowed]).await
+                    let mut payload = frame.payload;
+                    payload.truncate(allowed);
+                    !sink.forward(payload).await
                 } else {
                     request.stdout.extend_from_slice(&frame.payload[..allowed]);
                     false
@@ -1153,9 +1169,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                     request.stdout_truncated = true;
                     request.stdout_limit = request.stdout_seen as usize;
                 }
-                request.stdout_seen = request
-                    .stdout_seen
-                    .saturating_add(frame.payload.len() as u64);
+                request.stdout_seen = request.stdout_seen.saturating_add(payload_len as u64);
             } else {
                 let _output_profile = if inner.helper_mode != HelperMode::Shell {
                     Some(crate::bridge_profile_span!(crate::profile::ProfileEvent {
@@ -1171,16 +1185,19 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 };
                 let aggregate_used =
                     request.stdout_seen.saturating_add(request.stderr_seen) as usize;
+                let payload_len = frame.payload.len();
                 let remaining = request
                     .stderr_limit
                     .saturating_sub(request.stderr_seen as usize)
                     .min(request.aggregate_limit.saturating_sub(aggregate_used));
-                if frame.payload.len() > remaining {
+                if payload_len > remaining {
                     request.stderr_truncated = true;
                 }
-                let allowed = remaining.min(frame.payload.len());
+                let allowed = remaining.min(payload_len);
                 let write_failed = if let Some(sink) = request.stderr_sink.as_mut() {
-                    !sink.forward(&frame.payload[..allowed]).await
+                    let mut payload = frame.payload;
+                    payload.truncate(allowed);
+                    !sink.forward(payload).await
                 } else {
                     request.stderr.extend_from_slice(&frame.payload[..allowed]);
                     false
@@ -1190,9 +1207,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                     request.stderr_truncated = true;
                     request.stderr_limit = request.stderr_seen as usize;
                 }
-                request.stderr_seen = request
-                    .stderr_seen
-                    .saturating_add(frame.payload.len() as u64);
+                request.stderr_seen = request.stderr_seen.saturating_add(payload_len as u64);
             }
             Ok(())
         }
@@ -1217,7 +1232,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 timed_out,
             ) = parse_exit(&frame.payload)
                 .map_err(|message| protocol_error(&inner.host, &message))?;
-            let mut request = inner
+            let request = inner
                 .pending
                 .lock()
                 .await
@@ -1228,6 +1243,7 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                         "dispatcher returned an unknown exit request ID",
                     )
                 })?;
+            let mut request = request.lock().await;
             let stdout_forward_failed = request
                 .stdout_sink
                 .take()
@@ -1239,8 +1255,8 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
             let result = SessionResult {
                 request_id: frame.request_id,
                 status,
-                stdout: request.stdout,
-                stderr: request.stderr,
+                stdout: std::mem::take(&mut request.stdout),
+                stderr: std::mem::take(&mut request.stderr),
                 stdout_truncated: request.stdout_truncated
                     || stdout_forward_failed
                     || stdout_truncated,
@@ -1251,7 +1267,9 @@ async fn dispatch_frame(inner: &Arc<SessionInner>, frame: Frame) -> BridgeResult
                 remote_process_may_continue,
                 timed_out,
             };
-            let _ = request.sender.send(Ok(result));
+            if let Some(sender) = request.sender.take() {
+                let _ = sender.send(Ok(result));
+            }
             Ok(())
         }
         FrameKind::Error => {
