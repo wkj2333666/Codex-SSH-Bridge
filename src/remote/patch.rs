@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
 use crate::output::{InternalSpoolOwner, StreamKind};
-use crate::ssh::{FixedOperationKind, FixedRunRequest, RootedArgumentStride, RootedPathInputs};
+use crate::ssh::{FixedOperationKind, FixedRunRequest, RootedPathInputs};
 
 use super::edit_cache::{
     BatchMutationDisposition, CacheKey, DesiredState, LoadEntryDisposition, PreparedEdit,
@@ -13,7 +13,8 @@ use super::edit_cache::{
 use super::protocol::{context, nul_fields, parse_u64, read_small_stream, utf8};
 use super::{
     ApplyPatchRequest, ApplyPatchResult, RemoteBridge, RemoteContext, WriteEncoding, WriteMode,
-    attach_fixed_result_context, attach_remote_context, edit_bridge_error,
+    attach_fixed_result_context, attach_optional_remote_context, attach_remote_context,
+    edit_bridge_error,
 };
 
 pub(super) const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
@@ -26,8 +27,12 @@ pub(super) const SNAPSHOT_CAPTURE_METADATA_BYTES: usize = 2048;
 
 pub(super) const PATCH_SNAPSHOT_SCRIPT: &str = r#"
 set -u
-[ "$#" -ge 3 ] || exit 2
-[ $(( $# % 3 )) -eq 0 ] || exit 2
+[ "$#" -eq 3 ] || exit 2
+parent=$1
+basename=$2
+maximum_size=$3
+[ -n "$basename" ] || exit 2
+case "$basename" in .|..|*/*) exit 2 ;; esac
 newline='
 '
 
@@ -220,16 +225,10 @@ case "$codex_sentinel_status" in
     *) exit 9 ;;
 esac
 
-codex_snapshot_one() (
-parent=$1
-basename=$2
-maximum_size=$3
-[ -n "$basename" ] || exit 2
-case "$basename" in .|..|*/*) exit 2 ;; esac
 codex_snapshot_decimal_valid "$maximum_size" || exit 2
 emit_one() {
     printf 'STATUS=%s\000' "$1" >&2
-    exit 10
+    exit 0
 }
 codex_classify_unreachable_parent() {
     codex_parent_candidate=$parent
@@ -343,49 +342,6 @@ target_hash2=$(codex_snapshot_hash "$target") || emit_one READ_CONFLICT
 [ "$target_hash1" = "$target_hash2" ] || emit_one READ_CONFLICT
 printf 'STATUS=SUCCESS\000SIZE=%s\000SHA256=%s\000MODE=%s\000DEVICE=%s\000INODE=%s\000LINKS=%s\000' \
     "$target_size" "$target_hash1" "$target_mode" "$target_device" "$target_inode" "$target_links" >&2
-exit 0
-)
-
-batch_maximum=$3
-codex_snapshot_decimal_valid "$batch_maximum" || exit 2
-remaining_size=$batch_maximum
-codex_batch_dir=$(mktemp -d "${TMPDIR:-/tmp}/codex-patch-snapshot-batch.XXXXXX" 2>/dev/null) || exit 9
-cleanup_codex_batch() {
-    rm -rf -- "$codex_batch_dir" >/dev/null 2>&1 || return 1
-    [ ! -e "$codex_batch_dir" ] && [ ! -L "$codex_batch_dir" ]
-}
-on_codex_batch_signal() {
-    trap - 0 HUP INT TERM
-    cleanup_codex_batch >/dev/null 2>&1 || :
-    exit 9
-}
-trap 'cleanup_codex_batch >/dev/null 2>&1 || :' 0
-trap on_codex_batch_signal HUP INT TERM
-codex_batch_content=$codex_batch_dir/content
-while [ "$#" -gt 0 ]; do
-    [ "$3" = "$batch_maximum" ] || exit 2
-    codex_item_status=0
-    codex_snapshot_one "$1" "$2" "$remaining_size" >"$codex_batch_content" || codex_item_status=$?
-    case "$codex_item_status" in
-        0)
-            codex_item_size=$(stat --printf='%s' -- "$codex_batch_content" 2>/dev/null) || exit 9
-            codex_snapshot_decimal_valid "$codex_item_size" || exit 9
-            cat -- "$codex_batch_content" || exit 9
-            if codex_snapshot_decimal_le "$codex_item_size" "$remaining_size"; then
-                remaining_size=$((remaining_size - codex_item_size))
-            else
-                cleanup_codex_batch || exit 9
-                trap - 0 HUP INT TERM
-                exit 0
-            fi
-            ;;
-        10) ;;
-        *) exit "$codex_item_status" ;;
-    esac
-    shift 3
-done
-cleanup_codex_batch || exit 9
-trap - 0 HUP INT TERM
 exit 0
 "#;
 
@@ -539,39 +495,21 @@ fn resolve_patch_files(
         .collect()
 }
 
-#[derive(Clone, Copy)]
-struct SnapshotBatchItem<'a> {
-    path: &'a super::write::PreparedMutationPath,
-    display_path: &'a str,
-}
-
-async fn snapshot_files(
+async fn snapshot_file(
     bridge: &RemoteBridge,
     host: &str,
-    items: &[SnapshotBatchItem<'_>],
+    path: &super::write::PreparedMutationPath,
     maximum_bytes: usize,
     cancel: CancellationToken,
-) -> BridgeResult<(Vec<FileSnapshot>, RemoteContext)> {
-    if items.is_empty() {
-        return Err(snapshot_protocol_error("snapshot batch is empty"));
-    }
+) -> BridgeResult<(FileSnapshot, RemoteContext)> {
     let limits = bridge.runner.config().limits();
-    let protocol_limit = SNAPSHOT_PROTOCOL_BYTES
-        .checked_mul(items.len())
-        .ok_or_else(|| patch_too_large("snapshot protocol limit overflowed"))?;
-    let capture_metadata_limit = SNAPSHOT_CAPTURE_METADATA_BYTES
-        .checked_mul(items.len())
-        .ok_or_else(|| patch_too_large("snapshot metadata limit overflowed"))?;
     let desired_stdout_limit = u64::try_from(maximum_bytes)
         .ok()
         .and_then(|maximum| maximum.checked_add(1))
         .ok_or_else(|| patch_too_large("snapshot output limit overflowed"))?;
     let available_stdout = limits
         .max_output_bytes
-        .checked_sub(
-            u64::try_from(capture_metadata_limit)
-                .map_err(|_| patch_too_large("snapshot metadata limit is not representable"))?,
-        )
+        .checked_sub(SNAPSHOT_CAPTURE_METADATA_BYTES as u64)
         .filter(|available| *available > 0)
         .ok_or_else(|| patch_too_large("snapshot protocol reserve exceeds the output limit"))?;
     let stdout_limit = desired_stdout_limit.min(available_stdout);
@@ -580,14 +518,6 @@ async fn snapshot_files(
     let snapshot_read_limit = snapshot_maximum
         .checked_add(1)
         .ok_or_else(|| patch_too_large("snapshot output limit overflowed"))?;
-    let mut args = Vec::with_capacity(items.len().saturating_mul(3));
-    for item in items {
-        args.extend([
-            item.path.parent().to_owned(),
-            item.path.basename().to_owned(),
-            snapshot_maximum.to_string(),
-        ]);
-    }
     let owner = InternalSpoolOwner::new();
     let result = bridge
         .execute_readonly_fixed(
@@ -595,37 +525,27 @@ async fn snapshot_files(
                 kind: FixedOperationKind::ReadOnly,
                 host: host.to_owned(),
                 script: PATCH_SNAPSHOT_SCRIPT,
-                args,
+                args: vec![
+                    path.parent().to_owned(),
+                    path.basename().to_owned(),
+                    snapshot_maximum.to_string(),
+                ],
                 stdin: None,
                 rooted_paths: RootedPathInputs {
-                    argument_indices: &[],
-                    argument_stride: Some(RootedArgumentStride { start: 0, step: 3 }),
+                    argument_indices: &[0],
+                    argument_stride: None,
                     stdin_nul_paths: false,
                 },
                 required_capabilities: &["safe_write"],
                 stdout_limit,
-                stderr_limit: u64::try_from(capture_metadata_limit)
-                    .map_err(|_| patch_too_large("snapshot metadata limit is not representable"))?,
+                stderr_limit: SNAPSHOT_CAPTURE_METADATA_BYTES as u64,
                 timeout: Duration::from_millis(limits.command_timeout_ms),
                 cleanup: owner.registration(),
             },
             cancel,
         )
         .await
-        .map_err(|error| {
-            let error = snapshot_runner_error(error);
-            if error.code == ErrorCode::RequestTooLarge {
-                snapshot_item_error(
-                    error,
-                    items
-                        .last()
-                        .expect("non-empty snapshot batch has no final item")
-                        .display_path,
-                )
-            } else {
-                error
-            }
-        })?;
+        .map_err(snapshot_runner_error)?;
     let operation_context = context(
         host.to_owned(),
         result.capability.physical_root.clone(),
@@ -633,44 +553,29 @@ async fn snapshot_files(
         result.helper_mode,
     );
     let attach = |error| attach_fixed_result_context(error, host, &result);
-    let stderr = read_small_stream(&result.output, StreamKind::Stderr, protocol_limit)
+    let stderr = read_small_stream(&result.output, StreamKind::Stderr, SNAPSHOT_PROTOCOL_BYTES)
         .await
         .map_err(|error| {
-            let error = if error.code == ErrorCode::OutputLimit {
+            if error.code == ErrorCode::OutputLimit {
                 snapshot_protocol_error("snapshot metadata exceeds the protocol limit")
             } else {
                 error
-            };
-            snapshot_item_error(
-                error,
-                items
-                    .last()
-                    .expect("non-empty snapshot batch has no final item")
-                    .display_path,
-            )
+            }
         })
         .map_err(&attach)?;
     let stdout = read_small_stream(&result.output, StreamKind::Stdout, snapshot_read_limit)
         .await
         .map_err(|error| {
-            let error = if error.code == ErrorCode::OutputLimit {
+            if error.code == ErrorCode::OutputLimit {
                 patch_too_large("snapshot exceeded the aggregate base limit")
             } else {
                 error
-            };
-            snapshot_item_error(
-                error,
-                items
-                    .last()
-                    .expect("non-empty snapshot batch has no final item")
-                    .display_path,
-            )
+            }
         })
         .map_err(&attach)?;
-    let snapshots =
-        parse_snapshot_batch_protocol(&stderr, stdout, snapshot_maximum, items).map_err(&attach)?;
+    let snapshot = parse_snapshot_protocol(&stderr, stdout, snapshot_maximum).map_err(&attach)?;
     drop(owner);
-    Ok((snapshots, operation_context))
+    Ok((snapshot, operation_context))
 }
 
 fn snapshot_runner_error(mut error: BridgeError) -> BridgeError {
@@ -688,100 +593,6 @@ pub(super) fn parse_snapshot_protocol(
     maximum_bytes: usize,
 ) -> BridgeResult<FileSnapshot> {
     let fields = nul_fields(stderr)?;
-    parse_snapshot_fields(&fields, stdout, maximum_bytes)
-}
-
-fn parse_snapshot_batch_protocol(
-    stderr: &[u8],
-    stdout: Vec<u8>,
-    maximum_bytes: usize,
-    items: &[SnapshotBatchItem<'_>],
-) -> BridgeResult<Vec<FileSnapshot>> {
-    if stdout.len() > maximum_bytes {
-        let mut error = patch_too_large("patch base exceeds the configured write limit");
-        if let Some(item) = items.last() {
-            error.details.failed_path = Some(item.display_path.to_owned());
-        }
-        return Err(error);
-    }
-    let fields = nul_fields(stderr).map_err(|error| match items.last() {
-        Some(item) => snapshot_item_error(error, item.display_path),
-        None => error,
-    })?;
-    let mut field_offset = 0usize;
-    let mut stdout_offset = 0usize;
-    let mut snapshots = Vec::with_capacity(items.len());
-    for item in items {
-        let status = fields.get(field_offset).copied().ok_or_else(|| {
-            snapshot_item_error(
-                snapshot_protocol_error("snapshot status is missing"),
-                item.display_path,
-            )
-        })?;
-        let field_count = if status == b"STATUS=SUCCESS" { 7 } else { 1 };
-        let field_end = field_offset.checked_add(field_count).ok_or_else(|| {
-            snapshot_item_error(
-                snapshot_protocol_error("snapshot field count overflowed"),
-                item.display_path,
-            )
-        })?;
-        let record = fields.get(field_offset..field_end).ok_or_else(|| {
-            snapshot_item_error(
-                snapshot_protocol_error("snapshot protocol record is incomplete"),
-                item.display_path,
-            )
-        })?;
-        let raw = if status == b"STATUS=SUCCESS" {
-            let size = parse_snapshot_u64(record[1], b"SIZE=")
-                .and_then(|size| {
-                    usize::try_from(size)
-                        .map_err(|_| snapshot_protocol_error("snapshot size is not representable"))
-                })
-                .map_err(|error| snapshot_item_error(error, item.display_path))?;
-            if size > maximum_bytes {
-                return Err(snapshot_item_error(
-                    patch_too_large("patch base exceeds the configured write limit"),
-                    item.display_path,
-                ));
-            }
-            let stdout_end = stdout_offset.checked_add(size).ok_or_else(|| {
-                snapshot_item_error(BridgeError::read_conflict(), item.display_path)
-            })?;
-            let bytes = stdout.get(stdout_offset..stdout_end).ok_or_else(|| {
-                snapshot_item_error(BridgeError::read_conflict(), item.display_path)
-            })?;
-            stdout_offset = stdout_end;
-            bytes.to_vec()
-        } else {
-            Vec::new()
-        };
-        let snapshot = parse_snapshot_fields(record, raw, maximum_bytes)
-            .map_err(|error| snapshot_item_error(error, item.display_path))?;
-        snapshots.push(snapshot);
-        field_offset = field_end;
-    }
-    if field_offset != fields.len() || stdout_offset != stdout.len() {
-        let mut error = snapshot_protocol_error("snapshot batch contains trailing data");
-        if let Some(item) = items.last() {
-            error.details.failed_path = Some(item.display_path.to_owned());
-        }
-        return Err(error);
-    }
-    Ok(snapshots)
-}
-
-fn snapshot_item_error(mut error: BridgeError, display_path: &str) -> BridgeError {
-    if error.details.failed_path.is_none() {
-        error.details.failed_path = Some(display_path.to_owned());
-    }
-    error
-}
-
-fn parse_snapshot_fields(
-    fields: &[&[u8]],
-    stdout: Vec<u8>,
-    maximum_bytes: usize,
-) -> BridgeResult<FileSnapshot> {
     let status = fields
         .first()
         .copied()
@@ -804,7 +615,7 @@ fn parse_snapshot_fields(
             "patch base exceeds the configured write limit",
         ));
     }
-    match (status, fields) {
+    match (status, fields.as_slice()) {
         (b"STATUS=MISSING", [_]) => Ok(FileSnapshot::Missing),
         (b"STATUS=WRITE_CONFLICT", [_]) => {
             Err(write_conflict("patch base conflicts with the request"))
@@ -952,13 +763,6 @@ pub(super) async fn apply_patch(
     let all_paths = patches.iter().flat_map(mutation_paths).collect::<Vec<_>>();
     let resolved = resolve_patch_files(bridge, &host, patches)
         .map_err(|error| attach_preparation_progress(error, None, &all_paths))?;
-    if resolved.is_empty() {
-        return Err(attach_preparation_progress(
-            invalid_patch("patch contains no file operations"),
-            None,
-            &all_paths,
-        ));
-    }
     if cancel.is_cancelled() {
         return Err(attach_preparation_progress(
             BridgeError::new(ErrorCode::Cancelled, "remote patch was cancelled", false),
@@ -1147,52 +951,47 @@ async fn apply_patch_immediate(
     let all_paths = patches.iter().flat_map(mutation_paths).collect::<Vec<_>>();
     let resolved = resolve_patch_files(bridge, &host, patches)
         .map_err(|error| attach_preparation_progress(error, None, &all_paths))?;
-    if cancel.is_cancelled() {
-        return Err(attach_preparation_progress(
-            BridgeError::new(ErrorCode::Cancelled, "remote patch was cancelled", false),
-            None,
-            &all_paths,
-        ));
-    }
-    let mut batch_items = Vec::with_capacity(resolved.len().saturating_mul(2));
-    for file in &resolved {
-        batch_items.push(SnapshotBatchItem {
-            path: &file.source,
-            display_path: patch_path(&file.patch),
-        });
-        if let Some(destination_path) = &file.destination {
-            let display_path = file
-                .patch
-                .move_path
-                .as_deref()
-                .expect("resolved move destination has no patch path");
-            batch_items.push(SnapshotBatchItem {
-                path: destination_path,
-                display_path,
-            });
-        }
-    }
-    let (batch_snapshots, operation_context) =
-        snapshot_files(bridge, &host, &batch_items, maximum_bytes, cancel.clone())
-            .await
-            .map_err(|error| {
-                let failed_path = error.details.failed_path.clone();
-                attach_preparation_progress(error, failed_path.as_deref(), &all_paths)
-            })?;
-    let mut batch_snapshots = batch_snapshots.into_iter();
     let mut snapshots = Vec::with_capacity(resolved.len());
     let mut remaining_base_bytes = maximum_bytes;
+    let mut operation_context: Option<RemoteContext> = None;
     for file in &resolved {
-        let source = batch_snapshots.next().ok_or_else(|| {
-            attach_remote_context(
+        if cancel.is_cancelled() {
+            let error = attach_preparation_progress(
+                BridgeError::new(ErrorCode::Cancelled, "remote patch was cancelled", false),
+                None,
+                &all_paths,
+            );
+            return Err(match &operation_context {
+                Some(context) => attach_remote_context(error, context),
+                None => error,
+            });
+        }
+        let (source, snapshot_context) = snapshot_file(
+            bridge,
+            &host,
+            &file.source,
+            remaining_base_bytes,
+            cancel.clone(),
+        )
+        .await
+        .map_err(|error| {
+            attach_optional_remote_context(
+                attach_preparation_progress(error, Some(patch_path(&file.patch)), &all_paths),
+                operation_context.as_ref(),
+            )
+        })?;
+        if let Some(context) = &operation_context
+            && context.host != snapshot_context.host
+        {
+            return Err(attach_remote_context(
                 attach_preparation_progress(
-                    snapshot_protocol_error("snapshot batch result is incomplete"),
+                    BridgeError::read_conflict(),
                     Some(patch_path(&file.patch)),
                     &all_paths,
                 ),
-                &operation_context,
-            )
-        })?;
+                &snapshot_context,
+            ));
+        }
         if let FileSnapshot::Regular { bytes, .. } = &source {
             remaining_base_bytes =
                 remaining_base_bytes
@@ -1204,26 +1003,46 @@ async fn apply_patch_immediate(
                                 Some(patch_path(&file.patch)),
                                 &all_paths,
                             ),
-                            &operation_context,
+                            &snapshot_context,
                         )
                     })?;
         }
-        let destination = if file.destination.is_some() {
+        if operation_context.is_none() {
+            operation_context = Some(snapshot_context);
+        }
+        let destination = if let Some(destination_path) = &file.destination {
             let display_path = file
                 .patch
                 .move_path
                 .as_deref()
                 .expect("resolved move destination has no patch path");
-            let destination = batch_snapshots.next().ok_or_else(|| {
-                attach_remote_context(
+            let (destination, destination_context) = snapshot_file(
+                bridge,
+                &host,
+                destination_path,
+                remaining_base_bytes,
+                cancel.clone(),
+            )
+            .await
+            .map_err(|error| {
+                attach_optional_remote_context(
+                    attach_preparation_progress(error, Some(display_path), &all_paths),
+                    operation_context.as_ref(),
+                )
+            })?;
+            if operation_context
+                .as_ref()
+                .is_some_and(|context| context.host != destination_context.host)
+            {
+                return Err(attach_remote_context(
                     attach_preparation_progress(
-                        snapshot_protocol_error("snapshot batch result is incomplete"),
+                        BridgeError::read_conflict(),
                         Some(display_path),
                         &all_paths,
                     ),
-                    &operation_context,
-                )
-            })?;
+                    &destination_context,
+                ));
+            }
             if let FileSnapshot::Regular { bytes, .. } = &destination {
                 remaining_base_bytes =
                     remaining_base_bytes
@@ -1235,7 +1054,7 @@ async fn apply_patch_immediate(
                                     Some(display_path),
                                     &all_paths,
                                 ),
-                                &operation_context,
+                                &destination_context,
                             )
                         })?;
             }
@@ -1248,16 +1067,14 @@ async fn apply_patch_immediate(
             destination,
         });
     }
-    if batch_snapshots.next().is_some() {
-        return Err(attach_remote_context(
-            attach_preparation_progress(
-                snapshot_protocol_error("snapshot batch contains excess results"),
-                None,
-                &all_paths,
-            ),
-            &operation_context,
-        ));
-    }
+
+    let operation_context = operation_context.ok_or_else(|| {
+        attach_preparation_progress(
+            invalid_patch("patch contains no file operations"),
+            None,
+            &all_paths,
+        )
+    })?;
     let attach_after_snapshots = |error, failed_path: Option<String>| {
         attach_remote_context(
             attach_preparation_progress(error, failed_path.as_deref(), &all_paths),
@@ -1515,9 +1332,7 @@ mod tests {
 
     #[test]
     fn snapshot_script_and_protocol_are_closed() {
-        assert!(super::PATCH_SNAPSHOT_SCRIPT.contains("[ \"$#\" -ge 3 ]"));
-        assert!(super::PATCH_SNAPSHOT_SCRIPT.contains("$(( $# % 3 ))"));
-        assert!(super::PATCH_SNAPSHOT_SCRIPT.contains("while [ \"$#\" -gt 0 ]"));
+        assert!(super::PATCH_SNAPSHOT_SCRIPT.contains("[ \"$#\" -eq 3 ]"));
         assert!(!super::PATCH_SNAPSHOT_SCRIPT.contains("operation=$3"));
 
         let raw = vec![b'x'; 1_048_577];

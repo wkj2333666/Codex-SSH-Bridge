@@ -134,13 +134,6 @@ the complete guarded file state. Commands and Jobs that may change the remote
 filesystem invalidate clean generations; dirty locally buffered generations
 remain authoritative until synchronized or explicitly discarded.
 
-An immediate multi-file `remote_apply_patch` sends every source and move
-destination snapshot through one bounded fixed request. The remote side still
-performs the same no-follow stat, hash, read, and identity recheck for each
-path, and enforces the aggregate base-byte budget in request order. This
-removes one transport round trip per additional patch path without weakening
-per-file conflict attribution or the prepare-before-mutate barrier.
-
 ## Durable Job control
 
 Job control requires the persistent binary helper and transfers small typed
