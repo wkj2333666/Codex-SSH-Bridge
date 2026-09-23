@@ -6345,23 +6345,6 @@ fn spool_file_count(runtime: &std::path::Path) -> usize {
         .sum()
 }
 
-fn assert_no_dispatcher_request_artifacts(scratch: &std::path::Path) {
-    let unexpected = std::fs::read_dir(scratch)
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name())
-        .filter(|name| {
-            !name
-                .to_string_lossy()
-                .starts_with("codex-ssh-bridge-dispatcher.")
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        unexpected.is_empty(),
-        "dispatcher request artifacts remain: {unexpected:?}"
-    );
-}
-
 fn spool_files(runtime: &std::path::Path) -> Vec<std::path::PathBuf> {
     std::fs::read_dir(runtime)
         .unwrap()
