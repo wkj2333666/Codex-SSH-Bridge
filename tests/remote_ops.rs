@@ -1387,7 +1387,7 @@ async fn task78_patch_mutation_result_corruption_keeps_context_and_progress_trut
 }
 
 #[tokio::test]
-async fn task78_batched_snapshot_cancellation_keeps_context_without_guessing_a_path() {
+async fn task78_patch_second_snapshot_cancellation_keeps_first_snapshot_context() {
     let remote = tempfile::TempDir::new().unwrap();
     std::fs::write(remote.path().join("a"), b"old\n").unwrap();
     std::fs::write(remote.path().join("b"), b"old\n").unwrap();
@@ -1441,7 +1441,7 @@ async fn task78_batched_snapshot_cancellation_keeps_context_without_guessing_a_p
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Cancelled, "{error:?}");
     assert_task78_fixed_context(&error, remote.path());
-    assert_eq!(error.details.failed_path, None);
+    assert_eq!(error.details.failed_path.as_deref(), Some("b"));
     assert_eq!(error.details.changed_paths, Some(Vec::new()));
     assert_eq!(
         error.details.not_changed_paths,

@@ -614,7 +614,7 @@ async fn snapshot_files(
         .await
         .map_err(|error| {
             let error = snapshot_runner_error(error);
-            if items.len() == 1 || error.code == ErrorCode::RequestTooLarge {
+            if error.code == ErrorCode::RequestTooLarge {
                 snapshot_item_error(
                     error,
                     items
