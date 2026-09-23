@@ -334,7 +334,7 @@ case "${FAKE_SSH_MODE:-echo-argv}" in
 		;;
 	large-candidates|large-candidates-all-match)
 		case "$remote_command" in
-			*codex-sentinel-search-find*)
+			*'find -H "$root" -type f -print0'*)
 				candidate_root=${FAKE_SSH_CANDIDATE_ROOT:-.}
 				record_bytes=838
 				leaf_bytes=$((record_bytes - ${#candidate_root} - 9))

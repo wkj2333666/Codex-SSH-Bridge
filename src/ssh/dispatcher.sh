@@ -367,7 +367,7 @@ exit 0"
                         ;;
                     large-candidates|large-candidates-all-match)
                         case "$run_command" in
-                            *codex-sentinel-search-find*)
+                            *'find -H "$root" -type f -print0'*)
                                 run_command='record_bytes=838; leaf_bytes=$((record_bytes - 10)); leaf=$(dd if=/dev/zero bs=1 count="$leaf_bytes" 2>/dev/null | tr "\000" x); if [ "${FAKE_SSH_MODE-}" = large-candidates-all-match ]; then i=0; while [ "$i" -lt 10000 ]; do printf "./accept/%s\000" "$leaf"; i=$((i + 1)); done; else printf "./accept/%s\000" "$leaf"; i=1; while [ "$i" -lt 10000 ]; do printf "./reject/%s\000" "$leaf"; i=$((i + 1)); done; fi; lookahead_leaf_bytes=$((8608 - 10)); lookahead_leaf=$(dd if=/dev/zero bs=1 count="$lookahead_leaf_bytes" 2>/dev/null | tr "\000" y); if [ "${FAKE_SSH_MODE-}" = large-candidates-all-match ]; then printf "./accept/%s\000" "$lookahead_leaf"; else printf "./reject/%s\000" "$lookahead_leaf"; fi'
                                 ;;
                             *) run_command='cat >/dev/null' ;;

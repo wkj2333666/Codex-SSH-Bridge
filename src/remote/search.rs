@@ -1026,11 +1026,7 @@ mod tests {
         let root = controls.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let shim = controls.path().join("find");
-        std::fs::write(
-            &shim,
-            "#!/bin/sh\ncase \"$2\" in *codex-sentinel-search-find) printf '%s/.hidden\\000' \"$2\" ;; *) exec yes \"$2/file\" ;; esac\n",
-        )
-        .unwrap();
+        std::fs::write(&shim, "#!/bin/sh\nexec yes \"$2/file\"\n").unwrap();
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let mut child = Command::new("/bin/sh")
