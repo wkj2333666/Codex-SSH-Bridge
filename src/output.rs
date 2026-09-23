@@ -644,9 +644,7 @@ impl OutputStore {
         cancel: CancellationToken,
     ) -> BridgeResult<OutputReference> {
         retry_tombstones(&self.tombstones);
-        let _job = Arc::clone(&self.retention_jobs)
-            .try_acquire_owned()
-            .map_err(|_| retention_unavailable())?;
+        let _job = self.acquire_retention_job(&cancel).await?;
         let slot = Arc::clone(&self.entry_slots)
             .try_acquire_owned()
             .map_err(|_| retention_unavailable())?;
@@ -736,9 +734,7 @@ impl OutputStore {
         cancel: CancellationToken,
     ) -> BridgeResult<OutputReference> {
         retry_tombstones(&self.tombstones);
-        let _job = Arc::clone(&self.retention_jobs)
-            .try_acquire_owned()
-            .map_err(|_| retention_unavailable())?;
+        let _job = self.acquire_retention_job(&cancel).await?;
         let slot = Arc::clone(&self.entry_slots)
             .try_acquire_owned()
             .map_err(|_| retention_unavailable())?;
@@ -819,6 +815,19 @@ impl OutputStore {
             expires_at,
         );
         Ok(OutputReference(token))
+    }
+
+    async fn acquire_retention_job(
+        &self,
+        cancel: &CancellationToken,
+    ) -> BridgeResult<OwnedSemaphorePermit> {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(retention_cancelled()),
+            permit = Arc::clone(&self.retention_jobs).acquire_owned() => {
+                permit.map_err(|_| retention_unavailable())
+            }
+        }
     }
 
     pub async fn capture<Stdout, Stderr>(
@@ -2651,27 +2660,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task8_spool_quota_job_saturation_rejects_before_creating_a_temp() {
+    async fn task8_spool_quota_job_saturation_waits_before_creating_a_temp() {
         let base = tempfile::TempDir::new().unwrap();
         let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
-        let store = OutputStore::with_limits(&runtime, MIN_GLOBAL_SPOOL_QUOTA_BYTES, 1).unwrap();
+        let store =
+            Arc::new(OutputStore::with_limits(&runtime, MIN_GLOBAL_SPOOL_QUOTA_BYTES, 1).unwrap());
         let _job = Arc::clone(&store.retention_jobs)
             .try_acquire_owned()
             .unwrap();
         let before = std::fs::read_dir(store.spool_directory.path())
             .unwrap()
             .count();
-        let result = store
-            .retain_serialized_detail(
-                StoredProvenance::Aggregate {
-                    kind: StoredAggregateKind::Hosts,
-                    source_count: 1,
-                },
-                vec!["not serialized"],
-                CancellationToken::new(),
-            )
-            .await;
-        assert!(result.is_err());
+        let waiting_store = Arc::clone(&store);
+        let waiting = tokio::spawn(async move {
+            waiting_store
+                .retain_serialized_detail(
+                    StoredProvenance::Aggregate {
+                        kind: StoredAggregateKind::Hosts,
+                        source_count: 1,
+                    },
+                    vec!["not serialized"],
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        assert_eq!(
+            std::fs::read_dir(store.spool_directory.path())
+                .unwrap()
+                .count(),
+            before
+        );
+        drop(_job);
+        let reference = waiting.await.unwrap().unwrap();
+        let page = store
+            .read(&reference, StreamKind::Stdout, 0, 64)
+            .await
+            .unwrap();
+        assert_eq!(page.bytes, br#"["not serialized"]"#);
+    }
+
+    #[tokio::test]
+    async fn task8_spool_quota_job_wait_is_cancellable_without_creating_a_temp() {
+        let base = tempfile::TempDir::new().unwrap();
+        let runtime = RuntimePaths::ensure_from_base(base.path()).unwrap();
+        let store =
+            Arc::new(OutputStore::with_limits(&runtime, MIN_GLOBAL_SPOOL_QUOTA_BYTES, 1).unwrap());
+        let _job = Arc::clone(&store.retention_jobs)
+            .try_acquire_owned()
+            .unwrap();
+        let before = std::fs::read_dir(store.spool_directory.path())
+            .unwrap()
+            .count();
+        let cancel = CancellationToken::new();
+        let waiting_store = Arc::clone(&store);
+        let waiting_cancel = cancel.clone();
+        let waiting = tokio::spawn(async move {
+            waiting_store
+                .retain_serialized_detail(
+                    StoredProvenance::Aggregate {
+                        kind: StoredAggregateKind::Hosts,
+                        source_count: 1,
+                    },
+                    vec!["not serialized"],
+                    waiting_cancel,
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        let error = waiting.await.unwrap().unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
         assert_eq!(
             std::fs::read_dir(store.spool_directory.path())
                 .unwrap()
