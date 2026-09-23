@@ -4,7 +4,7 @@
 //! its existing private API.  This small std-only implementation is shared by
 //! the helper binary and its local wire-conformance tests.
 
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Write};
 
 const MAGIC: &str = "CXSB1";
 const MAX_HEADER_BYTES: usize = 256;

@@ -100,9 +100,7 @@ pub(crate) async fn read_frame<R: AsyncBufRead + Unpin>(
             ));
         }
         header.extend_from_slice(&buffered[..content_len]);
-        reader
-            .consume(content_len + usize::from(newline.is_some()))
-            .await;
+        reader.consume(content_len + usize::from(newline.is_some()));
         if newline.is_some() {
             break;
         }
