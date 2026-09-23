@@ -985,7 +985,8 @@ impl SessionInner {
                 .collect::<Vec<_>>()
         };
         for request in requests {
-            if let Some(sender) = request.lock().await.sender.take() {
+            let sender = request.lock().await.sender.take();
+            if let Some(sender) = sender {
                 let _ = sender.send(Err(error.clone()));
             }
         }
@@ -994,7 +995,8 @@ impl SessionInner {
     async fn fail_request(&self, request_id: u64, error: BridgeError) {
         let request = self.pending.lock().await.remove(&request_id);
         if let Some(request) = request {
-            if let Some(sender) = request.lock().await.sender.take() {
+            let sender = request.lock().await.sender.take();
+            if let Some(sender) = sender {
                 let _ = sender.send(Err(error));
             }
         }
