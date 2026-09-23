@@ -3390,7 +3390,7 @@ async fn task6_snapshot_success_raw_maximum_plus_one_is_contract_request_too_lar
     write_executable(
         &shim.path().join("dd"),
         format!(
-            "#!/bin/sh\nmatched=0\nfor argument do case \"$argument\" in if=*/target) matched=1;; esac; done\nif [ \"$matched\" -eq 1 ]; then marker={}; count=$(/usr/bin/cat \"$marker\" 2>/dev/null || printf 0); count=$((count + 1)); printf %s \"$count\" >\"$marker\"; if [ \"$count\" -eq 2 ]; then /usr/bin/dd \"$@\"; status=$?; [ \"$status\" -eq 0 ] || exit \"$status\"; printf y; exit 0; fi; fi\nexec /usr/bin/dd \"$@\"\n",
+            "#!/bin/sh\nmatched=0\nfor argument do case \"$argument\" in if=*/target) matched=1;; esac; done\nif [ \"$matched\" -eq 1 ]; then marker={}; count=$(/usr/bin/cat \"$marker\" 2>/dev/null || printf 0); count=$((count + 1)); printf %s \"$count\" >\"$marker\"; if [ \"$count\" -eq 1 ]; then /usr/bin/dd \"$@\"; status=$?; [ \"$status\" -eq 0 ] || exit \"$status\"; printf y; exit 0; fi; fi\nexec /usr/bin/dd \"$@\"\n",
             codex_ssh_bridge::quote::shell_word(count.to_str().unwrap()).unwrap(),
         ),
     );
@@ -3424,7 +3424,7 @@ async fn task6_snapshot_success_raw_maximum_plus_one_is_contract_request_too_lar
         "patch base exceeds the configured write limit"
     );
     assert_eq!(error.details.failed_path.as_deref(), Some("target"));
-    assert_eq!(std::fs::read_to_string(&count).unwrap(), "3");
+    assert_eq!(std::fs::read_to_string(&count).unwrap(), "1");
     assert_eq!(phase_log(&phases), ["S"]);
     assert_eq!(
         spool_file_count(&runtime.path().join("codex-ssh-bridge")),
@@ -3665,7 +3665,7 @@ async fn task6_snapshot_raw_read_partial_failure_is_closed_read_conflict() {
     write_executable(
         &shim.path().join("dd"),
         format!(
-            "#!/bin/sh\ncase \" $* \" in *\" if=./race bs=262144 status=none iflag=nofollow \"*) marker={}; count=$(/usr/bin/cat \"$marker\" 2>/dev/null || printf 0); count=$((count + 1)); printf %s \"$count\" >\"$marker\"; if [ \"$count\" -eq 2 ]; then printf partial; exit 9; fi;; esac\nexec /usr/bin/dd \"$@\"\n",
+            "#!/bin/sh\ncase \" $* \" in *\" if=./race bs=262144 status=none iflag=nofollow \"*) marker={}; count=$(/usr/bin/cat \"$marker\" 2>/dev/null || printf 0); count=$((count + 1)); printf %s \"$count\" >\"$marker\"; if [ \"$count\" -eq 1 ]; then printf partial; exit 9; fi;; esac\nexec /usr/bin/dd \"$@\"\n",
             codex_ssh_bridge::quote::shell_word(count.to_str().unwrap()).unwrap(),
         ),
     );
@@ -3697,7 +3697,7 @@ async fn task6_snapshot_raw_read_partial_failure_is_closed_read_conflict() {
     assert_ne!(error.code, ErrorCode::ProtocolError);
     assert_eq!(error.details.failed_path.as_deref(), Some("race"));
     assert_eq!(phase_log(&phases), ["S"]);
-    assert_eq!(std::fs::read_to_string(&count).unwrap(), "2");
+    assert_eq!(std::fs::read_to_string(&count).unwrap(), "1");
     assert_eq!(std::fs::read(remote.path().join("race")).unwrap(), b"old\n");
     assert_eq!(
         spool_file_count(&runtime.path().join("codex-ssh-bridge")),
@@ -7413,7 +7413,7 @@ async fn search_quote_amplification_over_frame_is_request_too_large() {
         .search(
             SearchRequest {
                 host: "dev".into(),
-                query: "'".repeat(300),
+                query: "'".repeat(2_000),
                 path: None,
                 globs: vec![],
                 max_results: None,

@@ -164,7 +164,7 @@ esac
 if [ -n "${FAKE_SSH_PHASE_LOG:-}" ]; then
     case "$remote_command" in
         *codex_snapshot_read*) printf 'S\n' >>"$FAKE_SSH_PHASE_LOG" ;;
-        *codex_mutation_stage\(\)*|*codex_classify_unreachable_parent\(\)*) printf 'M\n' >>"$FAKE_SSH_PHASE_LOG" ;;
+        *expected_content_hash=\$5*|*codex_classify_unreachable_parent\(\)*) printf 'M\n' >>"$FAKE_SSH_PHASE_LOG" ;;
     esac
 fi
 
