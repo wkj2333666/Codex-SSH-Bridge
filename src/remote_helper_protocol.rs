@@ -4,7 +4,7 @@
 //! its existing private API.  This small std-only implementation is shared by
 //! the helper binary and its local wire-conformance tests.
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 
 const MAGIC: &str = "CXSB1";
 const MAX_HEADER_BYTES: usize = 256;
@@ -66,39 +66,44 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-pub fn read_frame<R: Read>(reader: &mut R, max_payload: usize) -> io::Result<Option<Frame>> {
+pub fn read_frame<R: BufRead>(reader: &mut R, max_payload: usize) -> io::Result<Option<Frame>> {
     let mut header = Vec::with_capacity(64);
-    let mut byte = [0u8; 1];
     loop {
-        match reader.read_exact(&mut byte) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof && header.is_empty() => {
+        let buffered = reader.fill_buf()?;
+        if buffered.is_empty() {
+            if header.is_empty() {
                 return Ok(None);
             }
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "truncated SSH bridge frame header",
-                ));
-            }
-            Err(error) => return Err(error),
-        }
-        if byte[0] == b'\n' {
-            break;
-        }
-        if header.len() >= MAX_HEADER_BYTES {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SSH bridge frame header exceeds the configured bound",
+                io::ErrorKind::UnexpectedEof,
+                "truncated SSH bridge frame header",
             ));
         }
-        if !(0x20..0x7f).contains(&byte[0]) {
+
+        let newline = buffered.iter().position(|byte| *byte == b'\n');
+        let content_len = newline.unwrap_or(buffered.len());
+        let remaining = MAX_HEADER_BYTES - header.len();
+        let accepted = content_len.min(remaining);
+        if buffered[..accepted]
+            .iter()
+            .any(|byte| !(0x20..0x7f).contains(byte))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "SSH bridge frame header is not ASCII",
             ));
         }
-        header.push(byte[0]);
+        if content_len > remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SSH bridge frame header exceeds the configured bound",
+            ));
+        }
+        header.extend_from_slice(&buffered[..content_len]);
+        reader.consume(content_len + usize::from(newline.is_some()));
+        if newline.is_some() {
+            break;
+        }
     }
 
     let header = std::str::from_utf8(&header).map_err(|_| {

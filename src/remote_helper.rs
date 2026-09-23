@@ -132,7 +132,7 @@ struct JobSpec {
     request: JobControlRequest,
 }
 
-pub fn run<R, W>(mut reader: R, writer: W, config: HelperConfig) -> io::Result<()>
+pub fn run<R, W>(reader: R, writer: W, config: HelperConfig) -> io::Result<()>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -149,6 +149,7 @@ where
         requests: Mutex::new(HashMap::new()),
         closed: AtomicBool::new(false),
     });
+    let mut reader = BufReader::new(reader);
     send_hello(&shared, config.helper_version)?;
 
     let mut workers = Vec::new();
@@ -304,7 +305,7 @@ fn send_stream_frame<W: Write>(
     writer.flush()
 }
 
-fn read_request<R: Read>(
+fn read_request<R: BufRead>(
     reader: &mut R,
     open: Frame,
     max_frame_bytes: usize,
@@ -419,7 +420,7 @@ fn ensure_job_fields(fields: &BTreeMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
-fn read_search_request<R: Read>(
+fn read_search_request<R: BufRead>(
     reader: &mut R,
     open: Frame,
     fields: BTreeMap<String, String>,
@@ -470,7 +471,7 @@ fn read_search_request<R: Read>(
     }))
 }
 
-fn read_data<R: Read>(
+fn read_data<R: BufRead>(
     reader: &mut R,
     open: &Frame,
     expected_length: usize,

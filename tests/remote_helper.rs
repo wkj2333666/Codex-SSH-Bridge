@@ -30,7 +30,7 @@ fn helper_wire_round_trips_binary_and_empty_payloads() {
     for frame in &frames {
         write_frame(&mut bytes, frame, 64).unwrap();
     }
-    let mut input = bytes.as_slice();
+    let mut input = BufReader::with_capacity(1, Cursor::new(bytes));
     assert_eq!(read_frame(&mut input, 64).unwrap(), Some(frames[0].clone()));
     assert_eq!(read_frame(&mut input, 64).unwrap(), Some(frames[1].clone()));
     assert_eq!(read_frame(&mut input, 64).unwrap(), None);
@@ -48,6 +48,25 @@ fn helper_wire_rejects_oversized_and_truncated_payloads() {
 
     let mut truncated = Cursor::new(b"CXSB1 DATA 1 4\nxy".to_vec());
     assert!(read_frame(&mut truncated, 64).is_err());
+}
+
+#[test]
+fn helper_wire_header_scan_preserves_ascii_and_exact_size_boundaries() {
+    let mut exact = vec![b' '; 256];
+    exact.push(b'\n');
+    let error = read_frame(&mut Cursor::new(exact), 64).unwrap_err();
+    assert_eq!(error.to_string(), "malformed SSH bridge frame header");
+
+    let mut oversized = vec![b' '; 257];
+    oversized.push(b'\n');
+    let error = read_frame(&mut Cursor::new(oversized), 64).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "SSH bridge frame header exceeds the configured bound"
+    );
+
+    let error = read_frame(&mut Cursor::new(b"CXSB1 READY 1 \xff\n".to_vec()), 64).unwrap_err();
+    assert_eq!(error.to_string(), "SSH bridge frame header is not ASCII");
 }
 
 fn helper_path() -> PathBuf {

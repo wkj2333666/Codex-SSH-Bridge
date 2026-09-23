@@ -1,6 +1,7 @@
 use std::io;
 
-use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use memchr::memchr;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const MAGIC: &str = "CXSB1";
 const MAX_HEADER_BYTES: usize = 256;
@@ -68,36 +69,43 @@ pub(crate) async fn read_frame<R: AsyncBufRead + Unpin>(
 ) -> io::Result<Option<Frame>> {
     let mut header = Vec::with_capacity(64);
     loop {
-        let mut byte = [0u8; 1];
-        match reader.read_exact(&mut byte).await {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof && header.is_empty() => {
+        let buffered = reader.fill_buf().await?;
+        if buffered.is_empty() {
+            if header.is_empty() {
                 return Ok(None);
             }
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "truncated SSH bridge frame header",
-                ));
-            }
-            Err(error) => return Err(error),
-        }
-        if byte[0] == b'\n' {
-            break;
-        }
-        if header.len() >= MAX_HEADER_BYTES {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SSH bridge frame header exceeds the configured bound",
+                io::ErrorKind::UnexpectedEof,
+                "truncated SSH bridge frame header",
             ));
         }
-        if !(0x20..0x7f).contains(&byte[0]) {
+
+        let newline = memchr(b'\n', buffered);
+        let content_len = newline.unwrap_or(buffered.len());
+        let remaining = MAX_HEADER_BYTES - header.len();
+        let accepted = content_len.min(remaining);
+        if buffered[..accepted]
+            .iter()
+            .any(|byte| !(0x20..0x7f).contains(byte))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "SSH bridge frame header is not ASCII",
             ));
         }
-        header.push(byte[0]);
+        if content_len > remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SSH bridge frame header exceeds the configured bound",
+            ));
+        }
+        header.extend_from_slice(&buffered[..content_len]);
+        reader
+            .consume(content_len + usize::from(newline.is_some()))
+            .await;
+        if newline.is_some() {
+            break;
+        }
     }
 
     let header = std::str::from_utf8(&header).map_err(|_| {
@@ -299,6 +307,34 @@ mod tests {
 
         let mut partial = BufReader::new(Cursor::new(b"CXSB1 READY".to_vec()));
         assert!(read_frame(&mut partial, 64).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn header_scan_preserves_ascii_and_exact_size_boundaries() {
+        let mut exact = vec![b' '; super::MAX_HEADER_BYTES];
+        exact.push(b'\n');
+        let error = read_frame(&mut BufReader::new(Cursor::new(exact)), 64)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "malformed SSH bridge frame header");
+
+        let mut oversized = vec![b' '; super::MAX_HEADER_BYTES + 1];
+        oversized.push(b'\n');
+        let error = read_frame(&mut BufReader::new(Cursor::new(oversized)), 64)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "SSH bridge frame header exceeds the configured bound"
+        );
+
+        let error = read_frame(
+            &mut BufReader::new(Cursor::new(b"CXSB1 READY 1 \xff\n".to_vec())),
+            64,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "SSH bridge frame header is not ASCII");
     }
 
     #[allow(dead_code)]
