@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
+use bytes::{Bytes, BytesMut};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
@@ -1392,7 +1393,7 @@ fn create_detail_file(directory: &Path) -> BridgeResult<(String, PathBuf, std::f
 }
 
 enum StreamEvent {
-    Bytes { stream: StreamKind, bytes: Vec<u8> },
+    Bytes { stream: StreamKind, bytes: Bytes },
     Finished { error: Option<io::Error> },
 }
 
@@ -1400,18 +1401,18 @@ async fn drain_stream<R>(mut reader: R, stream: StreamKind, sender: mpsc::Sender
 where
     R: AsyncRead + Unpin,
 {
-    let mut buffer = vec![0; READ_BUFFER_BYTES];
     loop {
-        match reader.read(&mut buffer).await {
+        let mut buffer = BytesMut::with_capacity(READ_BUFFER_BYTES);
+        match reader.read_buf(&mut buffer).await {
             Ok(0) => {
                 let _ = sender.send(StreamEvent::Finished { error: None }).await;
                 return;
             }
-            Ok(count) => {
+            Ok(_) => {
                 if sender
                     .send(StreamEvent::Bytes {
                         stream,
-                        bytes: buffer[..count].to_vec(),
+                        bytes: buffer.freeze(),
                     })
                     .await
                     .is_err()
