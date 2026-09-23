@@ -385,16 +385,22 @@ struct PreparedBatch {
 }
 
 fn prepare_batch(items: &[CommitItem]) -> Result<PreparedBatch, EditError> {
-    let mut args = Vec::with_capacity(items.len().saturating_mul(ITEM_ARGUMENTS));
-    let stdin_bytes = items.iter().try_fold(0usize, |total, item| {
-        total
-            .checked_add(match &item.desired {
-                DesiredState::Present(bytes) => bytes.len(),
-                DesiredState::Deleted => 0,
-            })
-            .ok_or_else(|| permanent("batch stdin length overflowed"))
-    })?;
+    let (args, stdin_bytes) = prepare_batch_arguments(items, true)?;
     let mut stdin = Vec::with_capacity(stdin_bytes);
+    for item in items {
+        if let DesiredState::Present(bytes) = &item.desired {
+            stdin.extend_from_slice(bytes);
+        }
+    }
+    Ok(PreparedBatch { args, stdin })
+}
+
+fn prepare_batch_arguments(
+    items: &[CommitItem],
+    hash_contents: bool,
+) -> Result<(Vec<String>, usize), EditError> {
+    let mut args = Vec::with_capacity(items.len().saturating_mul(ITEM_ARGUMENTS));
+    let mut stdin_bytes = 0usize;
     for item in items {
         let (parent, basename) = split_parent_basename(&item.key.path).map_err(map_bridge_error)?;
         let (base_kind, base_hash, mode) = match &item.base {
@@ -403,8 +409,14 @@ fn prepare_batch(items: &[CommitItem]) -> Result<PreparedBatch, EditError> {
         };
         let (desired_kind, size, hash, desired_mode) = match &item.desired {
             DesiredState::Present(bytes) => {
-                let hash = format!("{:x}", Sha256::digest(bytes));
-                stdin.extend_from_slice(bytes);
+                stdin_bytes = stdin_bytes
+                    .checked_add(bytes.len())
+                    .ok_or_else(|| permanent("batch stdin length overflowed"))?;
+                let hash = if hash_contents {
+                    format!("{:x}", Sha256::digest(bytes))
+                } else {
+                    "0".repeat(64)
+                };
                 ("P", bytes.len(), hash, mode)
             }
             DesiredState::Deleted => ("D", 0, String::new(), 0),
@@ -420,7 +432,7 @@ fn prepare_batch(items: &[CommitItem]) -> Result<PreparedBatch, EditError> {
             format!("{desired_mode:o}"),
         ]);
     }
-    Ok(PreparedBatch { args, stdin })
+    Ok((args, stdin_bytes))
 }
 
 fn partition_items(
@@ -453,11 +465,11 @@ fn partition_items(
 }
 
 fn batch_transport_bytes(items: &[CommitItem]) -> Result<usize, EditError> {
-    let prepared = prepare_batch(items)?;
-    render_fixed_command(BATCH_EDIT_SCRIPT, &prepared.args)
+    let (args, stdin_bytes) = prepare_batch_arguments(items, false)?;
+    render_fixed_command(BATCH_EDIT_SCRIPT, &args)
         .map_err(map_bridge_error)?
         .len()
-        .checked_add(prepared.stdin.len())
+        .checked_add(stdin_bytes)
         .ok_or_else(|| permanent("batch transport length overflowed"))
 }
 
@@ -744,6 +756,24 @@ mod tests {
                 .all(|partition| batch_transport_bytes(partition).unwrap() < two)
         );
         assert!(one < two);
+    }
+
+    #[test]
+    fn sizing_without_payload_hashing_matches_the_encoded_batch_exactly() {
+        let items = [
+            item(
+                "/repo/quote-'",
+                DesiredState::Present(Arc::from(vec![b'x'; 257])),
+            ),
+            item("/repo/deleted", DesiredState::Deleted),
+        ];
+        let prepared = prepare_batch(&items).unwrap();
+        let encoded = render_fixed_command(BATCH_EDIT_SCRIPT, &prepared.args)
+            .unwrap()
+            .len()
+            + prepared.stdin.len();
+
+        assert_eq!(batch_transport_bytes(&items).unwrap(), encoded);
     }
 
     #[test]

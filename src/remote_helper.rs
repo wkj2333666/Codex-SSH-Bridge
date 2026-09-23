@@ -189,6 +189,7 @@ where
                                 payload: Vec::new(),
                             },
                         )?;
+                        reap_finished_workers(&mut workers);
                         let worker_shared = Arc::clone(&shared);
                         workers.push(thread::spawn(move || {
                             run_request(worker_shared, spec, control);
@@ -228,6 +229,18 @@ where
         let _ = worker.join();
     }
     Ok(())
+}
+
+fn reap_finished_workers(workers: &mut Vec<thread::JoinHandle<()>>) {
+    let mut index = 0;
+    while index < workers.len() {
+        if workers[index].is_finished() {
+            let worker = workers.swap_remove(index);
+            let _ = worker.join();
+        } else {
+            index += 1;
+        }
+    }
 }
 
 fn send_hello<W: Write>(shared: &Arc<Shared<W>>, version: &str) -> io::Result<()> {
@@ -1401,6 +1414,23 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_worker_handles_are_reaped_during_a_long_lived_session() {
+        let (completed, receiver) = std::sync::mpsc::channel();
+        let mut workers = (0..64)
+            .map(|_| {
+                let completed = completed.clone();
+                thread::spawn(move || completed.send(()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        drop(completed);
+        for _ in receiver {}
+
+        reap_finished_workers(&mut workers);
+
+        assert!(workers.is_empty());
+    }
 
     #[test]
     fn vectorized_search_preserves_matches_across_read_buffers() {
