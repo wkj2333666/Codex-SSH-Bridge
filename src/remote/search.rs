@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::time::Duration;
@@ -373,7 +374,7 @@ pub(super) async fn search(
             .checked_add(1)
             .ok_or_else(|| protocol_error("search candidate count overflowed"))
             .map_err(&attach_candidates)?;
-        let relative = OsString::from_vec(relative.to_vec());
+        let relative = os_string_from_remote_bytes(relative);
         let relative = Path::new(&relative);
         let matches_glob = request.globs.is_empty()
             || globs.is_match(relative)
@@ -838,7 +839,7 @@ async fn parse_grep_filtered(
         retain,
         record_limit,
         |relative| {
-            let relative = OsString::from_vec(relative.to_vec());
+            let relative = os_string_from_remote_bytes(relative);
             let relative = Path::new(&relative);
             globs_empty
                 || globs.is_match(relative)
@@ -848,6 +849,16 @@ async fn parse_grep_filtered(
         },
     )
     .await
+}
+
+#[cfg(unix)]
+fn os_string_from_remote_bytes(value: &[u8]) -> OsString {
+    OsString::from_vec(value.to_vec())
+}
+
+#[cfg(windows)]
+fn os_string_from_remote_bytes(value: &[u8]) -> OsString {
+    OsString::from(String::from_utf8_lossy(value).into_owned())
 }
 
 async fn parse_grep(

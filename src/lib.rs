@@ -6,11 +6,14 @@ pub mod job_protocol;
 pub mod mcp;
 pub mod output;
 pub mod path;
+pub(crate) mod platform;
 pub mod profile;
 pub mod quote;
 pub mod remote;
+#[cfg(unix)]
 pub mod remote_helper;
 pub mod remote_helper_protocol;
+#[cfg(unix)]
 pub mod remote_job_runner;
 pub mod ssh;
 

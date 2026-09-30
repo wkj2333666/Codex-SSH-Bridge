@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -621,6 +622,7 @@ impl OutputStore {
             .prefix("output-")
             .tempdir_in(runtime.directory())
             .map_err(BridgeError::io)?;
+        #[cfg(unix)]
         std::fs::set_permissions(
             spool_directory.path(),
             std::fs::Permissions::from_mode(0o700),
@@ -1918,11 +1920,12 @@ fn create_spool(
 }
 
 fn create_private_file(path: &Path) -> io::Result<std::fs::File> {
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    #[cfg(unix)]
     if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
         drop(file);
         let _ = std::fs::remove_file(path);

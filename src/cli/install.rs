@@ -1306,7 +1306,11 @@ fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
             libc::RENAME_NOREPLACE,
         )
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) }
+            as libc::c_long;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = -1;
     if result == 0 {
         Ok(())

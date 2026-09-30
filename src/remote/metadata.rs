@@ -393,14 +393,15 @@ fn decoded_sort_key(value: &super::EncodedValue) -> Vec<u8> {
 }
 
 fn kind_from_mode(mode: u32) -> RemoteFileKind {
-    match mode & libc::S_IFMT {
-        libc::S_IFREG => RemoteFileKind::File,
-        libc::S_IFDIR => RemoteFileKind::Directory,
-        libc::S_IFLNK => RemoteFileKind::Symlink,
-        libc::S_IFBLK => RemoteFileKind::BlockDevice,
-        libc::S_IFCHR => RemoteFileKind::CharacterDevice,
-        libc::S_IFIFO => RemoteFileKind::Fifo,
-        libc::S_IFSOCK => RemoteFileKind::Socket,
+    // These bits describe the remote POSIX stat result, not the local host.
+    match mode & 0o170000 {
+        0o100000 => RemoteFileKind::File,
+        0o040000 => RemoteFileKind::Directory,
+        0o120000 => RemoteFileKind::Symlink,
+        0o060000 => RemoteFileKind::BlockDevice,
+        0o020000 => RemoteFileKind::CharacterDevice,
+        0o010000 => RemoteFileKind::Fifo,
+        0o140000 => RemoteFileKind::Socket,
         _ => RemoteFileKind::Other,
     }
 }

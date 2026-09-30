@@ -1,7 +1,11 @@
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -57,11 +61,15 @@ pub fn validate_sshfs_mountpoint(path: &Path, allow_nonempty: bool) -> BridgeRes
 #[derive(Debug)]
 pub(crate) struct ValidatedMountpoint {
     path: PathBuf,
+    #[cfg(unix)]
     directory: File,
+    #[cfg(unix)]
     device: u64,
+    #[cfg(unix)]
     inode: u64,
 }
 
+#[cfg(unix)]
 impl ValidatedMountpoint {
     pub(crate) fn open(path: &Path, allow_nonempty: bool) -> BridgeResult<Self> {
         if !path.is_absolute() {
@@ -161,6 +169,31 @@ impl ValidatedMountpoint {
             .ok_or_else(|| BridgeError::io("mountpoint fdinfo has no mount ID"))?
             .parse::<u64>()
             .map_err(|_| BridgeError::io("mountpoint fdinfo mount ID is invalid"))
+    }
+}
+
+#[cfg(windows)]
+impl ValidatedMountpoint {
+    pub(crate) fn open(_path: &Path, _allow_nonempty: bool) -> BridgeResult<Self> {
+        Err(BridgeError::invalid_argument(
+            "SSHFS commands are not supported by the native Windows build",
+        ))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn ensure_path_binding(&self) -> BridgeResult<()> {
+        Err(BridgeError::invalid_argument(
+            "SSHFS commands are not supported by the native Windows build",
+        ))
+    }
+
+    pub(crate) fn mount_id(&self) -> BridgeResult<u64> {
+        Err(BridgeError::invalid_argument(
+            "SSHFS commands are not supported by the native Windows build",
+        ))
     }
 }
 

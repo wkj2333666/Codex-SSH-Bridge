@@ -215,10 +215,10 @@ impl Config {
     }
 
     fn merge_ssh_aliases(&mut self) {
-        let Some(home) = nonempty_environment("HOME") else {
+        let Some(home) = home_directory() else {
             return;
         };
-        self.merge_ssh_aliases_from(&PathBuf::from(home).join(".ssh/config"));
+        self.merge_ssh_aliases_from(&home.join(".ssh/config"));
     }
 
     fn merge_ssh_aliases_from(&mut self, ssh_config: &Path) {
@@ -578,9 +578,7 @@ fn collect_ssh_aliases(
 fn expand_ssh_include(source: &Path, pattern: &str) -> Vec<PathBuf> {
     let pattern = pattern
         .strip_prefix("~/")
-        .and_then(|suffix| {
-            nonempty_environment("HOME").map(|home| PathBuf::from(home).join(suffix))
-        })
+        .and_then(|suffix| home_directory().map(|home| home.join(suffix)))
         .unwrap_or_else(|| {
             let path = PathBuf::from(pattern);
             if path.is_absolute() {
@@ -622,15 +620,31 @@ fn expand_ssh_include(source: &Path, pattern: &str) -> Vec<PathBuf> {
 }
 
 fn default_config_path() -> BridgeResult<PathBuf> {
+    #[cfg(unix)]
     let base = nonempty_environment("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| nonempty_environment("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .or_else(|| home_directory().map(|home| home.join(".config")))
         .ok_or_else(|| {
             BridgeError::invalid_config(
                 "cannot determine config path: XDG_CONFIG_HOME and HOME are unset",
             )
         })?;
+    #[cfg(windows)]
+    let base = nonempty_environment("APPDATA")
+        .map(PathBuf::from)
+        .or_else(home_directory)
+        .ok_or_else(|| {
+            BridgeError::invalid_config(
+                "cannot determine config path: APPDATA, USERPROFILE, and HOME are unset",
+            )
+        })?;
     Ok(base.join("codex-ssh-bridge").join("config.toml"))
+}
+
+fn home_directory() -> Option<PathBuf> {
+    nonempty_environment("HOME")
+        .map(PathBuf::from)
+        .or_else(|| nonempty_environment("USERPROFILE").map(PathBuf::from))
 }
 
 fn nonempty_environment(name: &str) -> Option<OsString> {
