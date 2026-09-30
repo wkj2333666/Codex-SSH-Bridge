@@ -56,6 +56,18 @@ const CONTROL_FILENAME_BYTES: usize = 3 + 32;
 const UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
 pub(crate) const SERVER_ALIVE_INTERVAL_SECONDS: u64 = 15;
 pub(crate) const SERVER_ALIVE_COUNT_MAX: u64 = 3;
+#[cfg(unix)]
+const SSH_G_OPTIONS: &[&str] = &[
+    "BatchMode=yes",
+    "StrictHostKeyChecking=yes",
+    "ForwardAgent=no",
+    "ForwardX11=no",
+    "ClearAllForwardings=yes",
+    "PermitLocalCommand=no",
+    "RequestTTY=no",
+    "ControlPersist=5",
+];
+#[cfg(windows)]
 const SSH_G_OPTIONS: &[&str] = &[
     "BatchMode=yes",
     "StrictHostKeyChecking=yes",

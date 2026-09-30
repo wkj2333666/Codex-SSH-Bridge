@@ -305,7 +305,9 @@ fn parse_sshfs_mount_status_matching(
     #[cfg(unix)]
     let expected = mountpoint.as_os_str().as_bytes();
     #[cfg(not(unix))]
-    let expected = mountpoint.as_os_str().to_string_lossy().as_bytes();
+    let expected_owned = mountpoint.as_os_str().to_string_lossy();
+    #[cfg(not(unix))]
+    let expected = expected_owned.as_bytes();
 
     for line in bytes.split(|byte| *byte == b'\n') {
         if line.is_empty() {
