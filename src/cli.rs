@@ -729,7 +729,7 @@ async fn terminate_local_process_group(process_group: i32) {
         signal_local_process_group(process_group, libc::SIGKILL);
     }
     #[cfg(windows)]
-    let _ = process_group;
+    crate::platform::terminate_local_process(process_group);
 }
 
 #[cfg(unix)]

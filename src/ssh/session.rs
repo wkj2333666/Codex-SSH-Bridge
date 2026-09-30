@@ -1680,14 +1680,14 @@ fn terminate_process_group(process_group: i32) {
     #[cfg(unix)]
     signal_process_group(process_group, libc::SIGTERM);
     #[cfg(windows)]
-    let _ = process_group;
+    crate::platform::terminate_local_process(process_group);
 }
 
 fn force_kill_process_group(process_group: i32) {
     #[cfg(unix)]
     signal_process_group(process_group, libc::SIGKILL);
     #[cfg(windows)]
-    let _ = process_group;
+    crate::platform::terminate_local_process(process_group);
 }
 
 #[cfg(unix)]

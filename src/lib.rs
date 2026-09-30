@@ -6,6 +6,7 @@ pub mod job_protocol;
 pub mod mcp;
 pub mod output;
 pub mod path;
+pub(crate) mod platform;
 pub mod profile;
 pub mod quote;
 pub mod remote;
