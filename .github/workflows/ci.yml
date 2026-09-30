@@ -29,10 +29,13 @@ jobs:
         include:
           - runner: macos-15
             target: aarch64-apple-darwin
+            binary: codex-ssh-bridge
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+            binary: codex-ssh-bridge
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
+            binary: codex-ssh-bridge.exe
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -43,6 +46,10 @@ jobs:
 
       - name: Build native release binary
         run: cargo +${{ env.RUST_TOOLCHAIN }} build --release --locked --target ${{ matrix.target }} --bin codex-ssh-bridge
+
+      - name: Smoke-test native release binary
+        shell: bash
+        run: target/${{ matrix.target }}/release/${{ matrix.binary }} --help
 
   quality:
     name: Rust quality and tests

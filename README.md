@@ -43,11 +43,11 @@ reboot. `remote_run` remains synchronous.
 
 ## Requirements
 
-- Local Linux host with Rust 1.91.1 or newer to build the bridge.
-- Local OpenSSH client at `/usr/bin/ssh`.
+- Local Linux, macOS, or 64-bit Windows host with Rust 1.91.1 or newer to build the bridge.
+- Local OpenSSH client at `/usr/bin/ssh` on Linux/macOS or the Windows OpenSSH client at `%SystemRoot%\System32\OpenSSH\ssh.exe`.
 - Key-based or local-agent authentication and verified host keys.
 - Remote `sshd`, a POSIX sh, a GNU- or BSD-compatible `stat`, and the ordinary utilities checked by `doctor`; Bash is optional. `shell=login` additionally needs an account shell that can be resolved through `getent passwd` or, when `getent` is absent, one unique readable `/etc/passwd` record.
-- Optional local `sshfs` and `fusermount3` for the human mount commands.
+- Optional local `sshfs` and `fusermount3` for the Linux-only human mount commands.
 - Common Linux remote architectures use the bundled helper; new or unsupported hosts remain usable through the shell fallback. The local bridge binary must match the local host.
 
 ## Build and package locally
@@ -71,7 +71,7 @@ git tag v<version>
 git push origin v<version>
 ```
 
-The release workflow publishes Linux binaries and SHA-256 files for:
+The release workflow publishes binaries and SHA-256 files for:
 
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
@@ -81,8 +81,12 @@ The release workflow publishes Linux binaries and SHA-256 files for:
 - `riscv64gc-unknown-linux-gnu`
 - `powerpc64le-unknown-linux-gnu`
 - `s390x-unknown-linux-gnu`
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `x86_64-pc-windows-msvc`
 
-Each archive contains `bin/codex-ssh-bridge`, the Skill and configuration
+Linux and macOS use `.tar.gz`; Windows uses `.zip`. Each archive contains the
+native bridge under `bin/`, the Skill and configuration
 templates, and `remote-helpers/` with helpers for all six supported Linux
 architectures: static musl helpers for `x86_64`, `aarch64`, and `armv7l`, plus
 GNU-target helpers for `riscv64`, `ppc64le`, and `s390x`.
@@ -109,10 +113,12 @@ ssh ALIAS -- 'find ~/.local/share/codex-ssh-bridge/helpers -mindepth 1 -maxdepth
 This deletes every bridge helper version for that account. Verify `ALIAS`
 before running it; do not paste an unverified host name into the command.
 
-Download the archive matching the local Codex host, extract it to a private
-path, and run `bin/codex-ssh-bridge install --user --apply`; the installer
-registers the stable local MCP path and links the Skill. Windows and macOS assets are not produced
-because the bridge currently requires Linux OpenSSH and Linux SSHFS tooling.
+Download the archive matching the local Codex host and extract it to a private
+path. On Linux or macOS, run `bin/codex-ssh-bridge install --user --apply`; the
+installer registers the stable local MCP path and links the Skill. On Windows,
+register the absolute `bin\codex-ssh-bridge.exe` path with the single `mcp`
+argument and copy `skills\remote-ssh-ops` into the local Codex Skills directory;
+the Windows build intentionally does not mutate Codex installation state yet.
 
 ## Configure hosts
 
@@ -131,10 +137,13 @@ ssh devbox
 ./target/release/codex-ssh-bridge doctor devbox
 ```
 
-Future aliases are discovered automatically from `~/.ssh/config` and its
+Future aliases are discovered automatically from `~/.ssh/config` (or
+`%USERPROFILE%\.ssh\config` on Windows) and its
 supported `Include` files. MCP operations do not use a configured root to
 infer paths. The default local config is
-`~/.config/codex-ssh-bridge/config.toml`; [config.example.toml](config.example.toml)
+`~/.config/codex-ssh-bridge/config.toml` on Unix and
+`%APPDATA%\codex-ssh-bridge\config.toml` on Windows;
+[config.example.toml](config.example.toml)
 documents limits. It accepts configuration `version = 2` and contains only
 global transport and bounded-I/O limits—never credentials.
 
@@ -147,8 +156,8 @@ and explicit conflict or unknown-outcome reporting.
 ## Install for local Codex
 
 Release archives contain the native Rust bridge, its Skill, and only the public
-documentation needed by users. Run the packaged binary from its extracted
-directory; installation is a dry-run until `--apply` is supplied:
+documentation needed by users. On Linux and macOS, run the packaged binary from
+its extracted directory; installation is a dry-run until `--apply` is supplied:
 
 ```bash
 ./bin/codex-ssh-bridge install --user

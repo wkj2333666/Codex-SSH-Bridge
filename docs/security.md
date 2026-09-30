@@ -140,7 +140,7 @@ Install and uninstall are dry-run unless `--apply` is present. Apply mode:
 - re-queries Codex after add/remove success, failure, or timeout and compensates observed partial mutation;
 - removes only content matching the recorded installation identity.
 
-The lock serializes this bridge's transactions. The local Unix user remains trusted: a separate process running as that same user can ignore the lock and directly edit Codex configuration, and the current Codex CLI has no compare-and-swap remove operation. Final rechecks detect many such races, but this is not a hostile-same-UID isolation mechanism.
+The lock serializes this bridge's transactions. The local OS account remains trusted: a separate process running as that same account can ignore the lock and directly edit Codex configuration, and the current Codex CLI has no compare-and-swap remove operation. Final rechecks detect many such races, but this is not hostile-same-account isolation.
 
 The identity is content-hashed, so overwriting an active bundle in place is rejected rather than treated as an implicit upgrade. Preserve the old version long enough to run its identity-matching uninstall, then install the reviewed new version from a different durable directory.
 
@@ -148,7 +148,7 @@ Source validation remains component-by-component and no-follow. A real current-u
 
 ## SSHFS boundary
 
-SSHFS is human-only and absent from MCP. A mount does not change where a shell command runs. Mount/unmount validate a stable current-user-owned directory identity and the current Linux mount table before calling local helpers. Same-UID processes remain inside the local trust boundary.
+SSHFS is Linux-only, human-only, and absent from MCP. A mount does not change where a shell command runs. Mount/unmount validate a stable current-user-owned directory identity and the current Linux mount table before calling local helpers. Same-UID processes remain inside the local trust boundary.
 
 Even with transport hardening, FUSE/SFTP behavior differs from a native filesystem: reconnects, caching, rename, ownership, hardlinks, and stalled I/O can surprise local applications. Prefer structured remote tools.
 

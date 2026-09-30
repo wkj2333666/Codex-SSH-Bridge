@@ -52,8 +52,10 @@ pub enum HelperMode {
 const RUNTIME_DIRECTORY: &str = "codex-ssh-bridge";
 #[cfg(unix)]
 const CONTROL_FILENAME_BYTES: usize = 3 + 32;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
+#[cfg(target_os = "macos")]
+const UNIX_SOCKET_PATH_MAX_BYTES: usize = 103;
 pub(crate) const SERVER_ALIVE_INTERVAL_SECONDS: u64 = 15;
 pub(crate) const SERVER_ALIVE_COUNT_MAX: u64 = 3;
 #[cfg(unix)]

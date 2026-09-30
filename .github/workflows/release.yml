@@ -209,9 +209,62 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-native-main:
+    name: Build bridge ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            binary: codex-ssh-bridge
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: codex-ssh-bridge
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: codex-ssh-bridge.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal --target ${{ matrix.target }}
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(cargo +"$RUST_TOOLCHAIN" metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          test "$package_version" = "$tag_version"
+
+      - name: Build native release binary
+        run: cargo +${{ env.RUST_TOOLCHAIN }} build --release --locked --target ${{ matrix.target }} --bin codex-ssh-bridge
+
+      - name: Smoke-test native release binary
+        shell: bash
+        run: target/${{ matrix.target }}/release/${{ matrix.binary }} --help
+
+      - name: Stage native bridge binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.target }}/${{ matrix.binary }}"
+
+      - name: Upload native bridge build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: main-${{ matrix.target }}
+          path: dist/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
+
   package:
     name: Package release archives
-    needs: [build-main, build-helper]
+    needs: [build-main, build-helper, build-native-main]
     runs-on: ubuntu-24.04
     steps:
       - name: Check out tagged source for package resources
@@ -277,6 +330,65 @@ jobs:
             (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           done
 
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            name="codex-ssh-bridge-${version}-${target}"
+            root="dist/$name"
+            mkdir -p "$root/bin" "$root/remote-helpers" "$root/docs"
+            install -m 0755 "staging/main-$target/codex-ssh-bridge" "$root/bin/codex-ssh-bridge"
+            for helper in \
+              x86_64-unknown-linux-musl \
+              aarch64-unknown-linux-musl \
+              armv7-unknown-linux-musleabihf \
+              riscv64gc-unknown-linux-gnu \
+              powerpc64le-unknown-linux-gnu \
+              s390x-unknown-linux-gnu; do
+              install -m 0755 "staging/helper-$helper/$helper" "$root/remote-helpers/$helper"
+            done
+            for resource in \
+              .codex-plugin \
+              skills \
+              README.md \
+              LICENSE \
+              config.example.toml \
+              .mcp.json.example; do
+              cp -a "$resource" "$root/"
+            done
+            cp -a docs/security.md docs/performance.md "$root/docs/"
+            test -x "$root/bin/codex-ssh-bridge"
+            test -f "$root/remote-helpers/aarch64-unknown-linux-musl"
+            tar -C "dist" -czf "dist/$name.tar.gz" "$name"
+            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          done
+
+          target=x86_64-pc-windows-msvc
+          name="codex-ssh-bridge-${version}-${target}"
+          root="dist/$name"
+          mkdir -p "$root/bin" "$root/remote-helpers" "$root/docs"
+          cp "staging/main-$target/codex-ssh-bridge.exe" "$root/bin/codex-ssh-bridge.exe"
+          for helper in \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
+            armv7-unknown-linux-musleabihf \
+            riscv64gc-unknown-linux-gnu \
+            powerpc64le-unknown-linux-gnu \
+            s390x-unknown-linux-gnu; do
+            cp "staging/helper-$helper/$helper" "$root/remote-helpers/$helper"
+          done
+          for resource in \
+            .codex-plugin \
+            skills \
+            README.md \
+            LICENSE \
+            config.example.toml \
+            .mcp.json.example; do
+            cp -a "$resource" "$root/"
+          done
+          cp -a docs/security.md docs/performance.md "$root/docs/"
+          test -f "$root/bin/codex-ssh-bridge.exe"
+          test -f "$root/remote-helpers/x86_64-unknown-linux-musl"
+          (cd dist && zip -qr "$name.zip" "$name")
+          (cd dist && sha256sum "$name.zip" > "$name.zip.sha256")
+
       - name: Upload packaged release
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -305,7 +417,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${GITHUB_REF_NAME#v}"
-          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.sha256' \) -print0)
+          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) -print0)
           test "${#assets[@]}" -gt 0
           gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
