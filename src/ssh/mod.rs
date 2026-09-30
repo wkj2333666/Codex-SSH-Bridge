@@ -10,11 +10,17 @@ mod helper;
 mod process;
 mod session;
 
-use std::ffi::{CString, OsStr, OsString};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
+#[cfg(unix)]
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
@@ -44,7 +50,9 @@ pub enum HelperMode {
 }
 
 const RUNTIME_DIRECTORY: &str = "codex-ssh-bridge";
+#[cfg(unix)]
 const CONTROL_FILENAME_BYTES: usize = 3 + 32;
+#[cfg(unix)]
 const UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
 pub(crate) const SERVER_ALIVE_INTERVAL_SECONDS: u64 = 15;
 pub(crate) const SERVER_ALIVE_COUNT_MAX: u64 = 3;
@@ -56,7 +64,6 @@ const SSH_G_OPTIONS: &[&str] = &[
     "ClearAllForwardings=yes",
     "PermitLocalCommand=no",
     "RequestTTY=no",
-    "ControlPersist=5",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +71,7 @@ pub struct RuntimePaths {
     directory: PathBuf,
 }
 
+#[cfg(unix)]
 impl RuntimePaths {
     pub fn discover() -> BridgeResult<Self> {
         match std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
@@ -150,6 +158,40 @@ impl RuntimePaths {
     }
 }
 
+#[cfg(windows)]
+impl RuntimePaths {
+    pub fn discover() -> BridgeResult<Self> {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let directory = base.join(RUNTIME_DIRECTORY).join("runtime");
+        std::fs::create_dir_all(&directory).map_err(BridgeError::io)?;
+        let metadata = std::fs::symlink_metadata(&directory).map_err(BridgeError::io)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(unsafe_runtime_path(
+                &directory,
+                "runtime path must be a real directory",
+            ));
+        }
+        Ok(Self { directory })
+    }
+
+    pub fn ensure_from_base(base: &Path) -> BridgeResult<Self> {
+        if !base.is_absolute() {
+            return Err(unsafe_runtime_path(base, "runtime base must be absolute"));
+        }
+        let directory = base.join(RUNTIME_DIRECTORY);
+        std::fs::create_dir_all(&directory).map_err(BridgeError::io)?;
+        Ok(Self { directory })
+    }
+
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+}
+
+#[cfg(unix)]
 fn open_secure_absolute_directory(
     path: &Path,
     require_current_user_base: bool,
@@ -217,6 +259,7 @@ fn open_secure_absolute_directory(
     Ok(directory)
 }
 
+#[cfg(unix)]
 fn openat_directory(parent: &File, name: &OsStr, path: &Path) -> BridgeResult<File> {
     let name = path_component(name)?;
     // SAFETY: parent is an open directory and name is a live NUL-terminated
@@ -243,6 +286,7 @@ fn openat_directory(parent: &File, name: &OsStr, path: &Path) -> BridgeResult<Fi
     Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
+#[cfg(unix)]
 fn validate_ancestor(
     path: &Path,
     metadata: &std::fs::Metadata,
@@ -274,6 +318,7 @@ fn validate_ancestor(
     Ok(())
 }
 
+#[cfg(unix)]
 fn path_component(value: &OsStr) -> BridgeResult<CString> {
     if value.is_empty() || value.as_bytes().contains(&b'/') {
         return Err(unsafe_runtime_directory("invalid runtime path component"));
@@ -311,41 +356,75 @@ impl SshPolicy {
         resolved_connection_identity: &str,
         runner_instance_identity: &str,
     ) -> BridgeResult<Self> {
-        let control_path = runtime_paths.directory.join(control_filename(
-            alias,
-            resolved_connection_identity,
-            runner_instance_identity,
-        ));
-        let control_option = encoded_control_path_option(&control_path)?;
+        #[cfg(unix)]
+        {
+            let control_path = runtime_paths.directory.join(control_filename(
+                alias,
+                resolved_connection_identity,
+                runner_instance_identity,
+            ));
+            let control_option = encoded_control_path_option(&control_path)?;
 
-        let mut options = Vec::new();
-        for option in [
-            "BatchMode=yes",
-            "StrictHostKeyChecking=yes",
-            "ForwardAgent=no",
-            "ForwardX11=no",
-            "ClearAllForwardings=yes",
-            "PermitLocalCommand=no",
-            "RequestTTY=no",
-            "ControlMaster=auto",
-            "ControlPersist=5",
-        ] {
+            let mut options = Vec::new();
+            for option in [
+                "BatchMode=yes",
+                "StrictHostKeyChecking=yes",
+                "ForwardAgent=no",
+                "ForwardX11=no",
+                "ClearAllForwardings=yes",
+                "PermitLocalCommand=no",
+                "RequestTTY=no",
+                "ControlMaster=auto",
+                "ControlPersist=5",
+            ] {
+                options.push(OsString::from("-o"));
+                options.push(OsString::from(option));
+            }
+            for option in server_alive_options() {
+                options.push(OsString::from("-o"));
+                options.push(option);
+            }
             options.push(OsString::from("-o"));
-            options.push(OsString::from(option));
-        }
-        for option in server_alive_options() {
+            options.push(openssh_connect_timeout_option(limits.connect_timeout_ms));
             options.push(OsString::from("-o"));
-            options.push(option);
-        }
-        options.push(OsString::from("-o"));
-        options.push(openssh_connect_timeout_option(limits.connect_timeout_ms));
-        options.push(OsString::from("-o"));
-        options.push(control_option);
+            options.push(control_option);
 
-        Ok(Self {
-            options,
-            control_path,
-        })
+            Ok(Self {
+                options,
+                control_path,
+            })
+        }
+        #[cfg(windows)]
+        {
+            let mut options = Vec::new();
+            for option in [
+                "BatchMode=yes",
+                "StrictHostKeyChecking=yes",
+                "ForwardAgent=no",
+                "ForwardX11=no",
+                "ClearAllForwardings=yes",
+                "PermitLocalCommand=no",
+                "RequestTTY=no",
+            ] {
+                options.push(OsString::from("-o"));
+                options.push(OsString::from(option));
+            }
+            for option in server_alive_options() {
+                options.push(OsString::from("-o"));
+                options.push(option);
+            }
+            options.push(OsString::from("-o"));
+            options.push(openssh_connect_timeout_option(limits.connect_timeout_ms));
+            Ok(Self {
+                options,
+                control_path: runtime_paths.directory.join(format!(
+                    "no-control-master-{}-{}-{}",
+                    alias.len(),
+                    resolved_connection_identity.len(),
+                    runner_instance_identity.len()
+                )),
+            })
+        }
     }
 
     pub fn control_path(&self) -> &Path {
@@ -384,12 +463,14 @@ fn openssh_connect_timeout_option(milliseconds: u64) -> OsString {
     OsString::from(format!("ConnectTimeout={seconds}"))
 }
 
+#[cfg(unix)]
 fn control_path_candidate_is_usable(directory: &Path) -> bool {
     let control_path = directory.join("x".repeat(CONTROL_FILENAME_BYTES));
     control_path.as_os_str().as_bytes().len() <= UNIX_SOCKET_PATH_MAX_BYTES
         && validate_openssh_config_path(&control_path).is_ok()
 }
 
+#[cfg(unix)]
 fn validate_openssh_config_path(path: &Path) -> BridgeResult<&str> {
     let value = path
         .to_str()
@@ -403,6 +484,7 @@ fn validate_openssh_config_path(path: &Path) -> BridgeResult<&str> {
     Ok(value)
 }
 
+#[cfg(unix)]
 fn encoded_control_path_option(control_path: &Path) -> BridgeResult<OsString> {
     if control_path.as_os_str().as_bytes().len() > UNIX_SOCKET_PATH_MAX_BYTES {
         return Err(BridgeError::invalid_config(
@@ -423,6 +505,7 @@ fn encoded_control_path_option(control_path: &Path) -> BridgeResult<OsString> {
     Ok(OsString::from(encoded))
 }
 
+#[cfg(unix)]
 fn control_filename(
     alias: &str,
     resolved_connection_identity: &str,
@@ -453,7 +536,7 @@ fn unsafe_runtime_path(path: &Path, message: &str) -> BridgeError {
     error
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 

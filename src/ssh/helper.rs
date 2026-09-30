@@ -1,4 +1,5 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -346,23 +347,36 @@ fn helper_directory_from_executable(executable: &Path) -> BridgeResult<PathBuf> 
 fn validate_artifact_path(directory: &Path, path: &Path) -> BridgeResult<()> {
     let directory_metadata = fs::symlink_metadata(directory).map_err(BridgeError::io)?;
     let file_metadata = fs::symlink_metadata(path).map_err(BridgeError::io)?;
-    let uid = unsafe { libc::geteuid() };
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::geteuid() };
+        if !directory_metadata.is_dir()
+            || directory_metadata.file_type().is_symlink()
+            || directory_metadata.permissions().mode() & 0o022 != 0
+            || (directory_metadata.uid() != uid && directory_metadata.uid() != 0)
+            || !file_metadata.is_file()
+            || file_metadata.file_type().is_symlink()
+            || file_metadata.permissions().mode() & 0o111 == 0
+            || file_metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(BridgeError::invalid_config(
+                "remote helper artifact path is not a private executable",
+            ));
+        }
+        if file_metadata.uid() != uid && file_metadata.uid() != 0 {
+            return Err(BridgeError::invalid_config(
+                "remote helper artifact has an unexpected owner",
+            ));
+        }
+    }
+    #[cfg(windows)]
     if !directory_metadata.is_dir()
         || directory_metadata.file_type().is_symlink()
-        || directory_metadata.permissions().mode() & 0o022 != 0
-        || (directory_metadata.uid() != uid && directory_metadata.uid() != 0)
         || !file_metadata.is_file()
         || file_metadata.file_type().is_symlink()
-        || file_metadata.permissions().mode() & 0o111 == 0
-        || file_metadata.permissions().mode() & 0o022 != 0
     {
         return Err(BridgeError::invalid_config(
-            "remote helper artifact path is not a private executable",
-        ));
-    }
-    if file_metadata.uid() != uid && file_metadata.uid() != 0 {
-        return Err(BridgeError::invalid_config(
-            "remote helper artifact has an unexpected owner",
+            "remote helper artifact path is not a regular packaged file",
         ));
     }
     Ok(())

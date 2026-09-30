@@ -242,7 +242,7 @@ impl StartupProcessGuard {
 impl Drop for StartupProcessGuard {
     fn drop(&mut self) {
         if self.armed {
-            signal_process_group(self.process_group, libc::SIGKILL);
+            force_kill_process_group(self.process_group);
         }
     }
 }
@@ -278,7 +278,7 @@ impl HostSession {
             policy,
             host,
             limits,
-            OsString::from("/usr/bin/ssh"),
+            OsString::from(default_ssh_executable()),
             std::collections::BTreeMap::new(),
             cancel,
         )
@@ -444,6 +444,7 @@ impl HostSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
         // SAFETY: setpgid is async-signal-safe and receives no borrowed data.
         unsafe {
             child_command.pre_exec(|| {
@@ -908,9 +909,9 @@ async fn cleanup_startup_child(
     child: &mut tokio::process::Child,
     startup_guard: &mut StartupProcessGuard,
 ) {
-    signal_process_group(startup_guard.process_group, libc::SIGTERM);
+    terminate_process_group(startup_guard.process_group);
     let child_exited = timeout(STARTUP_CLEANUP_GRACE, child.wait()).await.is_ok();
-    signal_process_group(startup_guard.process_group, libc::SIGKILL);
+    force_kill_process_group(startup_guard.process_group);
     if !child_exited {
         let _ = timeout(STARTUP_CLEANUP_GRACE, child.wait()).await;
     }
@@ -1676,9 +1677,20 @@ fn timeout_error(host: &str, may_continue: bool) -> BridgeError {
 }
 
 fn terminate_process_group(process_group: i32) {
+    #[cfg(unix)]
     signal_process_group(process_group, libc::SIGTERM);
+    #[cfg(windows)]
+    let _ = process_group;
 }
 
+fn force_kill_process_group(process_group: i32) {
+    #[cfg(unix)]
+    signal_process_group(process_group, libc::SIGKILL);
+    #[cfg(windows)]
+    let _ = process_group;
+}
+
+#[cfg(unix)]
 fn signal_process_group(process_group: i32, signal: i32) {
     if process_group <= 0 {
         return;
@@ -1687,6 +1699,16 @@ fn signal_process_group(process_group: i32, signal: i32) {
     unsafe {
         let _ = libc::kill(-process_group, signal);
     }
+}
+
+#[cfg(unix)]
+fn default_ssh_executable() -> &'static str {
+    "/usr/bin/ssh"
+}
+
+#[cfg(windows)]
+fn default_ssh_executable() -> &'static str {
+    r"C:\Windows\System32\OpenSSH\ssh.exe"
 }
 
 fn connect_timeout_error(host: &str, message: &str) -> BridgeError {

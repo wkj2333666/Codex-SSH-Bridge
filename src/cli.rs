@@ -28,6 +28,10 @@ use crate::ssh::{
     RuntimePaths, SshRunner, ValidatedMountpoint, build_ssh_g_argv, build_sshfs_argv,
 };
 
+#[cfg(unix)]
+mod install;
+#[cfg(windows)]
+#[path = "cli/install_windows.rs"]
 mod install;
 pub use install::{
     InstallLayout, InstallReport, install_packaged_user, install_user, uninstall_user,
@@ -524,6 +528,7 @@ pub async fn run_local_command(spec: LocalCommandSpec) -> BridgeResult<LocalComm
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
     // SAFETY: pre_exec runs after fork and calls only async-signal-safe setpgid.
     unsafe {
         command.pre_exec(|| {
@@ -715,11 +720,17 @@ fn reserve_local_output(total: &AtomicUsize, count: usize, maximum: usize) -> bo
 }
 
 async fn terminate_local_process_group(process_group: i32) {
-    signal_local_process_group(process_group, libc::SIGTERM);
-    tokio::time::sleep(Duration::from_millis(125)).await;
-    signal_local_process_group(process_group, libc::SIGKILL);
+    #[cfg(unix)]
+    {
+        signal_local_process_group(process_group, libc::SIGTERM);
+        tokio::time::sleep(Duration::from_millis(125)).await;
+        signal_local_process_group(process_group, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    let _ = process_group;
 }
 
+#[cfg(unix)]
 fn signal_local_process_group(process_group: i32, signal: i32) {
     // SAFETY: a negative pid targets only the already-created child process
     // group; kill retains no pointers and errors are intentionally best-effort.
@@ -762,7 +773,7 @@ pub fn build_verbose_ssh_diagnostic_argv(host: &str, connect_timeout_ms: u64) ->
 async fn run_verbose_ssh_diagnostic(host: &str, connect_timeout_ms: u64) -> BridgeResult<String> {
     let arguments = build_verbose_ssh_diagnostic_argv(host, connect_timeout_ms);
     let output = run_local_command(LocalCommandSpec {
-        executable: PathBuf::from("/usr/bin/ssh"),
+        executable: local_ssh_executable(),
         arguments,
         timeout: Duration::from_secs(10),
         max_output_bytes: 64 * 1024,
@@ -812,11 +823,18 @@ async fn run_mount(path: PathBuf, arguments: MountArgs) -> BridgeResult<()> {
 }
 
 fn run_mount_status(arguments: MountpointArgs) -> BridgeResult<()> {
-    let bytes = read_bounded_local_file(Path::new("/proc/self/mountinfo"), 1024 * 1024)?;
-    let status = parse_sshfs_mount_status(&bytes, &arguments.mountpoint)?;
-    let value = serde_json::to_value(status)
-        .map_err(|error| BridgeError::io(format!("cannot render mount status: {error}")))?;
-    print_json(&value)
+    #[cfg(windows)]
+    return Err(BridgeError::invalid_argument(
+        "SSHFS commands are not supported by the native Windows build",
+    ));
+    #[cfg(unix)]
+    {
+        let bytes = read_bounded_local_file(Path::new("/proc/self/mountinfo"), 1024 * 1024)?;
+        let status = parse_sshfs_mount_status(&bytes, &arguments.mountpoint)?;
+        let value = serde_json::to_value(status)
+            .map_err(|error| BridgeError::io(format!("cannot render mount status: {error}")))?;
+        print_json(&value)
+    }
 }
 
 async fn run_unmount(arguments: MountpointArgs) -> BridgeResult<()> {
@@ -824,6 +842,19 @@ async fn run_unmount(arguments: MountpointArgs) -> BridgeResult<()> {
         unmount_sshfs_with_executable(PathBuf::from("/usr/bin/fusermount3"), &arguments.mountpoint)
             .await?;
     print_json(&value)
+}
+
+#[cfg(unix)]
+fn local_ssh_executable() -> PathBuf {
+    PathBuf::from("/usr/bin/ssh")
+}
+
+#[cfg(windows)]
+fn local_ssh_executable() -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("System32/OpenSSH/ssh.exe")
 }
 
 async fn run_install(arguments: InstallArgs) -> BridgeResult<()> {

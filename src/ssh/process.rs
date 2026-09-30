@@ -44,7 +44,10 @@ use crate::output::{
 use crate::path::RemotePath;
 use crate::quote::{PreparedShellWord, shell_word};
 
+#[cfg(unix)]
 const DEFAULT_SSH_EXECUTABLE: &str = "/usr/bin/ssh";
+#[cfg(windows)]
+const DEFAULT_SSH_EXECUTABLE: &str = r"C:\Windows\System32\OpenSSH\ssh.exe";
 const RESOLVED_STDOUT_LIMIT: u64 = 1024 * 1024;
 const RESOLVED_STDERR_LIMIT: u64 = 64 * 1024;
 const PROBE_OUTPUT_LIMIT: u64 = 1024 * 1024;
@@ -1491,6 +1494,7 @@ impl SshRunner {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         command.env("LC_ALL", "C");
+        #[cfg(unix)]
         // SAFETY: pre_exec runs in the child after fork and calls only setpgid,
         // an async-signal-safe libc function. It captures no parent references.
         unsafe {
@@ -2256,11 +2260,17 @@ async fn finish_capture_bounded(
 }
 
 async fn terminate_process_group(process_group: i32) {
-    signal_process_group(process_group, libc::SIGTERM);
-    tokio::time::sleep(TERM_GRACE).await;
-    signal_process_group(process_group, libc::SIGKILL);
+    #[cfg(unix)]
+    {
+        signal_process_group(process_group, libc::SIGTERM);
+        tokio::time::sleep(TERM_GRACE).await;
+        signal_process_group(process_group, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    let _ = process_group;
 }
 
+#[cfg(unix)]
 fn signal_process_group(process_group: i32, signal: i32) {
     // SAFETY: kill accepts any integer process-group id. The negative id
     // targets only the child-created process group and retains no pointer.
