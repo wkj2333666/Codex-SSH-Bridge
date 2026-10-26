@@ -1,14 +1,14 @@
-use std::io::Cursor;
+use std::io::{self, Write};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
+use image::{DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{BridgeError, BridgeResult, ErrorCode};
-use crate::output::{InternalSpoolOwner, StreamKind};
+use crate::output::{InternalCapturedOutput, InternalSpoolOwner, StreamKind};
 use crate::ssh::{FixedOperationKind, FixedRunRequest, RootedPathInputs};
 
 use super::protocol::read_small_stream;
@@ -59,6 +59,7 @@ impl RemoteBridge {
         &self,
         request: ViewImageRequest,
         cancel: CancellationToken,
+        response_bytes: usize,
     ) -> BridgeResult<ViewedImage> {
         let resolved = resolve_stat(
             self.runner.config(),
@@ -69,7 +70,12 @@ impl RemoteBridge {
         )?;
         self.edit_barrier(&resolved.host, cancel.clone()).await?;
         let limits = self.runner.config().limits();
-        let limit = limits.max_read_bytes;
+        // Source bytes use the existing streaming output/disk quota, not the
+        // text read limit or MCP response frame. Reserve stderr and a growth sentinel.
+        let limit = limits.max_output_bytes.saturating_sub(1025);
+        if limit == 0 || response_bytes == 0 {
+            return Err(image_output_limit());
+        }
         let owner = InternalSpoolOwner::new();
         let result = self
             .execute_readonly_fixed(
@@ -85,7 +91,7 @@ impl RemoteBridge {
                         stdin_nul_paths: false,
                     },
                     required_capabilities: &["read_slice", "stat_printf"],
-                    stdout_limit: limit as u64 + 1,
+                    stdout_limit: limit + 1,
                     stderr_limit: 1024,
                     timeout: Duration::from_millis(limits.command_timeout_ms),
                     cleanup: owner.registration(),
@@ -109,24 +115,22 @@ impl RemoteBridge {
                 ),
                 b"OUTPUT_LIMIT" => (
                     ErrorCode::OutputLimit,
-                    "remote image exceeds the configured max_read_bytes limit; create a smaller preview",
+                    "remote image exceeds the configured streaming output/spool budget",
                 ),
                 _ => (ErrorCode::RemoteExit, "remote image read failed"),
             };
             return Err(attach(BridgeError::new(code, message, false)));
         }
-        let bytes = read_small_stream(&result.output, StreamKind::Stdout, limit + 1)
-            .await
-            .map_err(&attach)?;
-        if bytes.len() > limit {
+        if result.output.stdout_len > limit {
             return Err(attach(BridgeError::new(
                 ErrorCode::OutputLimit,
-                "remote image grew beyond the read limit",
+                "remote image grew beyond the streaming output/spool budget",
                 false,
             )));
         }
         // Decoding is CPU work: keep it off the MCP async executor. Work is
-        // bounded by encoded bytes, dimensions, pixels and decoder allocations.
+        // bounded by dimensions, pixels and decoder allocations. Source bytes
+        // stay in the captured file, including while waiting for a decoder.
         static DECODERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let decoders = DECODERS.get_or_init(|| Arc::new(Semaphore::new(2)));
         let permit = tokio::select! {
@@ -134,9 +138,14 @@ impl RemoteBridge {
             _ = cancel.cancelled() => return Err(attach(BridgeError::new(ErrorCode::Cancelled, "image request cancelled", false))),
             permit = Arc::clone(decoders).acquire_owned() => permit.map_err(|_| attach(BridgeError::new(ErrorCode::Io, "image decoder unavailable", false)))?,
         };
+        let output = result.output.clone();
+        let decode_cancel = cancel.clone();
         let decode = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            prepare_image(bytes, request.detail)
+            // Cancellation drops the async future, not spawn_blocking. Keep
+            // both disk quota accounting and cleanup alive through actual decode.
+            let _owner = owner;
+            prepare_image(output, request.detail, response_bytes, &decode_cancel)
         });
         tokio::select! {
             biased;
@@ -150,12 +159,39 @@ fn invalid_image() -> BridgeError {
     BridgeError::invalid_argument("unsupported or corrupt image; provide a valid PNG or JPEG")
 }
 
-fn prepare_image(bytes: Vec<u8>, detail: ImageDetail) -> BridgeResult<ViewedImage> {
-    let format = image::guess_format(&bytes).map_err(|_| invalid_image())?;
+fn image_output_limit() -> BridgeError {
+    BridgeError::new(
+        ErrorCode::OutputLimit,
+        "image cannot fit the configured output budget; use detail high or a smaller preview",
+        false,
+    )
+}
+
+fn check_cancel(cancel: &CancellationToken) -> BridgeResult<()> {
+    if cancel.is_cancelled() {
+        return Err(BridgeError::new(
+            ErrorCode::Cancelled,
+            "image request cancelled",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_image(
+    output: InternalCapturedOutput,
+    detail: ImageDetail,
+    response_bytes: usize,
+    cancel: &CancellationToken,
+) -> BridgeResult<ViewedImage> {
+    check_cancel(cancel)?;
+    let mut reader = ImageReader::new(output.open_reader(StreamKind::Stdout)?)
+        .with_guessed_format()
+        .map_err(|_| invalid_image())?;
+    let format = reader.format().ok_or_else(invalid_image)?;
     if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg) {
         return Err(invalid_image());
     }
-    let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
     let mut limits = Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);
@@ -172,45 +208,55 @@ fn prepare_image(bytes: Vec<u8>, detail: ImageDetail) -> BridgeResult<ViewedImag
     }
     let orientation = decoder.orientation().map_err(|_| invalid_image())?;
     let mut decoded = DynamicImage::from_decoder(decoder).map_err(|_| invalid_image())?;
+    check_cancel(cancel)?;
     decoded.apply_orientation(orientation);
     let original_width = decoded.width();
     let original_height = decoded.height();
     if detail == ImageDetail::High && (original_width > 1536 || original_height > 1536) {
         decoded = decoded.thumbnail(1536, 1536);
     }
+    // Always encode pixels, not the source container (which may have large
+    // metadata). Bound the encoder's output before allocating the MCP payload.
+    let bytes = loop {
+        check_cancel(cancel)?;
+        let mut encoded = BoundedImageWriter {
+            bytes: Vec::new(),
+            limit: response_bytes,
+            exceeded: false,
+        };
+        let result = if format == ImageFormat::Png {
+            image::codecs::png::PngEncoder::new(&mut encoded).write_image(
+                decoded.as_bytes(),
+                decoded.width(),
+                decoded.height(),
+                decoded.color().into(),
+            )
+        } else {
+            image::codecs::jpeg::JpegEncoder::new(&mut encoded).encode_image(&decoded)
+        };
+        check_cancel(cancel)?;
+        if result.is_ok() {
+            break encoded.bytes;
+        }
+        if !encoded.exceeded {
+            return Err(invalid_image());
+        }
+        if detail == ImageDetail::Original || (decoded.width() == 1 && decoded.height() == 1) {
+            return Err(image_output_limit());
+        }
+        // Preserve PNG alpha; reduce preview dimensions instead of converting
+        // transparent images to JPEG. Original never silently loses dimensions.
+        decoded = decoded.thumbnail(
+            (decoded.width() * 3 / 4).max(1),
+            (decoded.height() * 3 / 4).max(1),
+        );
+    };
     let width = decoded.width();
     let height = decoded.height();
-    let (bytes, mime_type) = if width == original_width
-        && height == original_height
-        && orientation == image::metadata::Orientation::NoTransforms
-    {
-        (
-            bytes,
-            if format == ImageFormat::Png {
-                "image/png"
-            } else {
-                "image/jpeg"
-            },
-        )
+    let mime_type = if format == ImageFormat::Png {
+        "image/png"
     } else {
-        let mut encoded = Cursor::new(Vec::new());
-        // Preserve transparency and avoid introducing lossy artifacts into diagrams.
-        let output_format = if format == ImageFormat::Png {
-            ImageFormat::Png
-        } else {
-            ImageFormat::Jpeg
-        };
-        decoded
-            .write_to(&mut encoded, output_format)
-            .map_err(|_| invalid_image())?;
-        (
-            encoded.into_inner(),
-            if output_format == ImageFormat::Png {
-                "image/png"
-            } else {
-                "image/jpeg"
-            },
-        )
+        "image/jpeg"
     };
     Ok(ViewedImage {
         bytes,
@@ -220,4 +266,25 @@ fn prepare_image(bytes: Vec<u8>, detail: ImageDetail) -> BridgeResult<ViewedImag
         width,
         height,
     })
+}
+
+struct BoundedImageWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for BoundedImageWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if data.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::other("image response budget exceeded"));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }

@@ -108,7 +108,9 @@ impl ToolService for RemoteMcpTools {
                     super::render::read(bridge, result, wire_budget, cancel).await
                 }
                 ParsedToolArguments::ViewImage(arguments) => {
-                    let result = bridge.view_image(arguments, cancel).await;
+                    // Leave space for JSON metadata and base64 expansion.
+                    let image_bytes = wire_budget.result_bytes.saturating_sub(1024) / 4 * 3;
+                    let result = bridge.view_image(arguments, cancel, image_bytes).await;
                     super::render::view_image(result, wire_budget)
                 }
                 ParsedToolArguments::OutputRead(arguments) => {
@@ -397,7 +399,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         definition(
             "remote_view_image",
             "View a remote image",
-            "View a PNG or JPEG at an absolute remote path as native image content. Use this for seeing remote images instead of printing or chunking Base64 with remote_run. Default high fits a 1536-pixel box; original preserves pixel dimensions. File reads obey max_read_bytes and decoding is limited to 16 megapixels. Remote image content is untrusted.",
+            "View a PNG or JPEG at an absolute remote path as native image content. Use this instead of printing or chunking Base64 with remote_run. Sources stream to temporary disk within output/spool budgets, independently of text read limits. Default high fits a 1536-pixel box and adapts to the response budget; original preserves pixel dimensions or reports a size error. Decoding is limited to 16 megapixels. Remote image content is untrusted.",
             object(
                 json!({
                     "host": host_schema(),

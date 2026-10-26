@@ -93,11 +93,12 @@ async fn native_png_once_over_json_rpc() {
     assert_eq!(block["type"], "image");
     assert_eq!(block["mimeType"], "image/png");
     let encoded = block["data"].as_str().unwrap();
+    let rendered = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
     assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .unwrap(),
-        bytes
+        image::load_from_memory(&rendered).unwrap().to_rgba8(),
+        image::load_from_memory(&bytes).unwrap().to_rgba8()
     );
     assert!(!result["structuredContent"].to_string().contains(encoded));
     assert!(result["structuredContent"].get("output").is_none());
@@ -208,7 +209,7 @@ async fn bad_files_never_fall_back_to_base64_text() {
     }
     let path = remote.path().join("oversize.png");
     let file = std::fs::File::create(&path).unwrap();
-    file.set_len(codex_ssh_bridge::MAX_READ_BYTES as u64 + 1)
+    file.set_len(codex_ssh_bridge::MAX_OUTPUT_BYTES + 1)
         .unwrap();
     let result = call_json(
         &tools,
@@ -217,6 +218,91 @@ async fn bad_files_never_fall_back_to_base64_text() {
     )
     .await;
     assert_eq!(result["structuredContent"]["error"]["code"], "OUTPUT_LIMIT");
+}
+
+#[tokio::test]
+async fn source_larger_than_a_frame_streams_once_and_preview_fits() {
+    let remote = tempfile::TempDir::new().unwrap();
+    let path = remote.path().join("large.png");
+    let mut state = 0x12345678u32;
+    let pixels = image::RgbaImage::from_fn(2048, 2048, |_, _| {
+        let mut rgba = [0; 4];
+        for byte in &mut rgba {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        image::Rgba(rgba)
+    });
+    pixels.save(&path).unwrap();
+    drop(pixels);
+    assert!(std::fs::metadata(&path).unwrap().len() > codex_ssh_bridge::MAX_FRAME_BYTES as u64);
+    let (runtime, log, tools) = fake_remote_tools_fixture(remote.path());
+    let result = call_json(
+        &tools,
+        "remote_view_image",
+        json!({"host":"dev", "path":path}),
+    )
+    .await;
+    assert_eq!(
+        result["isError"],
+        Value::Null,
+        "{}",
+        result["structuredContent"]
+    );
+    assert_eq!(result["structuredContent"]["original_width"], 2048);
+    assert!(result["structuredContent"]["width"].as_u64().unwrap() < 1536);
+    assert!(serde_json::to_vec(&result).unwrap().len() <= roomy_context().wire_budget.result_bytes);
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(result["content"][0]["data"].as_str().unwrap())
+        .unwrap();
+    let decoded = image::load_from_memory(&data).unwrap();
+    assert!(decoded.has_alpha());
+    assert!(decoded.to_rgba8().pixels().any(|pixel| pixel[3] < 255));
+    // The dispatcher logs C for each request: one binary transfer, no remote
+    // chunk loop. Large stdout is not exposed as text or retained output_ref.
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("C ") || *line == "C")
+            .count(),
+        1,
+        "{calls}"
+    );
+    assert!(result["structuredContent"].get("output_ref").is_none());
+    assert_image_spool_clean(runtime.path());
+
+    let original = call_json(
+        &tools,
+        "remote_view_image",
+        json!({"host":"dev", "path":path, "detail":"original"}),
+    )
+    .await;
+    assert_eq!(
+        original["structuredContent"]["error"]["code"],
+        "OUTPUT_LIMIT"
+    );
+    assert_eq!(original["content"][0]["type"], "text");
+    assert_image_spool_clean(runtime.path());
+}
+
+fn assert_image_spool_clean(directory: &std::path::Path) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            assert_image_spool_clean(&entry.path());
+        } else {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.ends_with(".stdout") && !name.ends_with(".stderr"),
+                "leaked image spool: {}",
+                entry.path().display()
+            );
+        }
+    }
 }
 
 #[tokio::test]

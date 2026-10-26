@@ -31,8 +31,10 @@ Base64 chunks through `remote_run`. It returns native MCP image content, not
 `image(block)` rather than `text(result)`. Default `detail:"high"` fits a
 1536-pixel box; use `detail:"original"` when original pixel dimensions matter.
 The metadata reports original (orientation-corrected) and displayed dimensions.
-Read limits and the 16-megapixel decode limit still apply; a larger source needs
-a smaller preview, not a loop that prints binary data into the conversation.
+Source transfers are internally chunked to temporary disk, independently of
+text read limits; do not split them into multiple tool calls. Output/spool
+quotas and the 16-megapixel decode limit still apply. Previews adapt to the
+response budget; original mode reports an error rather than silently resizing.
 
 The bridge keeps one local-owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities. On a supported Linux host it verifies or installs a private mode-0700 helper under the remote account's `~/.local/share/codex-ssh-bridge/helpers/<bridge-version>/<target>/helper`; the helper process ends with the SSH session, while the verified file is reused after a bridge restart. Warm requests send one framed command with no per-request `ssh -G`, root observation, installation probe, hash, lock, or upload. Unsupported hosts and pre-request helper failures use the ordered temporary-helper then POSIX-dispatcher fallback. Transport mode remains internal diagnostic data. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
 The selected dispatcher applies the absolute cwd, requested shell, and timeout

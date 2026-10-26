@@ -217,9 +217,16 @@ validated locally, and returned over the existing persistent SSH transport.
 The default `detail:"high"` fits a 1536-pixel box without upscaling;
 `detail:"original"` preserves pixel dimensions. EXIF orientation is applied and
 PNG transparency is retained. Metadata reports original and displayed sizes.
-The encoded source must fit `max_read_bytes` (default 1 MiB); decoding is bounded
-to 16 megapixels and the result must fit the MCP frame budget. Unsupported,
-corrupt or oversized images return an error, never a truncated image. No image
+The source streams in transport chunks into a private temporary file and is
+decoded from that file, independently of the 1 MiB text `max_read_bytes` limit.
+Disk capture uses `max_output_bytes` (default 64 MiB, less 1025 bytes reserved
+for status/growth detection) and the shared spool quota; files are cleaned up
+after decoding or failure. Decoding is bounded to 16 megapixels and 128 MiB of
+decoder allocations, with two concurrent decoders. The default preview shrinks
+further if needed to fit the MCP frame budget; original mode errors if its
+re-encoded pixels cannot fit, and never silently reduces dimensions. The tool
+returns pixels, not a byte-identical download of the source container. Unsupported,
+corrupt or over-budget images return an error, never a truncated image. No image
 server, remote Python dependency, public URL, or extra SSH connection is needed.
 
 All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` accepts one native Codex `*** Begin Patch` envelope with Add, Update, Delete, and `*** Move to:` operations; every source and destination path embedded in the patch must be absolute. `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Bash is never silently changed to sh: if Bash is unavailable, the capability error records that Bash was requested and which shells are available, leaving the next decision to the model. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
