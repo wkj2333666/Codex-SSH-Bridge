@@ -103,7 +103,7 @@ fn package_versions_are_coordinated() {
         .as_str()
         .expect("plugin version must be a string");
 
-    assert_eq!(cargo_version, "1.0.0");
+    assert_eq!(cargo_version, "1.1.0");
     assert_eq!(lock_version, cargo_version);
     assert_eq!(plugin_version, cargo_version);
 }
