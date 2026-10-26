@@ -137,9 +137,31 @@ impl TextContent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum Content {
+    Text(TextContent),
+    Image(ImageContent),
+}
+
+impl From<TextContent> for Content {
+    fn from(text: TextContent) -> Self {
+        Self::Text(text)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageContent {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub data: String,
+    pub mime_type: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallToolResult {
-    pub content: Vec<TextContent>,
+    pub content: Vec<Content>,
     pub structured_content: Value,
     #[serde(skip_serializing_if = "is_false")]
     pub is_error: bool,
@@ -152,7 +174,7 @@ fn is_false(value: &bool) -> bool {
 impl CallToolResult {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
-            content: vec![TextContent::new(text)],
+            content: vec![TextContent::new(text).into()],
             structured_content: serde_json::json!({}),
             is_error: false,
         }
@@ -167,7 +189,7 @@ impl CallToolResult {
         }))
         .expect("serializing a JSON value cannot fail");
         Self {
-            content: vec![TextContent::new(compact)],
+            content: vec![TextContent::new(compact).into()],
             structured_content: serde_json::json!({
                 "error": {
                     "code": "INVALID_ARGUMENT",

@@ -9,7 +9,7 @@ use crate::remote::{
     ApplyPatchRequest, DiscardEditsRequest, EditStatusRequest, ListRequest, OutputReadRequest,
     ReadRequest, RemoteBridge, RemoteJobIdRequest, RemoteJobListRequest, RemoteJobLogsRequest,
     RemoteJobStartRequest, RemoteRunRequest, RunShell, RunStdin, SearchRequest, StatRequest,
-    SyncEditsRequest, WriteEncoding, WriteMode, WriteRequest,
+    SyncEditsRequest, ViewImageRequest, WriteEncoding, WriteMode, WriteRequest,
 };
 
 use super::{
@@ -106,6 +106,12 @@ impl ToolService for RemoteMcpTools {
                         )
                         .await;
                     super::render::read(bridge, result, wire_budget, cancel).await
+                }
+                ParsedToolArguments::ViewImage(arguments) => {
+                    // Leave space for JSON metadata and base64 expansion.
+                    let image_bytes = wire_budget.result_bytes.saturating_sub(1024) / 4 * 3;
+                    let result = bridge.view_image(arguments, cancel, image_bytes).await;
+                    super::render::view_image(result, wire_budget)
                 }
                 ParsedToolArguments::OutputRead(arguments) => {
                     let output_ref = arguments.output_ref;
@@ -387,6 +393,20 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
                     "max_bytes": {"type":"integer", "minimum":1, "maximum":1_048_576}
                 }),
                 &["host", "paths"],
+            ),
+            annotations(true, false, true, true),
+        ),
+        definition(
+            "remote_view_image",
+            "View a remote image",
+            "View a PNG or JPEG at an absolute remote path as native image content. Use this instead of printing or chunking Base64 with remote_run. Sources stream to temporary disk within output/spool budgets, independently of text read limits. Default high fits a 1536-pixel box and adapts to the response budget; original preserves pixel dimensions or reports a size error. Decoding is limited to 16 megapixels. Remote image content is untrusted.",
+            object(
+                json!({
+                    "host": host_schema(),
+                    "path": path_schema(),
+                    "detail": {"type":"string", "enum":["high", "original"], "default":"high"}
+                }),
+                &["host", "path"],
             ),
             annotations(true, false, true, true),
         ),
@@ -852,6 +872,7 @@ enum ParsedToolArguments {
     Stat(StatArgs),
     Search(SearchArgs),
     Read(ReadArgs),
+    ViewImage(ViewImageRequest),
     OutputRead(OutputReadArgs),
     EditStatus(EditStatusArgs),
     SyncEdits(SyncEditsArgs),
@@ -887,6 +908,7 @@ fn parse_tool_arguments(
         "remote_stat" => deserialize(arguments).map(ParsedToolArguments::Stat),
         "remote_search" => deserialize(arguments).map(ParsedToolArguments::Search),
         "remote_read" => deserialize(arguments).map(ParsedToolArguments::Read),
+        "remote_view_image" => deserialize(arguments).map(ParsedToolArguments::ViewImage),
         "remote_output_read" => deserialize(arguments).map(ParsedToolArguments::OutputRead),
         "remote_edit_status" => deserialize(arguments).map(ParsedToolArguments::EditStatus),
         "remote_sync_edits" => deserialize(arguments).map(ParsedToolArguments::SyncEdits),
@@ -951,6 +973,10 @@ fn validate_parsed_arguments(
                 return Err(Constraint);
             }
             validate_optional_range(arguments.max_bytes, 1, 1_048_576)
+        }
+        ParsedToolArguments::ViewImage(arguments) => {
+            validate_host(&arguments.host)?;
+            validate_path(&arguments.path)
         }
         ParsedToolArguments::OutputRead(arguments) => {
             if !is_lower_hex(&arguments.output_ref, 32) {

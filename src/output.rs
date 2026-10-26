@@ -80,6 +80,21 @@ pub(crate) struct InternalCapturedOutput {
 }
 
 impl InternalCapturedOutput {
+    // Call from blocking work and keep the InternalSpoolOwner alive until the
+    // reader is dropped. This avoids materializing a complete binary source.
+    pub(crate) fn open_reader(
+        &self,
+        stream: StreamKind,
+    ) -> BridgeResult<std::io::BufReader<std::fs::File>> {
+        let path = match stream {
+            StreamKind::Stdout => &self.stdout_path,
+            StreamKind::Stderr => &self.stderr_path,
+        };
+        std::fs::File::open(path)
+            .map(std::io::BufReader::new)
+            .map_err(BridgeError::io)
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(directory: &Path, stdout: &[u8], stderr: &[u8]) -> Self {
         let stdout_path = directory.join("cursor.stdout");

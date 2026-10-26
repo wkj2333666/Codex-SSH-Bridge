@@ -18,12 +18,23 @@ troubleshooting or add hosts when either representation contains aliases. Only
 an empty hosts array together with empty text means that no aliases were
 discovered.
 
-Other successful tools expose their model-readable result in
+Successful text tools expose their model-readable result in
 `structuredContent.output`; standard MCP clients receive the same bounded text
 in `content.text`. Read `output` directly when present: it contains listings,
 stat records, search matches, file bodies, write confirmations, retained
 pages, or labeled stdout/stderr. The remaining structured fields carry only
 state such as `exit_code`, `truncated`, `output_ref`, `next_offset`, and `eof`.
+
+For seeing a remote PNG or JPEG, use `remote_view_image` rather than reading
+Base64 chunks through `remote_run`. It returns native MCP image content, not
+`structuredContent.output`. In code-mode, forward the returned image block with
+`image(block)` rather than `text(result)`. Default `detail:"high"` fits a
+1536-pixel box; use `detail:"original"` when original pixel dimensions matter.
+The metadata reports original (orientation-corrected) and displayed dimensions.
+Source transfers are internally chunked to temporary disk, independently of
+text read limits; do not split them into multiple tool calls. Output/spool
+quotas and the 16-megapixel decode limit still apply. Previews adapt to the
+response budget; original mode reports an error rather than silently resizing.
 
 The bridge keeps one local-owned persistent SSH session per configured alias and multiplexes independent requests over it. The first request resolves local SSH policy and probes capabilities. On a supported Linux host it verifies or installs a private mode-0700 helper under the remote account's `~/.local/share/codex-ssh-bridge/helpers/<bridge-version>/<target>/helper`; the helper process ends with the SSH session, while the verified file is reused after a bridge restart. Warm requests send one framed command with no per-request `ssh -G`, root observation, installation probe, hash, lock, or upload. Unsupported hosts and pre-request helper failures use the ordered temporary-helper then POSIX-dispatcher fallback. Transport mode remains internal diagnostic data. Each request still has its own process group, cwd, stdin, stdout, stderr, timeout, and cancellation state.
 The selected dispatcher applies the absolute cwd, requested shell, and timeout
@@ -57,6 +68,7 @@ of the remote state is more important.
 - `remote_stat`: `{host, paths:[...]}`; `paths` is plural.
 - `remote_search`: `{host, query, path, globs?, max_results?, binary?}`; `path` must be absolute. `query` is a case-sensitive literal, not a regex. A glob without `/` matches basenames at any depth; a glob with `/` is relative to `path`. Use `globs`, not invented exclude or kind fields.
 - `remote_read`: `{host, paths:[...], start_line?, max_lines?, max_bytes?}`; reads are line-based and bounded.
+- `remote_view_image`: `{host, path, detail?:"high"|"original"}`; views a PNG or JPEG as native image content. `path` must be absolute.
 - `remote_output_read`: `{output_ref, stream:"stdout"|"stderr", offset?, max_bytes?}`; do not add a host.
 - `remote_edit_status`: `{host}`; inspects local buffered edit state without touching the remote host.
 - `remote_sync_edits`: `{host}`; retries synchronization of buffered edits for one host.
