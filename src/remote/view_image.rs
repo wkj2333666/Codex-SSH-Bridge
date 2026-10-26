@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -188,7 +188,7 @@ fn prepare_image(
     let mut reader = ImageReader::new(output.open_reader(StreamKind::Stdout)?)
         .with_guessed_format()
         .map_err(|_| invalid_image())?;
-    let format = reader.format().ok_or_else(invalid_image)?;
+    let mut format = reader.format().ok_or_else(invalid_image)?;
     if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg) {
         return Err(invalid_image());
     }
@@ -197,21 +197,28 @@ fn prepare_image(
     limits.max_image_height = Some(16_384);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let mut decoder = reader.into_decoder().map_err(|_| invalid_image())?;
-    let (width, height) = decoder.dimensions();
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16_000_000 {
-        return Err(BridgeError::new(
-            ErrorCode::OutputLimit,
-            "image exceeds the 16 megapixel decoding limit",
-            false,
-        ));
-    }
-    let orientation = decoder.orientation().map_err(|_| invalid_image())?;
-    let mut decoded = DynamicImage::from_decoder(decoder).map_err(|_| invalid_image())?;
+    let (mut decoded, orientation) = if format == ImageFormat::Jpeg {
+        // image 0.25's JPEG adapter calls read_to_end internally. Use a
+        // reader-based decoder so encoded sources are not buffered wholesale.
+        decode_jpeg(reader.into_inner(), cancel)?
+    } else {
+        let mut decoder = reader.into_decoder().map_err(|_| invalid_image())?;
+        let (width, height) = decoder.dimensions();
+        check_dimensions(width, height)?;
+        let orientation = decoder.orientation().map_err(|_| invalid_image())?;
+        (
+            DynamicImage::from_decoder(decoder).map_err(|_| invalid_image())?,
+            orientation,
+        )
+    };
     check_cancel(cancel)?;
     decoded.apply_orientation(orientation);
     let original_width = decoded.width();
     let original_height = decoded.height();
+    if matches!(decoded, DynamicImage::ImageLuma16(_)) {
+        // Preserve lossless 16-bit grayscale JPEG pixels in a PNG response.
+        format = ImageFormat::Png;
+    }
     if detail == ImageDetail::High && (original_width > 1536 || original_height > 1536) {
         decoded = decoded.thumbnail(1536, 1536);
     }
@@ -268,6 +275,89 @@ fn prepare_image(
     })
 }
 
+fn check_dimensions(width: u32, height: u32) -> BridgeResult<()> {
+    if width == 0
+        || height == 0
+        || width > 16_384
+        || height > 16_384
+        || u64::from(width) * u64::from(height) > 16_000_000
+    {
+        return Err(BridgeError::new(
+            ErrorCode::OutputLimit,
+            "image exceeds the decoding dimension/pixel budget",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn decode_jpeg(
+    reader: impl Read,
+    cancel: &CancellationToken,
+) -> BridgeResult<(DynamicImage, image::metadata::Orientation)> {
+    let mut decoder = jpeg_decoder::Decoder::new(BufReader::new(CancellableImageReader {
+        inner: reader,
+        cancel,
+    }));
+    decoder.set_max_decoding_buffer_size(128 * 1024 * 1024);
+    decoder.read_info().map_err(|_| invalid_image())?;
+    let info = decoder.info().ok_or_else(invalid_image)?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    check_dimensions(width, height)?;
+    let data = decoder.decode().map_err(|_| invalid_image())?;
+    check_cancel(cancel)?;
+    let orientation = decoder
+        .exif_data()
+        .and_then(image::metadata::Orientation::from_exif_chunk)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let image = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => DynamicImage::ImageRgb8(
+            image::RgbImage::from_raw(width, height, data).ok_or_else(invalid_image)?,
+        ),
+        jpeg_decoder::PixelFormat::L8 => DynamicImage::ImageLuma8(
+            image::GrayImage::from_raw(width, height, data).ok_or_else(invalid_image)?,
+        ),
+        jpeg_decoder::PixelFormat::L16 => {
+            let samples = data
+                .chunks_exact(2)
+                .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                .collect();
+            DynamicImage::ImageLuma16(
+                image::ImageBuffer::from_raw(width, height, samples).ok_or_else(invalid_image)?,
+            )
+        }
+        jpeg_decoder::PixelFormat::CMYK32 => {
+            let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+            for pixel in data.chunks_exact(4) {
+                let k = 255 - u16::from(pixel[3]);
+                rgb.extend(
+                    pixel[..3]
+                        .iter()
+                        .map(|&channel| ((255 - u16::from(channel)) * k / 255) as u8),
+                );
+            }
+            DynamicImage::ImageRgb8(
+                image::RgbImage::from_raw(width, height, rgb).ok_or_else(invalid_image)?,
+            )
+        }
+    };
+    Ok((image, orientation))
+}
+
+struct CancellableImageReader<'a, R> {
+    inner: R,
+    cancel: &'a CancellationToken,
+}
+
+impl<R: Read> Read for CancellableImageReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            return Err(io::Error::other("image decode cancelled"));
+        }
+        self.inner.read(buffer)
+    }
+}
+
 struct BoundedImageWriter {
     bytes: Vec<u8>,
     limit: usize,
@@ -286,5 +376,55 @@ impl Write for BoundedImageWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountReads<R> {
+        inner: R,
+        bytes: Arc<AtomicUsize>,
+    }
+
+    impl<R: Read> Read for CountReads<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.inner.read(buffer)?;
+            self.bytes.fetch_add(count, Ordering::Relaxed);
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn jpeg_decoder_does_not_materialize_the_complete_encoded_stream() {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&DynamicImage::new_rgb8(16, 12))
+            .unwrap();
+        let consumed = Arc::new(AtomicUsize::new(0));
+        // A complete image followed by a large tail catches read_to_end without
+        // allocating that tail in the test itself.
+        let reader = CountReads {
+            inner: io::Cursor::new(jpeg).chain(io::repeat(0).take(32 * 1024 * 1024)),
+            bytes: Arc::clone(&consumed),
+        };
+        let (decoded, _) = decode_jpeg(reader, &CancellationToken::new()).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (16, 12));
+        assert!(consumed.load(Ordering::Relaxed) < 64 * 1024);
+    }
+
+    #[test]
+    fn encoding_writer_never_retains_bytes_past_its_budget() {
+        let mut writer = BoundedImageWriter {
+            bytes: Vec::new(),
+            limit: 4,
+            exceeded: false,
+        };
+        writer.write_all(&[1, 2, 3]).unwrap();
+        assert!(writer.write_all(&[4, 5]).is_err());
+        assert_eq!(writer.bytes, [1, 2, 3]);
+        assert!(writer.exceeded);
     }
 }
