@@ -24,6 +24,7 @@ use tokio::io::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod image_tools;
 mod support;
 
 fn remote_tools_fixture() -> (tempfile::TempDir, Arc<RemoteBridge>, RemoteMcpTools) {
@@ -939,6 +940,7 @@ fn task8_registry_contains_exactly_the_high_level_remote_tools() {
             "remote_stat",
             "remote_search",
             "remote_read",
+            "remote_view_image",
             "remote_output_read",
             "remote_edit_status",
             "remote_sync_edits",

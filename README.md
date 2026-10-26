@@ -193,11 +193,11 @@ Use $remote-ssh-ops to inspect the devbox repository, patch the timeout bug, and
 Use $remote-ssh-ops to search devbox logs without downloading unbounded output.
 ```
 
-The twelve MCP tools are:
+The file and command MCP tools are:
 
 | Read-oriented | Mutation/command |
 |---|---|
-| `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_output_read`, `remote_edit_status` | `remote_apply_patch`, `remote_write`, `remote_run`, `remote_sync_edits`, `remote_discard_edits` |
+| `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_view_image`, `remote_output_read`, `remote_edit_status` | `remote_apply_patch`, `remote_write`, `remote_run`, `remote_sync_edits`, `remote_discard_edits` |
 
 The default flow is bounded search/read → Codex patch → remote verification.
 Calls are synchronous. Normal results mirror familiar local tools: listings,
@@ -205,10 +205,22 @@ search matches, file bodies, and stdout/stderr are exposed as concise
 `structuredContent.output`; matching `content.text` remains available to
 standard MCP clients. Other structured fields contain only state such as
 `exit_code`, truncation, or uncertain outcomes. The logical model-visible
-payload is capped at 32 KiB; oversized detail is retained under an opaque
+text payload is capped at 32 KiB; oversized detail is retained under an opaque
 `output_ref` and paged with
 `remote_output_read`, so the Agent never needs to reconstruct transport logic.
 Errors report factual codes and relevant state without prescribing an action.
+
+`remote_view_image({"host":"devbox","path":"/absolute/image.jpg"})` returns
+native MCP image content, with no Base64 text dump or duplicate image in
+`structuredContent`. PNG and JPEG are detected by their contents, decoded and
+validated locally, and returned over the existing persistent SSH transport.
+The default `detail:"high"` fits a 1536-pixel box without upscaling;
+`detail:"original"` preserves pixel dimensions. EXIF orientation is applied and
+PNG transparency is retained. Metadata reports original and displayed sizes.
+The encoded source must fit `max_read_bytes` (default 1 MiB); decoding is bounded
+to 16 megapixels and the result must fit the MCP frame budget. Unsupported,
+corrupt or oversized images return an error, never a truncated image. No image
+server, remote Python dependency, public URL, or extra SSH connection is needed.
 
 All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` accepts one native Codex `*** Begin Patch` envelope with Add, Update, Delete, and `*** Move to:` operations; every source and destination path embedded in the patch must be absolute. `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Bash is never silently changed to sh: if Bash is unavailable, the capability error records that Bash was requested and which shells are available, leaving the next decision to the model. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 

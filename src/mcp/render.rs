@@ -23,6 +23,45 @@ const MODEL_INLINE_RESULT_BYTES: usize = 32 * 1024;
 const SAFE_TEXT_BYTES: usize = 1_024;
 const MAX_WARNINGS: usize = 16;
 
+pub(super) fn view_image(
+    result: crate::error::BridgeResult<crate::remote::ViewedImage>,
+    budget: WireBudget,
+) -> CallToolResult {
+    let image = match result {
+        Ok(image) => image,
+        Err(error) => return render_error(error, budget),
+    };
+    // Image payloads are not text previews. Do not truncate them or repeat
+    // their base64 in structuredContent; honor the complete MCP frame budget.
+    let result = CallToolResult {
+        content: vec![super::Content::Image(super::ImageContent {
+            kind: "image",
+            data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+            mime_type: image.mime_type,
+        })],
+        structured_content: json!({
+            "original_width": image.original_width,
+            "original_height": image.original_height,
+            "width": image.width,
+            "height": image.height,
+            "resized": image.width != image.original_width || image.height != image.original_height,
+        }),
+        is_error: false,
+    };
+    if serialized_at_most(&result, budget.result_bytes) {
+        result
+    } else {
+        render_error(
+            BridgeError::new(
+                ErrorCode::OutputLimit,
+                "image exceeds the MCP response budget; use detail high or a smaller preview",
+                false,
+            ),
+            budget,
+        )
+    }
+}
+
 pub fn maximum_compact_fallback_result_bytes() -> usize {
     static MAXIMUM: OnceLock<usize> = OnceLock::new();
     *MAXIMUM.get_or_init(|| {
@@ -580,7 +619,7 @@ pub fn job_logs(
             "stderr_truncated":result.logs.stderr.truncated,
         });
         let rendered = CallToolResult {
-            content: vec![TextContent::new(text.clone())],
+            content: vec![TextContent::new(text.clone()).into()],
             structured_content: with_output(metadata.clone(), &text),
             is_error: false,
         };
@@ -750,7 +789,7 @@ fn complete_text_result(
         structured_content
     };
     let result = CallToolResult {
-        content: vec![TextContent::new(text)],
+        content: vec![TextContent::new(text).into()],
         structured_content,
         is_error: false,
     };
@@ -776,7 +815,7 @@ fn bounded_text_result(
             structured_content.clone()
         };
         let result = CallToolResult {
-            content: vec![TextContent::new(text.clone())],
+            content: vec![TextContent::new(text.clone()).into()],
             structured_content: visible_structured,
             is_error,
         };
@@ -981,7 +1020,7 @@ fn compact_result(structured_content: Value, is_error: bool) -> CallToolResult {
     let text = serde_json::to_string(&structured_content)
         .expect("compact MCP presentation metadata is serializable");
     CallToolResult {
-        content: vec![TextContent::new(text)],
+        content: vec![TextContent::new(text).into()],
         structured_content,
         is_error,
     }
@@ -1000,7 +1039,7 @@ fn budgeted_compact_result(
     result
 }
 
-fn render_error(error: BridgeError, budget: WireBudget) -> CallToolResult {
+pub(super) fn render_error(error: BridgeError, budget: WireBudget) -> CallToolResult {
     render_error_borrowed(&error, budget)
 }
 
@@ -1105,7 +1144,7 @@ fn full_error_result(
         return None;
     }
     let result = CallToolResult {
-        content: vec![TextContent::new(text)],
+        content: vec![TextContent::new(text).into()],
         structured_content,
         is_error: true,
     };

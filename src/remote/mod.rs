@@ -30,7 +30,10 @@ mod protocol;
 mod read;
 mod run;
 mod search;
+mod view_image;
 mod write;
+
+pub use view_image::{ImageDetail, ViewImageRequest, ViewedImage};
 
 pub use job::{
     RemoteJobDeleteResult, RemoteJobIdRequest, RemoteJobListRequest, RemoteJobListResult,
