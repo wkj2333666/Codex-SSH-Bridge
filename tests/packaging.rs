@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-const EXPECTED_TOOLS: [&str; 18] = [
+const EXPECTED_TOOLS: [&str; 19] = [
     "remote_hosts",
     "remote_list",
     "remote_stat",
     "remote_search",
     "remote_read",
+    "remote_view_image",
     "remote_output_read",
     "remote_edit_status",
     "remote_sync_edits",
