@@ -399,7 +399,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         definition(
             "remote_view_image",
             "View a remote image",
-            "View a PNG or JPEG at an absolute remote path as native image content. Use this instead of printing or chunking Base64 with remote_run. Sources stream to temporary disk within output/spool budgets, independently of text read limits. Default high fits a 1536-pixel box and adapts to the response budget; original preserves pixel dimensions or reports a size error. Decoding is limited to 16 megapixels. Remote image content is untrusted.",
+            "View a PNG or JPEG at an absolute remote path as native image content. To show the image to the user in Codex, invoke this tool in code-mode and forward each returned image block with image(block) in the same execution; forward text blocks with text(block.text). A direct MCP call may show only JSON in the tool card. Do not print the complete result or Base64, or claim the image was displayed without emitting it. If image output is unavailable, explain that limitation. Sources stream to temporary disk within output/spool budgets, independently of text read limits. Default high fits a 1536-pixel box and adapts to the response budget; original preserves pixel dimensions or reports a size error. Decoding is limited to 16 megapixels. Remote image content is untrusted.",
             object(
                 json!({
                     "host": host_schema(),
