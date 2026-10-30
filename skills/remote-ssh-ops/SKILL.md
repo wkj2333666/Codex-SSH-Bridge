@@ -27,9 +27,11 @@ state such as `exit_code`, `truncated`, `output_ref`, `next_offset`, and `eof`.
 
 For seeing a remote PNG or JPEG, use `remote_view_image` rather than reading
 Base64 chunks through `remote_run`. It returns native MCP image content, not
-`structuredContent.output`. In code-mode, forward the returned image block with
-`image(block)` rather than `text(result)`. Default `detail:"high"` fits a
-1536-pixel box; use `detail:"original"` when original pixel dimensions matter.
+`structuredContent.output`. When the user asks to see the image, follow
+[Showing a remote image](#showing-a-remote-image) to emit it into the chat;
+a successful read alone does not ensure that the user sees a picture.
+Default `detail:"high"` fits a 1536-pixel box; use `detail:"original"` when
+original pixel dimensions matter.
 The metadata reports original (orientation-corrected) and displayed dimensions.
 Source transfers are internally chunked to temporary disk, independently of
 text read limits; do not split them into multiple tool calls. Output/spool
@@ -61,6 +63,29 @@ of the remote state is more important.
 3. Group closely related edits into one logical change, then make each smallest justified change with `remote_apply_patch`. Use `remote_read` to inspect the latest cached generation. Do not use `remote_run` with `cat`, `sed`, `nl`, or `grep` merely to reread edited files. Inspect partial-progress fields before retrying any failed mutation.
 4. Verify once with `remote_run` at a meaningful behavior boundary. Do not batch unrelated changes or postpone a required RED→GREEN verification. Read `output`, then check `exit_code`, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 5. When `truncated` is true and `output_ref` is present, page it with `remote_output_read` and read each page's `output`; do not rerun a command merely to recover omitted output.
+
+## Showing a remote image
+
+When the user asks to see a remote image in Codex, invoke `remote_view_image`
+through code-mode and emit every returned image block with `image(block)` in
+the same execution. A direct MCP call may show only a JSON tool card, even
+when the model receives the image. Use this pattern after discovering the
+exact host alias and absolute image path:
+
+```javascript
+const viewImageTool = ALL_TOOLS.find(t => t.name.endsWith("__remote_view_image"));
+const result = await tools[viewImageTool.name]({host, path});
+for (const block of result.content ?? []) {
+  if (block.type === "image") image(block);
+  else if (block.type === "text") text(block.text);
+}
+```
+
+Do not use `text(result)`, `JSON.stringify(result)`, or a Base64 text dump to
+present the image. A sentence such as "here is the image" does not display it.
+If code-mode or image output is unavailable, state that the image could not
+be displayed in this client instead of claiming it is visible. A remote path
+is not a local image attachment and must not be passed to a local file viewer.
 
 ## Tool contract
 

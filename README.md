@@ -229,6 +229,12 @@ returns pixels, not a byte-identical download of the source container. Unsupport
 corrupt or over-budget images return an error, never a truncated image. No image
 server, remote Python dependency, public URL, or extra SSH connection is needed.
 
+To show the result to the user in Codex, call the tool through code-mode and
+emit each returned image block with `image(block)` in the same execution.
+Forward error text with `text(block.text)`. A direct MCP tool card may display
+only the raw JSON, so a successful image read alone does not confirm that the
+user can see it. See the Skill's [image display workflow](skills/remote-ssh-ops/SKILL.md#showing-a-remote-image).
+
 All MCP file paths and `remote_run.cwd` are absolute remote paths. The bridge never derives them from a Codex task ID, SSH home, configured root, or previous request. `remote_apply_patch` accepts one native Codex `*** Begin Patch` envelope with Add, Update, Delete, and `*** Move to:` operations; every source and destination path embedded in the patch must be absolute. `remote_run` accepts one command string plus `shell: bash|sh|login`; omission means `bash`. Bash is never silently changed to sh: if Bash is unavailable, the capability error records that Bash was requested and which shells are available, leaving the next decision to the model. `login` resolves the account shell from NSS or `/etc/passwd`, never from `$SHELL`, and fails closed when it cannot do so safely. Inspect `exit_code`, warnings, truncation, mutation uncertainty, and process-continuation uncertainty when present.
 
 Writes and patches use a bounded per-process in-memory write-back cache.
