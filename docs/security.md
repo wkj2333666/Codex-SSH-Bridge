@@ -64,6 +64,13 @@ Every operational SSH call forces separate `-o` arguments for:
 
 Connection setup also applies the configured `ConnectTimeout`. Ordinary SSH and SSHFS both inherit the two server-alive options exactly once; SSHFS additionally applies `reconnect` and never enables `allow_other`.
 
+Explicit MCP port forwards preserve this policy: a bridge-owned IPv4 loopback
+listener streams each accepted connection through OpenSSH `-W` to the selected
+alias's `127.0.0.1` port. No inherited forwarding rules are enabled, and MCP
+cannot choose a public bind address, arbitrary destination address, or SSH
+options. Closing the forward or shutting down the bridge closes its active
+TCP streams. Listener readiness does not assert application readiness.
+
 The first operation for an alias runs bounded `ssh -G` with the security-critical options and hashes the resulting configuration. That digest and the derived policy are cached for the bridge process; warm requests do not repeat `ssh -G`. A mismatch discovered during initial setup is non-retryable `INVALID_CONFIG`; restart the bridge only after reviewing an intentional local alias change. Pattern-only aliases are not added to the bridge config. Host aliases are passed after `--`, and the MCP surface accepts no arbitrary SSH option.
 
 Each MCP runner includes a private instance identity in the `ControlPath` hash.

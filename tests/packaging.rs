@@ -4,13 +4,16 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-const EXPECTED_TOOLS: [&str; 19] = [
+const EXPECTED_TOOLS: [&str; 22] = [
     "remote_hosts",
     "remote_list",
     "remote_stat",
     "remote_search",
     "remote_read",
     "remote_view_image",
+    "remote_forward_port",
+    "remote_list_forwards",
+    "remote_close_forward",
     "remote_output_read",
     "remote_edit_status",
     "remote_sync_edits",
@@ -103,7 +106,7 @@ fn package_versions_are_coordinated() {
         .as_str()
         .expect("plugin version must be a string");
 
-    assert_eq!(cargo_version, "1.1.1");
+    assert_eq!(cargo_version, "1.2.0");
     assert_eq!(lock_version, cargo_version);
     assert_eq!(plugin_version, cargo_version);
 }
@@ -331,7 +334,8 @@ fn skill_names_exactly_the_public_remote_tools() {
     let actual_remote_tools: BTreeSet<_> = identifiers
         .iter()
         .copied()
-        .filter(|token| token.starts_with("remote_"))
+        // remote_port is an input field, not a tool name.
+        .filter(|token| token.starts_with("remote_") && *token != "remote_port")
         .collect();
     let expected_remote_tools: BTreeSet<_> = EXPECTED_TOOLS.into_iter().collect();
 

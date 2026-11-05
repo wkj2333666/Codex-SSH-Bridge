@@ -94,6 +94,9 @@ is not a local image attachment and must not be passed to a local file viewer.
 - `remote_search`: `{host, query, path, globs?, max_results?, binary?}`; `path` must be absolute. `query` is a case-sensitive literal, not a regex. A glob without `/` matches basenames at any depth; a glob with `/` is relative to `path`. Use `globs`, not invented exclude or kind fields.
 - `remote_read`: `{host, paths:[...], start_line?, max_lines?, max_bytes?}`; reads are line-based and bounded.
 - `remote_view_image`: `{host, path, detail?:"high"|"original"}`; views a PNG or JPEG as native image content. `path` must be absolute.
+- `remote_forward_port`: `{host, remote_port, local_port?}`; listen on the bridge machine's `127.0.0.1` and forward TCP to the selected host's `127.0.0.1:remote_port`. Omit `local_port` for automatic allocation.
+- `remote_list_forwards`: `{}`; list forwards owned by this bridge process.
+- `remote_close_forward`: `{forward_id}`; close one owned forward and its active connections. Repeated close returns `closed:false`.
 - `remote_output_read`: `{output_ref, stream:"stdout"|"stderr", offset?, max_bytes?}`; do not add a host.
 - `remote_edit_status`: `{host}`; inspects local buffered edit state without touching the remote host.
 - `remote_sync_edits`: `{host}`; retries synchronization of buffered edits for one host.
@@ -137,6 +140,28 @@ This flag means the descendant may still be running, not that a mutation can be
 retried safely. The stdout/stderr preview is only the bounded snapshot observed
 before completion and may omit later service output. Keep the service PID/log
 path from the command and manage it explicitly on the remote host.
+
+## Viewing services behind another SSH host
+
+If Codex and the bridge run on pi while a web service runs on tkmain, first
+call `remote_forward_port` with `host:"tkmain"` and the service's port. The
+returned `bridge_host`, `listen_address`, and `local_port` identify the listener
+on pi. The desktop or mobile client must then forward that pi port to the
+user's device. A URL using localhost always refers to the machine where it
+is opened; do not present tkmain's localhost URL as already reachable on the
+user's laptop or phone.
+
+`state:"listening"` confirms the bridge listener; `target_reachable:null` means
+the remote application has not been checked. Starting a forward does not
+start the application. Inspect the application's existing status or use its
+known health endpoint when needed. Report the actual selected local port,
+especially when the requested remote and local ports differ.
+
+Forwards persist across tool calls within the MCP process. Closing a forward
+also closes its active TCP connections. MCP shutdown or process exit removes
+the listeners; they do not persist across task or bridge restarts. The bridge
+owns the SSH transport; do not launch ad hoc SSH tunnels through `remote_run`.
+After an interrupted start, inspect `remote_list_forwards` before retrying.
 
 ## SSHFS
 

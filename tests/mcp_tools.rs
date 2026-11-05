@@ -27,6 +27,34 @@ use tokio_util::sync::CancellationToken;
 mod image_tools;
 mod support;
 
+#[tokio::test]
+async fn port_forward_arguments_reject_invalid_ports_and_arbitrary_bind_addresses() {
+    let (_runtime, _bridge, tools) = remote_tools_fixture();
+    for arguments in [
+        json!({"host":"dev","remote_port":0}),
+        json!({"host":"dev","remote_port":65536}),
+        json!({"host":"dev","remote_port":9860,"local_port":0}),
+        json!({"host":"dev","remote_port":9860,"listen_address":"0.0.0.0"}),
+        json!({"host":"dev","remote_port":9860,"remote_address":"example.com"}),
+    ] {
+        let result = call_json(&tools, "remote_forward_port", arguments).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "INVALID_ARGUMENT"
+        );
+    }
+    let list = call_json(&tools, "remote_list_forwards", json!({})).await;
+    assert_eq!(list["structuredContent"]["count"], 0);
+    let closed = call_json(
+        &tools,
+        "remote_close_forward",
+        json!({"forward_id":"forward-1"}),
+    )
+    .await;
+    assert_eq!(closed["structuredContent"]["closed"], false);
+}
+
 fn remote_tools_fixture() -> (tempfile::TempDir, Arc<RemoteBridge>, RemoteMcpTools) {
     let runtime_base = tempfile::TempDir::new().unwrap();
     let runtime = RuntimePaths::ensure_from_base(runtime_base.path()).unwrap();
@@ -941,6 +969,9 @@ fn task8_registry_contains_exactly_the_high_level_remote_tools() {
             "remote_search",
             "remote_read",
             "remote_view_image",
+            "remote_forward_port",
+            "remote_list_forwards",
+            "remote_close_forward",
             "remote_output_read",
             "remote_edit_status",
             "remote_sync_edits",

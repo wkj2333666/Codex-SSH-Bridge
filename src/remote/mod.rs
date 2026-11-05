@@ -23,6 +23,7 @@ use crate::ssh::{FixedRunRequest, FixedRunResult, HelperMode, SshRunner};
 mod codex_patch;
 mod edit_cache;
 mod edit_sync;
+mod forward;
 mod job;
 mod metadata;
 mod patch;
@@ -33,6 +34,7 @@ mod search;
 mod view_image;
 mod write;
 
+pub use forward::{CloseForwardRequest, ForwardPortRequest, PortForward};
 pub use view_image::{ImageDetail, ViewImageRequest, ViewedImage};
 
 pub use job::{
@@ -65,6 +67,7 @@ pub struct RemoteBridge {
     edit_backend: Arc<edit_sync::SshEditBackend>,
     edit_cache: Arc<edit_cache::EditCache>,
     edit_buffering_enabled: bool,
+    forwards: forward::ForwardManager,
 }
 
 fn attach_fixed_result_context(
@@ -236,6 +239,7 @@ impl RemoteBridge {
             edit_backend,
             edit_cache,
             edit_buffering_enabled,
+            forwards: forward::ForwardManager::default(),
         }
     }
 
@@ -251,6 +255,7 @@ impl RemoteBridge {
     }
 
     pub async fn shutdown(&self) -> BridgeResult<()> {
+        self.forwards.shutdown().await;
         self.edit_cache.shutdown().await.map_err(edit_bridge_error)
     }
 

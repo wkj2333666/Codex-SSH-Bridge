@@ -152,7 +152,8 @@ impl RealSshFixture {
                     "PermitRootLogin no\n",
                     "AllowUsers {username}\n",
                     "AllowAgentForwarding no\n",
-                    "AllowTcpForwarding no\n",
+                    "AllowTcpForwarding local\n",
+                    "PermitOpen 127.0.0.1:*\n",
                     "X11Forwarding no\n",
                     "PermitTunnel no\n",
                     "PermitTTY no\n",
@@ -839,6 +840,7 @@ async fn real_localhost_sshd_covers_transport_shell_files_mutation_and_cancellat
         None
     };
 
+    verify_port_forward_lifecycle(&bridge).await;
     drop(bridge);
     drop(runner);
     fixture
@@ -967,6 +969,124 @@ fn install_helper_fixture() -> Option<PathBuf> {
     fs::copy(source, &destination).ok()?;
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).ok()?;
     Some(destination)
+}
+
+async fn verify_port_forward_lifecycle(bridge: &RemoteBridge) {
+    use codex_ssh_bridge::remote::{CloseForwardRequest, ForwardPortRequest};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    let target = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let mut clients = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                Some(_) = clients.join_next(), if !clients.is_empty() => {},
+                accepted = target.accept() => {
+                    let (mut socket, _) = accepted.unwrap();
+                    clients.spawn(async move {
+                        let mut request = [0; 4];
+                        if socket.read_exact(&mut request).await.is_ok() {
+                            assert_eq!(&request, b"ping");
+                            socket.write_all(b"pong").await.unwrap();
+                            // Keep the connection open to exercise close/shutdown.
+                            let _ = socket.read(&mut request).await;
+                        }
+                    });
+                }
+            }
+        }
+    });
+    let info = bridge
+        .forward_port(
+            ForwardPortRequest {
+                host: BASH_HOST.to_owned(),
+                remote_port: target_port,
+                local_port: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(info.listen_address, "127.0.0.1");
+    assert_eq!(info.listen_scope, "bridge_host");
+    assert_eq!(info.target_reachable, None);
+    assert_eq!(bridge.list_forwards().len(), 1);
+    let address = (std::net::Ipv4Addr::LOCALHOST, info.local_port);
+    let transfer = async {
+        let mut sockets = Vec::new();
+        for _ in 0..2 {
+            let mut socket = TcpStream::connect(address).await.unwrap();
+            socket.write_all(b"ping").await.unwrap();
+            let mut response = [0; 4];
+            socket.read_exact(&mut response).await.unwrap();
+            assert_eq!(&response, b"pong");
+            sockets.push(socket);
+        }
+        sockets
+    };
+    let mut sockets = tokio::time::timeout(Duration::from_secs(10), transfer)
+        .await
+        .unwrap();
+    assert!(
+        bridge
+            .forward_port(
+                ForwardPortRequest {
+                    host: BASH_HOST.to_owned(),
+                    remote_port: target_port,
+                    local_port: Some(info.local_port),
+                },
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        bridge
+            .close_forward(CloseForwardRequest {
+                forward_id: info.forward_id.clone()
+            })
+            .await
+    );
+    assert!(
+        !bridge
+            .close_forward(CloseForwardRequest {
+                forward_id: info.forward_id
+            })
+            .await
+    );
+    assert!(bridge.list_forwards().is_empty());
+    assert!(TcpStream::connect(address).await.is_err());
+    for socket in &mut sockets {
+        let mut byte = [0];
+        let read = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(matches!(read, Ok(0)) || read.is_err());
+    }
+    let second = bridge
+        .forward_port(
+            ForwardPortRequest {
+                host: BASH_HOST.to_owned(),
+                remote_port: target_port,
+                local_port: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    bridge.shutdown().await.unwrap();
+    assert!(bridge.list_forwards().is_empty());
+    assert!(
+        TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, second.local_port))
+            .await
+            .is_err()
+    );
+    server.abort();
+    let _ = server.await;
 }
 
 fn utf8(value: &EncodedValue) -> &str {
