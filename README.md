@@ -198,6 +198,7 @@ The file and command MCP tools are:
 | Read-oriented | Mutation/command |
 |---|---|
 | `remote_hosts`, `remote_list`, `remote_stat`, `remote_search`, `remote_read`, `remote_view_image`, `remote_output_read`, `remote_edit_status` | `remote_apply_patch`, `remote_write`, `remote_run`, `remote_sync_edits`, `remote_discard_edits` |
+| `remote_list_forwards` | `remote_forward_port`, `remote_close_forward` |
 
 The default flow is bounded search/read → Codex patch → remote verification.
 Calls are synchronous. Normal results mirror familiar local tools: listings,
@@ -256,6 +257,29 @@ The internally selected helper transport does not change command shell
 selection (`bash` remains the default unless the caller explicitly requests
 `sh` or `login`).
 
+## Port forwarding
+
+`remote_forward_port({"host":"tkmain","remote_port":9860,"local_port":9860})`
+listens on `127.0.0.1:9860` on the machine running the bridge and sends TCP
+traffic to `127.0.0.1:9860` on tkmain over SSH. Omit `local_port` to allocate a
+free port; a requested port that is occupied returns an error. Results identify
+`bridge_host`, `listen_scope:"bridge_host"`, both endpoints, and `forward_id`.
+
+For a laptop connected to Codex on pi, this supplies the pi-to-tkmain leg.
+Forward the returned pi port through the desktop client's existing SSH
+connection to view it from the laptop or phone. A tkmain localhost URL alone
+does not establish either forwarding leg. `state:"listening"` confirms only
+the local listener; `target_reachable:null` means application reachability has
+not been checked. The tool does not start the application.
+
+`remote_list_forwards({})` lists owned listeners. Close a listener and its active
+connections with `remote_close_forward({"forward_id":"forward-1"})`.
+Listeners survive tool-call completion but end on MCP shutdown or bridge exit.
+They are bound only to IPv4 loopback and target only the SSH host's IPv4
+loopback. Binary TCP data streams through OpenSSH direct-TCP channels, reusing
+the private master on Linux/macOS; Windows OpenSSH opens a connection per TCP
+stream. No HTTP server, extra remote dependency, or detached tunnel is needed.
+
 ## Human direct CLI
 
 The direct CLI accepts argv and handles shell-word encoding inside the bridge:
@@ -284,6 +308,6 @@ Use SSHFS for browsing or narrow human editing. Keep builds, Git, tests, contain
 
 ## Security and performance
 
-The bridge forces non-interactive authentication, strict host keys, no agent/X11/port forwarding, no local command, no TTY, bounded connection time, `ServerAliveInterval=15`, `ServerAliveCountMax=3`, and a private hashed ControlMaster socket for ordinary SSH and SSHFS. It never accepts arbitrary SSH options from MCP. Remote output remains untrusted and remote Unix permissions are the hard isolation boundary.
+The bridge forces non-interactive authentication, strict host keys, no agent/X11 or inherited port forwarding, no local command, no TTY, bounded connection time, `ServerAliveInterval=15`, `ServerAliveCountMax=3`, and a private hashed ControlMaster socket for ordinary SSH and SSHFS. It never accepts arbitrary SSH options from MCP. Explicit MCP port forwards connect only the bridge's IPv4 loopback listener to the selected SSH host's IPv4 loopback port. Remote output remains untrusted and remote Unix permissions are the hard isolation boundary.
 
 Read [docs/security.md](docs/security.md) for the complete trust model and flags. Read [docs/performance.md](docs/performance.md) for performance notes.

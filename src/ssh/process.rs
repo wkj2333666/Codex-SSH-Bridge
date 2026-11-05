@@ -290,7 +290,74 @@ pub struct SshRunner {
     sessions: Arc<SessionPool>,
 }
 
+/// Holds a session lease so Unix direct-TCP channels can reuse its OpenSSH
+/// master. Windows OpenSSH establishes the same channels without multiplexing.
+pub(crate) struct ForwardTransport {
+    host: String,
+    policy: SshPolicy,
+    executable: PathBuf,
+    environment: BTreeMap<OsString, OsString>,
+    _session: SessionLease,
+}
+
+impl ForwardTransport {
+    pub(crate) fn spawn(&self, remote_port: u16) -> BridgeResult<tokio::process::Child> {
+        let mut command = Command::new(&self.executable);
+        command
+            .args(&self.policy.options)
+            .arg("-W")
+            .arg(format!("127.0.0.1:{remote_port}"))
+            .arg("--")
+            .arg(&self.host)
+            .envs(&self.environment)
+            .env("LC_ALL", "C")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        command.spawn().map_err(BridgeError::io)
+    }
+}
+
 impl SshRunner {
+    pub(crate) async fn prepare_forward_transport(
+        &self,
+        host: &str,
+        cancel: &CancellationToken,
+    ) -> BridgeResult<ForwardTransport> {
+        self.config.require_discovered_alias(host)?;
+        let limits = self.config.limits();
+        let deadline = connect_deadline(limits.connect_timeout_ms);
+        let initializer = self.initializer(host).await;
+        let _guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(cancelled_error(false, 0)),
+            guard = initializer.lock() => guard,
+            () = tokio::time::sleep_until(deadline) => return Err(connect_wait_timeout(host, "SSH forwarding setup timed out")),
+        };
+        let (policy, capability) = tokio::time::timeout_at(
+            deadline,
+            self.initialize_host(
+                host,
+                crate::REMOTE_OPERATION_ROOT,
+                remaining_connect_timeout_ms(deadline, host)?,
+                cancel,
+            ),
+        )
+        .await
+        .map_err(|_| connect_wait_timeout(host, "SSH forwarding setup timed out"))??;
+        let (session, _) = self
+            .session_for_host(&policy, host, limits, &capability, deadline, cancel)
+            .await?;
+        Ok(ForwardTransport {
+            host: host.to_owned(),
+            policy,
+            executable: self.executable.clone(),
+            environment: self.environment.clone(),
+            _session: session,
+        })
+    }
+
     pub fn new(
         config: Arc<Config>,
         runtime: RuntimePaths,

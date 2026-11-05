@@ -6,10 +6,11 @@ use serde_json::{Value, json};
 use crate::job_protocol::JobId;
 use crate::output::StreamKind;
 use crate::remote::{
-    ApplyPatchRequest, DiscardEditsRequest, EditStatusRequest, ListRequest, OutputReadRequest,
-    ReadRequest, RemoteBridge, RemoteJobIdRequest, RemoteJobListRequest, RemoteJobLogsRequest,
-    RemoteJobStartRequest, RemoteRunRequest, RunShell, RunStdin, SearchRequest, StatRequest,
-    SyncEditsRequest, ViewImageRequest, WriteEncoding, WriteMode, WriteRequest,
+    ApplyPatchRequest, CloseForwardRequest, DiscardEditsRequest, EditStatusRequest,
+    ForwardPortRequest, ListRequest, OutputReadRequest, ReadRequest, RemoteBridge,
+    RemoteJobIdRequest, RemoteJobListRequest, RemoteJobLogsRequest, RemoteJobStartRequest,
+    RemoteRunRequest, RunShell, RunStdin, SearchRequest, StatRequest, SyncEditsRequest,
+    ViewImageRequest, WriteEncoding, WriteMode, WriteRequest,
 };
 
 use super::{
@@ -48,6 +49,18 @@ impl ToolService for RemoteMcpTools {
                 ParsedToolArguments::Hosts(_) => {
                     let result = bridge.hosts().await;
                     super::render::hosts(bridge, result, wire_budget, cancel).await
+                }
+                ParsedToolArguments::ForwardPort(arguments) => {
+                    let result = bridge.forward_port(arguments, cancel).await;
+                    super::render::forward_port(result, wire_budget)
+                }
+                ParsedToolArguments::ListForwards(_) => {
+                    super::render::list_forwards(bridge.list_forwards(), wire_budget)
+                }
+                ParsedToolArguments::CloseForward(arguments) => {
+                    let forward_id = arguments.forward_id.clone();
+                    let closed = bridge.close_forward(arguments).await;
+                    super::render::close_forward(&forward_id, closed, wire_budget)
                 }
                 ParsedToolArguments::List(arguments) => {
                     let result = bridge
@@ -409,6 +422,37 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
                 &["host", "path"],
             ),
             annotations(true, false, true, true),
+        ),
+        definition(
+            "remote_forward_port",
+            "Forward a remote port",
+            "Listen on 127.0.0.1 on the machine running this bridge and forward TCP connections through the selected SSH alias to its 127.0.0.1:remote_port. If Codex runs on pi and host is tkmain, the listener is on pi, not on the user's laptop. Omit local_port to allocate a free port. Forward the returned local_port through the desktop client separately. This does not start the application: state listening only confirms the local listener and target_reachable is null (not checked). Survives this call and ends on close or MCP shutdown.",
+            object(
+                json!({
+                    "host":host_schema(),
+                    "remote_port":{"type":"integer", "minimum":1, "maximum":65535},
+                    "local_port":{"type":"integer", "minimum":1, "maximum":65535}
+                }),
+                &["host", "remote_port"],
+            ),
+            annotations(false, false, false, true),
+        ),
+        definition(
+            "remote_list_forwards",
+            "List port forwards",
+            "List TCP forwards owned by this bridge process. Local listeners belong to the bridge host, not necessarily the user's device. Target application reachability is not checked.",
+            object(json!({}), &[]),
+            annotations(true, false, true, false),
+        ),
+        definition(
+            "remote_close_forward",
+            "Close a port forward",
+            "Close a forward owned by this bridge process, including its active TCP connections. Repeated close returns closed false. Does not stop the remote application.",
+            object(
+                json!({"forward_id":{"type":"string", "minLength":1, "maxLength":64}}),
+                &["forward_id"],
+            ),
+            annotations(false, true, true, false),
         ),
         definition(
             "remote_output_read",
@@ -868,6 +912,9 @@ enum ToolWriteMode {
 #[derive(Debug)]
 enum ParsedToolArguments {
     Hosts(HostsArgs),
+    ForwardPort(ForwardPortRequest),
+    ListForwards(HostsArgs),
+    CloseForward(CloseForwardRequest),
     List(ListArgs),
     Stat(StatArgs),
     Search(SearchArgs),
@@ -904,6 +951,9 @@ fn parse_tool_arguments(
     }
     let parsed = match name {
         "remote_hosts" => deserialize(arguments).map(ParsedToolArguments::Hosts),
+        "remote_forward_port" => deserialize(arguments).map(ParsedToolArguments::ForwardPort),
+        "remote_list_forwards" => deserialize(arguments).map(ParsedToolArguments::ListForwards),
+        "remote_close_forward" => deserialize(arguments).map(ParsedToolArguments::CloseForward),
         "remote_list" => deserialize(arguments).map(ParsedToolArguments::List),
         "remote_stat" => deserialize(arguments).map(ParsedToolArguments::Stat),
         "remote_search" => deserialize(arguments).map(ParsedToolArguments::Search),
@@ -939,7 +989,17 @@ fn validate_parsed_arguments(
 ) -> Result<(), ArgumentValidationCategory> {
     use ArgumentValidationCategory::Constraint;
     match arguments {
-        ParsedToolArguments::Hosts(_) => Ok(()),
+        ParsedToolArguments::Hosts(_) | ParsedToolArguments::ListForwards(_) => Ok(()),
+        ParsedToolArguments::ForwardPort(arguments) => {
+            validate_host(&arguments.host)?;
+            if arguments.remote_port == 0 || arguments.local_port == Some(0) {
+                return Err(Constraint);
+            }
+            Ok(())
+        }
+        ParsedToolArguments::CloseForward(arguments) => {
+            validate_chars(&arguments.forward_id, 1, 64)
+        }
         ParsedToolArguments::List(arguments) => {
             validate_host(&arguments.host)?;
             validate_path(&arguments.path)?;

@@ -23,6 +23,44 @@ const MODEL_INLINE_RESULT_BYTES: usize = 32 * 1024;
 const SAFE_TEXT_BYTES: usize = 1_024;
 const MAX_WARNINGS: usize = 16;
 
+pub fn forward_port(
+    result: crate::BridgeResult<crate::remote::PortForward>,
+    budget: WireBudget,
+) -> CallToolResult {
+    match result {
+        Ok(info) => {
+            let text = format!(
+                "{}: bridge host 127.0.0.1:{} -> {} 127.0.0.1:{}; target application not checked",
+                info.forward_id, info.local_port, info.host, info.remote_port,
+            );
+            bounded_text_result(text, json!(info), false, true, budget)
+        }
+        Err(error) => render_error(error, budget),
+    }
+}
+
+pub fn list_forwards(
+    forwards: Vec<crate::remote::PortForward>,
+    budget: WireBudget,
+) -> CallToolResult {
+    let text = forwards
+        .iter()
+        .map(|info| serde_json::to_string(info).expect("forward serializable"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bounded_text_result(text, json!({"count":forwards.len()}), false, true, budget)
+}
+
+pub fn close_forward(forward_id: &str, closed: bool, budget: WireBudget) -> CallToolResult {
+    bounded_text_result(
+        format!("{forward_id}: closed {closed}"),
+        json!({"forward_id":forward_id, "closed":closed}),
+        false,
+        true,
+        budget,
+    )
+}
+
 pub(super) fn view_image(
     result: crate::error::BridgeResult<crate::remote::ViewedImage>,
     budget: WireBudget,
